@@ -1,4 +1,13 @@
 import { UUID_RE } from '@/lib/invariants/uuid'
+import {
+  ENTITY_TYPES,
+  ENTITY_TYPE_LABELS_SV,
+  creatableEntityTypes,
+  fiscalYearLockedToCalendar,
+  isEntityType,
+  parseEntityType,
+  resolveCompanyEntityType,
+} from '@/lib/company/entity-type'
 import { NextResponse, after } from 'next/server'
 import {
   TASKS_EXTENSION_ID,
@@ -25,7 +34,7 @@ import { CompanySetupSchema, planCompanySetup } from '@/lib/company/onboarding-i
 import { lookupCompanyByOrgNumber } from '@/extensions/general/tic/lib/lookup'
 import { TICAPIError } from '@/extensions/general/tic/lib/tic-types'
 import { normalizeOrgNumber } from '@/lib/company-lookup/normalize-org-number'
-import { mapEntityType } from '@/lib/company-lookup/entity-type-map'
+import { mapSetupEntityType } from '@/lib/company-lookup/entity-type-map'
 import { deriveFirstYearDefaults, parseStartMonthDay } from '@/lib/company/first-year-defaults'
 import {
   ANONYMOUS_METHODS,
@@ -60,6 +69,7 @@ import { formatVoucherLabel, hasLiveJournalEntryLink } from '@/lib/transactions/
 import { hasBankLineJunctionRow } from '@/lib/transactions/is-booked'
 import { setTransactionIgnored } from '@/lib/transactions/ignore'
 import { canApproveSupplierInvoice } from '@/lib/supplier-invoices/lifecycle'
+import { backfillSupplierPaymentDetails, type SupplierPaymentDetails } from '@/lib/supplier-invoices/payment-details-backfill'
 import { eventBus } from '@/lib/events/bus'
 import { getVatRules, getPermittedVatRates, getArticleVatRateAdoptionSet } from '@/lib/invoices/vat-rules'
 import { validateDeductionLines } from '@/lib/invoices/rot-rut-rules'
@@ -277,6 +287,9 @@ import { generateFullArchive, estimateArchiveSize } from '@/lib/reports/full-arc
 import { CorrectionChainTooDeepError } from '@/lib/bookkeeping/errors'
 import { correctionChainDepth, CORRECTION_CHAIN_GUARD_DEPTH } from '@/lib/core/bookkeeping/correction-chain'
 import { getSuggestedCategories, buildMerchantHistory, merchantHistoryFor } from '@/lib/transactions/category-suggestions'
+import { proposeForTransactions } from '@/lib/transactions/propose'
+import { agentBookingFor, businessAccount, whyTextSv } from '@/lib/bookkeeping/proposal'
+import { booksWithoutReview } from '@/lib/transactions/direct-booking'
 import { detectBookingDuplicate } from '@/lib/transactions/booking-duplicate-detection'
 import { buildDuplicateBookingClaim } from '@/lib/transactions/categorize-core'
 import { findDuplicatePaymentCandidatesForInvoice } from '@/lib/invoices/duplicate-payment-candidates'
@@ -1444,7 +1457,7 @@ async function categorizeTransactionCore(
     .eq('company_id', companyId)
     .single()
 
-  const entityType: EntityType = (settings?.entity_type as EntityType) || 'enskild_firma'
+  const entityType: EntityType = await resolveCompanyEntityType(supabase, companyId, settings?.entity_type)
 
   // Build mapping
   let mappingResult = buildMappingResultFromCategory(
@@ -2641,17 +2654,69 @@ async function countMissingUnderlagInPeriod(
 }
 
 /**
+ * The company's fiscal period that contains an ISO date, or null. A date in a
+ * report call names the year the caller wants: "resultatrapporten för 2023"
+ * arrives as from_date/to_date, not as a period_id the model would first
+ * have to look up (#2185).
+ */
+async function findFiscalPeriodContaining(
+  supabase: SupabaseClient,
+  companyId: string,
+  date: string,
+): Promise<{ id: string; name: string; period_start: string; period_end: string } | null> {
+  const { data } = await supabase
+    .from('fiscal_periods')
+    .select('id, name, period_start, period_end')
+    .eq('company_id', companyId)
+    .lte('period_start', date)
+    .gte('period_end', date)
+    .order('period_start', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return data ?? null
+}
+
+/** "the company's fiscal periods span A to B", for an error that names a date no period covers. */
+async function describeFiscalPeriodSpan(supabase: SupabaseClient, companyId: string): Promise<string> {
+  const { data } = await supabase
+    .from('fiscal_periods')
+    .select('period_start, period_end')
+    .eq('company_id', companyId)
+    .order('period_start', { ascending: true })
+  const rows = (data ?? []) as { period_start: string; period_end: string }[]
+  if (rows.length === 0) return 'the company has no fiscal periods'
+  return `the company's fiscal periods span ${rows[0].period_start} to ${rows[rows.length - 1].period_end}`
+}
+
+/**
  * Resolve the fiscal period a report tool runs against: the caller's
- * `period_id` when given, else the company's most recent period. The period
- * is then re-read scoped to the company, so a foreign id never resolves.
+ * `period_id` when given; else, when the call carries a date (from_date,
+ * as_of_date, ...), the period that contains that date; else the company's
+ * most recent period. An explicit id is re-read scoped to the company, so a
+ * foreign id never resolves.
+ *
+ * The date fallback exists because the previous default (most recent period,
+ * then a loud range check) made every question about an earlier year fail
+ * unless the model had first looked up that year's UUID (#2185).
  */
 async function resolveReportPeriod(
   supabase: SupabaseClient,
   companyId: string,
   periodIdArg: unknown,
   noPeriodsMessage: string,
+  dateHint?: unknown,
 ) {
   let periodId = periodIdArg as string | undefined
+
+  if (!periodId && typeof dateHint === 'string' && ISO_DATE_RE.test(dateHint)) {
+    const containing = await findFiscalPeriodContaining(supabase, companyId, dateHint)
+    if (containing) return containing
+    const span = await describeFiscalPeriodSpan(supabase, companyId)
+    throw new Error(
+      `No fiscal period contains ${dateHint}: ${span}. ` +
+      `Pass a date inside one of them, or that period's period_id (gnubok_list_fiscal_periods).`,
+    )
+  }
 
   if (!periodId) {
     const { data: periods } = await supabase
@@ -2766,9 +2831,7 @@ export async function computeVatCloseCheck(
     .eq('company_id', companyId)
     .single()
   const momsPeriod = (settings?.moms_period as 'monthly' | 'quarterly' | 'yearly' | null) ?? null
-  const entityType = settings?.entity_type === 'aktiebolag' || settings?.entity_type === 'enskild_firma'
-    ? settings.entity_type
-    : null
+  const entityType = isEntityType(settings?.entity_type) ? settings.entity_type : null
   // 3) Deadline: based on the *requested* period type, not company setting,
   //    so the model gets the right deadline even when querying ad-hoc periods.
   //    Never turn missing settings into a plausible statutory date. Monthly
@@ -2795,10 +2858,11 @@ export async function computeVatCloseCheck(
       : null
     const reportEndMonth = Number(end.slice(5, 7))
     const reportStartMonth = reportEndMonth === 12 ? 1 : reportEndMonth + 1
-    const fiscalYearMatches = entityType === 'enskild_firma'
+    const calendarYearOnly = fiscalYearLockedToCalendar(entityType)
+    const fiscalYearMatches = calendarYearOnly
       ? reportEndMonth === 12
       : configuredStartMonth === reportStartMonth
-    const filingMethodRequired = entityType === 'aktiebolag' && settings.vat_has_eu_trade === false
+    const filingMethodRequired = !calendarYearOnly && settings.vat_has_eu_trade === false
     const filingProfileComplete = typeof settings.vat_has_eu_trade === 'boolean'
       && (!filingMethodRequired
         || settings.vat_filing_method === 'electronic'
@@ -3698,7 +3762,7 @@ export const tools: McpTool[] = [
 
       const askEverything = [
         'name',
-        'entity_type (enskild firma or aktiebolag)',
+        'entity_type (enskild_firma, aktiebolag or ideell_forening)',
         'f_skatt',
         'vat_registered (and moms_period if yes)',
         'accounting_method (accrual or cash)',
@@ -3736,7 +3800,7 @@ export const tools: McpTool[] = [
         }
       }
 
-      const entityType = mapEntityType(lookup.legalEntityType)
+      const entityType = mapSetupEntityType(lookup.legalEntityType)
       const warnings: string[] = []
       if (lookup.isCeased) {
         warnings.push(
@@ -3745,7 +3809,7 @@ export const tools: McpTool[] = [
       }
       if (!entityType) {
         warnings.push(
-          `Legal form "${lookup.legalEntityType ?? 'unknown'}" is not supported for automatic setup: only enskild firma and aktiebolag can be created here.`
+          `Legal form "${lookup.legalEntityType ?? 'unknown'}" is not supported for automatic setup: only ${creatableEntityTypes().map((t) => ENTITY_TYPE_LABELS_SV[t]).join(', ')} can be created here.`
         )
       }
 
@@ -3757,7 +3821,7 @@ export const tools: McpTool[] = [
       // accounting method are ALWAYS the user's answer.
       const vatIsFact = lookup.registration.vat === true
       const stillToAsk: string[] = []
-      if (!entityType) stillToAsk.push('entity_type (enskild firma or aktiebolag)')
+      if (!entityType) stillToAsk.push('entity_type (enskild_firma, aktiebolag or ideell_forening)')
       if (entityType === 'enskild_firma') {
         stillToAsk.push(
           'name: for enskild firma the verksamhetsnamn is freely choosable; suggest the registered name but let the user pick'
@@ -3850,7 +3914,7 @@ export const tools: McpTool[] = [
       additionalProperties: false,
       properties: {
         name: { type: 'string', minLength: 1, maxLength: 200 },
-        entity_type: { type: 'string', enum: ['enskild_firma', 'aktiebolag'] },
+        entity_type: { type: 'string', enum: [...ENTITY_TYPES] },
         org_number: { type: 'string', description: '10 digits; required when VAT-registered' },
         vat_registered: { type: 'boolean' },
         moms_period: { type: 'string', enum: ['monthly', 'quarterly', 'yearly'], description: 'Required when vat_registered' },
@@ -7225,7 +7289,7 @@ export const tools: McpTool[] = [
         actor,
         isQuote
           ? {
-              description: 'Once approved, the quote exists as an open offert with its OF-number. Record the customer decision with gnubok_set_quote_status; gnubok_convert_invoice creates the faktura from it.',
+              description: 'Once approved, the quote exists as an open offert with its OF-number. Record the customer decision with gnubok_set_quote_status; gnubok_convert_invoice creates the faktura (or, with target order, a kundorder) from it.',
               tool: 'gnubok_convert_invoice',
             }
           : {
@@ -7329,7 +7393,7 @@ export const tools: McpTool[] = [
       additionalProperties: false,
       properties: {
         ...SALES_ORDER_SUMMARY_PROPS,
-        source_invoice_id: { type: ['string', 'null'], description: 'Proforma the order was converted from, if any' },
+        source_invoice_id: { type: ['string', 'null'], description: 'Proforma or offert the order was converted from, if any' },
         your_reference: { type: ['string', 'null'] },
         our_reference: { type: ['string', 'null'] },
         notes: { type: ['string', 'null'] },
@@ -8189,7 +8253,13 @@ export const tools: McpTool[] = [
     },
     annotations: ANNOTATIONS_READ_ONLY,
     async execute(args, companyId, userId, supabase) {
-      const period = await resolveReportPeriod(supabase, companyId, args.period_id, 'No fiscal periods found. Categorize some transactions first.')
+      const period = await resolveReportPeriod(
+        supabase,
+        companyId,
+        args.period_id,
+        'No fiscal periods found. Categorize some transactions first.',
+        args.from_date ?? args.to_date,
+      )
 
       rejectUnknownArgs(args, ['period_id', 'from_date', 'to_date', 'dimensions'])
       const range = parseReportRangeArgs(args, period, { from: 'from_date', to: 'to_date' })
@@ -8995,7 +9065,7 @@ export const tools: McpTool[] = [
     name: 'gnubok_suggest_categories',
     keywords: ['konteringsförslag', 'kontering', 'kategorisera'],
     title: 'Suggest Transaction Categories',
-    description: 'Suggest categories for uncategorized transactions using mapping rules, patterns, counterparty history and templates. Up to 20 per call. no_signal_transaction_ids = nothing matched; investigate via gnubok_query_journal instead of guessing.',
+    description: 'Booking proposals for uncategorized transactions, best first per tx_id: why, confidence, books_without_review, categorize_args.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -9014,13 +9084,17 @@ export const tools: McpTool[] = [
       properties: {
         suggestions: { type: 'object' },
         counterparty_matches: { type: 'object' },
+        proposals: {
+          type: 'object',
+          description: 'tx_id -> proposals; book with categorize_args.',
+        },
         no_signal_transaction_ids: {
           type: 'array',
           items: { type: 'string' },
           description: 'Transactions where no source (rule, pattern, counterparty history, template) matched. An honest empty: do not infer categories from the other rows; investigate the counterparty (e.g. gnubok_query_journal) instead.',
         },
       },
-      required: ['suggestions', 'counterparty_matches', 'no_signal_transaction_ids'],
+      required: ['suggestions', 'counterparty_matches', 'proposals', 'no_signal_transaction_ids'],
     },
     annotations: ANNOTATIONS_READ_ONLY,
     async execute(args, companyId, userId, supabase) {
@@ -9102,9 +9176,33 @@ export const tools: McpTool[] = [
         .filter((tx) => (suggestions[tx.id]?.length ?? 0) === 0 && !counterpartyResult[tx.id])
         .map((tx) => tx.id)
 
+      // The same proposals the app shows a person, with the arguments this
+      // agent books them with: one recommendation, the same evidence, the
+      // same booking (lib/transactions/propose.ts, lib/bookkeeping/proposal.ts).
+      const { data: companyRow } = await supabase.from('companies').select('entity_type').eq('id', companyId).maybeSingle()
+      const entityType = (companyRow?.entity_type as EntityType | undefined) ?? undefined
+      const { proposals: proposed } = await proposeForTransactions(supabase, companyId, transactions as Transaction[])
+      const proposals: Record<string, unknown[]> = {}
+      for (const tx of transactions as Transaction[]) {
+        proposals[tx.id] = (proposed[tx.id] ?? [])
+          .filter((p) => p.source !== 'recent')
+          .map((p) => ({
+            id: p.template_id,
+            source: p.source,
+            label: p.name_sv,
+            why: whyTextSv(p),
+            confidence: p.confidence,
+            books_without_review: booksWithoutReview(p),
+            account: businessAccount(p),
+            vat_treatment: p.booking.kind === 'account' ? p.booking.vat_treatment : (p.vat_treatment ?? null),
+            categorize_args: agentBookingFor(p, entityType),
+          }))
+      }
+
       return {
         suggestions,
         counterparty_matches: counterpartyResult,
+        proposals,
         no_signal_transaction_ids: noSignal,
       }
     },
@@ -10115,6 +10213,20 @@ export const tools: McpTool[] = [
       }
 
       let periodId = args.period_id as string | undefined
+      const toDate = args.to_date as string | undefined
+
+      // No period but a date: the period that contains the date (#2185).
+      if (!periodId && typeof toDate === 'string' && ISO_DATE_RE.test(toDate)) {
+        periodId = (
+          await resolveReportPeriod(
+            supabase,
+            companyId,
+            undefined,
+            'No fiscal periods found. Categorize some transactions first to auto-create a period.',
+            toDate,
+          )
+        ).id
+      }
 
       // If no period specified, find the most recent one (same default as
       // gnubok_get_trial_balance).
@@ -10132,8 +10244,6 @@ export const tools: McpTool[] = [
         }
         periodId = periods.id
       }
-
-      const toDate = args.to_date as string | undefined
 
       return await generateDimensionPnl(supabase, companyId, periodId!, sieDimNo, { toDate })
     },
@@ -10157,7 +10267,13 @@ export const tools: McpTool[] = [
     outputSchema: { type: 'object' },
     annotations: ANNOTATIONS_READ_ONLY,
     async execute(args, companyId, userId, supabase) {
-      const period = await resolveReportPeriod(supabase, companyId, args.period_id, 'No fiscal periods found. Create one first.')
+      const period = await resolveReportPeriod(
+        supabase,
+        companyId,
+        args.period_id,
+        'No fiscal periods found. Create one first.',
+        args.as_of_date,
+      )
 
       rejectUnknownArgs(args, ['period_id', 'as_of_date'])
       const range = parseReportRangeArgs(args, period, { to: 'as_of_date' })
@@ -13656,6 +13772,13 @@ export const tools: McpTool[] = [
       }
       const supplierDefaultExpenseAccount = resolvedSupplier.default_expense_account ?? null
 
+      // The scan read the supplier's giro or IBAN with everything else: a
+      // supplier that lacks them takes them now, so the staged invoice can
+      // go into a betalfil once approved. A write, so never on a dry run.
+      if (!dryRun) {
+        await backfillSupplierPaymentDetails(supabase, companyId, supplierId, supplierExt as SupplierPaymentDetails | null)
+      }
+
       // Assemble core invoice fields
       const currency = (invoiceExt?.currency as string) || 'SEK'
       for (const key of ['invoice_date_override', 'due_date_override'] as const) {
@@ -15570,7 +15693,7 @@ export const tools: McpTool[] = [
       const { data: e, error } = await supabase
         .from('employees')
         .select(
-          'id, first_name, last_name, personnummer, employment_type, employment_start, employment_end, employment_degree, hours_per_week, workdays_per_week, salary_type, monthly_salary, hourly_rate, tax_table_number, tax_column, tax_municipality, is_sidoinkomst, f_skatt_status, f_skatt_verified_at, jamkning_percentage, jamkning_valid_from, jamkning_valid_to, clearing_number, bank_account_number, vacation_rule, vacation_days_per_year, vacation_days_saved, semestertillagg_rate, vaxa_stod_eligible, vaxa_stod_start, vaxa_stod_end, default_dimensions, is_active',
+          'id, first_name, last_name, personnummer, employment_type, employment_start, employment_end, employment_degree, hours_per_week, workdays_per_week, salary_type, monthly_salary, hourly_rate, tax_table_number, tax_column, tax_municipality, is_sidoinkomst, f_skatt_status, f_skatt_verified_at, jamkning_percentage, jamkning_valid_from, jamkning_valid_to, clearing_number, bank_account_number, vacation_rule, vacation_days_per_year, vacation_days_saved, semestertillagg_rate, vacation_pay_rate, vaxa_stod_eligible, vaxa_stod_start, vaxa_stod_end, default_dimensions, is_active',
         )
         .eq('id', employeeId)
         .eq('company_id', companyId)
@@ -15613,6 +15736,7 @@ export const tools: McpTool[] = [
           vacation_days_per_year: e.vacation_days_per_year,
           vacation_days_saved: e.vacation_days_saved,
           semestertillagg_rate: e.semestertillagg_rate,
+          vacation_pay_rate: e.vacation_pay_rate ?? null,
         },
         vaxa_stod: {
           eligible: e.vaxa_stod_eligible,
@@ -16203,7 +16327,7 @@ export const tools: McpTool[] = [
     name: 'gnubok_create_employee',
     keywords: ['anställd', 'ny anställd', 'personal'],
     title: 'Create Employee',
-    description: 'Stage creation of a new employee: salary, tax table, bank details, vacation rule. Personnummer is encrypted at staging and never stored in plaintext. Commit via gnubok_approve_pending_operation; then attach to a salary run.',
+    description: 'Stage a new employee (salary, tax table, bank, vacation). Personnummer is encrypted at staging. Commit via gnubok_approve_pending_operation, then attach to a salary run.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -16229,6 +16353,7 @@ export const tools: McpTool[] = [
         bank_account_number: { type: 'string' },
         vacation_rule: { type: 'string', enum: ['procentregeln', 'sammaloneregeln', 'semesterersattning', 'none'] },
         vacation_days_per_year: { type: 'number' },
+        vacation_pay_rate: { type: ['number', 'null'], description: 'CBA semesterlön fraction 0.12-0.30 (0.135 = 13.5 %); null = statutory' },
         email: { type: 'string' },
         phone: { type: 'string' },
         vaxa_stod_eligible: { type: 'boolean' },
@@ -16240,7 +16365,7 @@ export const tools: McpTool[] = [
         default_dimensions: {
           type: 'object',
           additionalProperties: { type: 'string' },
-          description: 'Dims bag {sie_dim_no: kod eller namn} tagging this employee\'s salary cost lines on every run. Never auto-created.',
+          description: 'Dims bag {sie_dim_no: kod eller namn} on this employee\'s salary cost lines every run. Never auto-created.',
         },
       },
       required: ['first_name', 'last_name', 'personnummer', 'employment_start'],
@@ -16316,7 +16441,7 @@ export const tools: McpTool[] = [
     name: 'gnubok_update_employee',
     keywords: ['anställd', 'ändra anställd', 'personal'],
     title: 'Update Employee',
-    description: 'Stage an update to an employee\'s payroll config: salary, tax, bank details, vacation rule, jamkning, vaxa-stod. Personnummer cannot be changed. Call gnubok_get_employee first to see current values; commit via gnubok_approve_pending_operation.',
+    description: 'Stage an employee payroll update (salary, tax, bank, vacation, jamkning, vaxa-stod); personnummer is immutable. gnubok_get_employee first; commit via gnubok_approve_pending_operation.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -16342,9 +16467,10 @@ export const tools: McpTool[] = [
         bank_account_number: { type: 'string' },
         vacation_rule: { type: 'string', enum: ['procentregeln', 'sammaloneregeln', 'semesterersattning', 'none'] },
         vacation_days_per_year: { type: 'number' },
+        vacation_pay_rate: { type: ['number', 'null'] },
         email: { type: 'string' },
         phone: { type: 'string' },
-        is_active: { type: 'boolean', description: 'false soft-deactivates (BFL retention keeps the row)' },
+        is_active: { type: 'boolean', description: 'false soft-deactivates; row kept (BFL)' },
         vaxa_stod_eligible: { type: 'boolean' },
         vaxa_stod_start: { type: 'string' },
         vaxa_stod_end: { type: 'string' },
@@ -16354,7 +16480,7 @@ export const tools: McpTool[] = [
         default_dimensions: {
           type: 'object',
           additionalProperties: { type: 'string' },
-          description: 'Dims bag {sie_dim_no: kod eller namn} tagging salary cost lines. Replaces the whole bag; {} clears all tags. Omit to keep.',
+          description: 'Dims bag {sie_dim_no: kod eller namn} on salary cost lines; replaces the bag, {} clears, omit to keep',
         },
       },
       required: ['employee_id'],
@@ -16663,7 +16789,7 @@ export const tools: McpTool[] = [
       const { dayValueSek } = await import('@/lib/salary/semesterberedning')
       const { data: employee, error: empErr } = await supabase
         .from('employees')
-        .select('vacation_rule, vacation_days_per_year, salary_type, monthly_salary, hourly_rate, hours_per_week, workdays_per_week')
+        .select('vacation_rule, vacation_days_per_year, vacation_pay_rate, semestertillagg_rate, salary_type, monthly_salary, hourly_rate, hours_per_week, workdays_per_week')
         .eq('id', employeeId)
         .eq('company_id', companyId)
         .maybeSingle()
@@ -17926,7 +18052,7 @@ export const tools: McpTool[] = [
         companyId,
         period,
         nextPeriod.id,
-        (settings.entity_type ?? 'aktiebolag') as EntityType,
+        parseEntityType(settings.entity_type),
       )
       if (assessment.collection.unknownVatTreatment.length > 0) {
         throw new Error(
@@ -17956,7 +18082,7 @@ export const tools: McpTool[] = [
       }
 
       const reversalDate = nextDay(period.period_end)
-      const entityType = (settings.entity_type ?? 'aktiebolag') as EntityType
+      const entityType = parseEntityType(settings.entity_type)
       const entries = [
         ...(assessment.lines.receivableLines.length > 0 &&
         !assessment.postings.receivableEntryId &&
@@ -18463,13 +18589,20 @@ export const tools: McpTool[] = [
 
   {
     name: 'gnubok_convert_invoice',
-    keywords: ['proforma', 'offert', 'quote', 'kundfaktura', 'omvandla'],
-    title: 'Convert Proforma or Quote to Invoice',
-    description: 'Stage conversion of a proforma or quote (offert) to a real invoice (F-number, items copied). Proforma is cancelled; the quote stays as accepted.',
+    keywords: ['proforma', 'offert', 'quote', 'kundfaktura', 'kundorder', 'omvandla'],
+    title: 'Convert Proforma or Quote to Invoice or Order',
+    description: 'Stage conversion of a proforma or quote (offert) to a real invoice (F-number, items copied) or, with target order, to a draft kundorder. Proforma is cancelled; the quote stays accepted.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
-      properties: { invoice_id: { type: 'string', description: 'Proforma or quote UUID' } },
+      properties: {
+        invoice_id: { type: 'string', description: 'Proforma or quote UUID' },
+        target: {
+          type: 'string',
+          enum: ['invoice', 'order'],
+          description: 'invoice (default) creates the faktura; order creates a draft kundorder to deliver and invoice from.',
+        },
+      },
       required: ['invoice_id'],
     },
     outputSchema: STAGED_OPERATION_SCHEMA,
@@ -18477,6 +18610,9 @@ export const tools: McpTool[] = [
     async execute(args, companyId, userId, supabase, actor) {
       const id = args.invoice_id as string
       if (!id) throw new Error('invoice_id is required')
+      const target = (args.target as string | undefined) ?? 'invoice'
+      if (target !== 'invoice' && target !== 'order') throw new Error('target must be invoice or order')
+      const toOrder = target === 'order'
 
       const { data: inv } = await supabase
         .from('invoices')
@@ -18484,10 +18620,25 @@ export const tools: McpTool[] = [
         .eq('id', id).eq('company_id', companyId).single()
       if (!inv) throw registryError('INVOICE_NOT_FOUND')
       const isQuote = inv.document_type === 'quote'
-      // Same pre-checks as convertToInvoice (the commit path), so the agent
-      // gets the registry code at staging time instead of a failed approval.
-      if (inv.document_type !== 'proforma' && !isQuote) throw registryError('INVOICE_CONVERT_NOT_CONVERTIBLE')
-      if (inv.status === 'cancelled') throw registryError('INVOICE_CONVERT_SOURCE_CANCELLED')
+      // Same pre-checks as convertToInvoice / convertToSalesOrder (the commit
+      // paths), so the agent gets the registry code at staging time instead
+      // of a failed approval.
+      if (inv.document_type !== 'proforma' && !isQuote) {
+        throw registryError(toOrder ? 'SALES_ORDER_SOURCE_NOT_PROFORMA' : 'INVOICE_CONVERT_NOT_CONVERTIBLE')
+      }
+      if (inv.status === 'cancelled') {
+        throw registryError(toOrder ? 'SALES_ORDER_SOURCE_ALREADY_CONVERTED' : 'INVOICE_CONVERT_SOURCE_CANCELLED')
+      }
+      if (toOrder) {
+        const { count: liveOrders, error: ordersError } = await supabase
+          .from('sales_orders')
+          .select('id', { count: 'exact', head: true })
+          .eq('company_id', companyId)
+          .eq('source_invoice_id', id)
+          .neq('status', 'cancelled')
+        if (ordersError) throw dbError(ordersError)
+        if ((liveOrders ?? 0) > 0) throw registryError('SALES_ORDER_SOURCE_ALREADY_CONVERTED')
+      }
       if (isQuote) {
         if (inv.quote_status === 'declined') throw registryError('INVOICE_CONVERT_QUOTE_DECLINED')
         const { data: converted, error: convertedError } = await supabase
@@ -18500,30 +18651,47 @@ export const tools: McpTool[] = [
           .maybeSingle()
         if (convertedError) throw dbError(convertedError)
         if (converted) throw registryError('INVOICE_QUOTE_ALREADY_INVOICED')
+        if (!toOrder) {
+          const { count: liveOrders, error: ordersError } = await supabase
+            .from('sales_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('company_id', companyId)
+            .eq('source_invoice_id', id)
+            .neq('status', 'cancelled')
+          if (ordersError) throw dbError(ordersError)
+          if ((liveOrders ?? 0) > 0) throw registryError('INVOICE_QUOTE_ALREADY_ORDERED')
+        }
       }
 
       const customerName = (inv.customer as { name?: string } | null)?.name ?? 'okänd kund'
       const amount = `${roundOre(Number(inv.total))} ${inv.currency}`
+      const sourceLabel = isQuote ? 'offert' : 'proforma'
+      const targetLabel = toOrder ? 'kundorder' : 'faktura'
+      const sourceUpdate = isQuote ? 'mark the quote accepted (the quote stays)' : 'cancel proforma'
       return stagePendingOperation(supabase, companyId, userId, 'convert_invoice',
-        isQuote
-          ? `Konvertera offert → faktura: ${inv.invoice_number ?? ''} ${customerName} ${amount}`.replace(/\s+/g, ' ')
-          : `Konvertera proforma → faktura: ${customerName} ${amount}`,
-        { invoice_id: id },
+        `Konvertera ${sourceLabel} → ${targetLabel}: ${isQuote ? inv.invoice_number ?? '' : ''} ${customerName} ${amount}`.replace(/\s+/g, ' '),
+        toOrder ? { invoice_id: id, target: 'order' } : { invoice_id: id },
         {
           customer_name: (inv.customer as { name?: string } | null)?.name,
           source_document_type: inv.document_type,
           source_invoice_number: inv.invoice_number ?? null,
+          target,
           total: inv.total,
           currency: inv.currency,
-          will: isQuote
-            ? 'allocate F-series number, copy items, mark the quote accepted (the quote stays)'
-            : 'allocate F-series number, copy items, cancel proforma',
+          will: toOrder
+            ? `allocate OR-series number, copy items into a draft kundorder, ${sourceUpdate}`
+            : `allocate F-series number, copy items, ${sourceUpdate}`,
         },
         actor,
-        {
-          description: 'After conversion, send the new invoice with gnubok_send_invoice.',
-          tool: 'gnubok_send_invoice',
-        }
+        toOrder
+          ? {
+              description: 'After conversion, confirm the draft order with gnubok_transition_sales_order, then invoice deliveries with gnubok_create_invoice_from_sales_order.',
+              tool: 'gnubok_transition_sales_order',
+            }
+          : {
+              description: 'After conversion, send the new invoice with gnubok_send_invoice.',
+              tool: 'gnubok_send_invoice',
+            }
       )
     },
   },
@@ -18532,7 +18700,7 @@ export const tools: McpTool[] = [
     name: 'gnubok_set_quote_status',
     keywords: ['offert', 'quote', 'accepterad', 'avböjd', 'godkänn offert'],
     title: 'Set Quote Status',
-    description: 'Record the customer decision on a quote (offert): open, accepted or declined. Locked once invoiced; expired is derived from valid_until.',
+    description: 'Record the customer decision on a quote (offert): open, accepted or declined. Locked once invoiced or ordered; expired is derived from valid_until.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -18613,6 +18781,9 @@ export const tools: McpTool[] = [
         // trg_invoices_quote_decision_guard: a conversion landed in between.
         if (updateError.message?.includes('INVOICE_QUOTE_ALREADY_INVOICED')) {
           throw registryError('INVOICE_QUOTE_ALREADY_INVOICED')
+        }
+        if (updateError.message?.includes('INVOICE_QUOTE_ALREADY_ORDERED')) {
+          throw registryError('INVOICE_QUOTE_ALREADY_ORDERED')
         }
         throw dbError(updateError)
       }
@@ -19368,6 +19539,21 @@ export const tools: McpTool[] = [
           : allWarnings.length > 0 || orgMatch.match === false
             ? 'ok_with_warnings'
             : 'ok'
+      // Structured twins of the warning strings, with the tier the drop
+      // widget renders (lib/import/notices.ts): a wrong organisation number
+      // is a blocking action, mis-encoded text an action, the rest notices.
+      // Each carries its Swedish text so the widget needs no i18n.
+      const notices: Array<{ code: string; severity: 'info' | 'notice' | 'action'; text: string; blocking?: boolean }> = []
+      if (orgMatch.match === false) {
+        notices.push({
+          code: 'sie_org_mismatch',
+          severity: 'action',
+          blocking: true,
+          text: `Filen tillhör organisationsnummer ${orgMatch.file_org_number ?? '?'}, inte det här företaget (${orgMatch.company_org_number ?? '?'}).`,
+        })
+      }
+      for (const w of encodingWarnings) notices.push({ code: 'sie_encoding_artifacts', severity: 'action', text: w })
+      for (const w of validation.warnings) notices.push({ code: 'legacy', severity: 'notice', text: w })
 
       return {
         verdict,
@@ -19383,7 +19569,7 @@ export const tools: McpTool[] = [
           transaction_line_count: parsed.stats.totalTransactionLines,
           opening_balance_total: preview.openingBalanceTotal ?? null,
         },
-        validation: { valid: validation.valid, errors: validation.errors, warnings: allWarnings },
+        validation: { valid: validation.valid, errors: validation.errors, warnings: allWarnings, notices },
         org_number_match: orgMatch,
         duplicate,
         mappings,

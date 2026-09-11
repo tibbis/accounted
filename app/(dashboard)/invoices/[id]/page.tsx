@@ -99,6 +99,7 @@ import { openDeferredTab } from '@/lib/browser/deferred-tab'
 import { useBranding } from '@/lib/branding/brand-context'
 import { getCountryName } from '@/lib/vat/country-codes'
 import { DetailPageSkeleton } from '@/components/common/DetailPageSkeleton'
+import { useShell } from '@/components/dashboard/ShellProvider'
 
 /** Minimized Peppol delivery projection from GET /api/invoices/[id]/peppol/deliveries. */
 interface PeppolDeliveryView {
@@ -162,6 +163,7 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   const canEmail = useCapability(CAPABILITY.email_send)
   const { id } = use(params)
   const router = useRouter()
+  const shell = useShell()
   const { toast } = useToast()
   const supabase = createClient()
   const t = useTranslations('invoice_detail')
@@ -235,6 +237,10 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   // Offert: the invoice created from this quote (converted_from_id points
   // back here), and the accept/decline round trip.
   const [quoteInvoice, setQuoteInvoice] = useState<Invoice | null>(null)
+  // Offert -> kundorder: the live order created from this quote, if any. Its
+  // presence locks the decision and moves invoicing to the order.
+  const [quoteOrder, setQuoteOrder] = useState<{ id: string; order_number: string | null } | null>(null)
+  const [showExpiredOrderDialog, setShowExpiredOrderDialog] = useState(false)
   const [isDeciding, setIsDeciding] = useState(false)
   const [showExpiredAcceptDialog, setShowExpiredAcceptDialog] = useState(false)
   const [showExpiredConvertDialog, setShowExpiredConvertDialog] = useState(false)
@@ -582,7 +588,16 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
               .order('created_at', { ascending: false })
               .limit(1)
           : Promise.resolve(null),
-      ]).then(([personnummerMasked, creditNoteRes, originalRes, convertedRes, invoicedRes]) => {
+        data.document_type === 'quote'
+          ? supabase
+              .from('sales_orders')
+              .select('id, order_number')
+              .eq('source_invoice_id', id)
+              .neq('status', 'cancelled')
+              .order('created_at', { ascending: false })
+              .limit(1)
+          : Promise.resolve(null),
+      ]).then(([personnummerMasked, creditNoteRes, originalRes, convertedRes, invoicedRes, orderedRes]) => {
         // Deferred writes need the same guard: they land after first paint
         // and would otherwise attach the previous invoice's related documents
         // to the one the pager has since navigated to.
@@ -596,6 +611,9 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
           setConvertedFromInvoice(convertedRes.data as Invoice)
         }
         setQuoteInvoice((invoicedRes?.data?.[0] as Invoice | undefined) ?? null)
+        setQuoteOrder(
+          (orderedRes?.data?.[0] as { id: string; order_number: string | null } | undefined) ?? null,
+        )
       })
   }
 
@@ -753,8 +771,20 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     setIsConverting(false)
   }
 
-  // Proforma -> draft kundorder (sibling of convertToInvoice). The proforma is
-  // cancelled by the service; the user lands on the new order.
+  /** "Skapa order" on an expired open quote confirms the lapse first, like
+   *  startQuoteConvert; an accepted quote past valid_until converts directly. */
+  function startQuoteOrder() {
+    if (!invoice) return
+    if (isQuoteExpired(invoice)) {
+      setShowExpiredOrderDialog(true)
+      return
+    }
+    void convertToOrder()
+  }
+
+  // Proforma or offert -> draft kundorder (sibling of convertToInvoice). The
+  // service cancels the proforma or marks the quote accepted; the user lands
+  // on the new order.
   async function convertToOrder() {
     if (!invoice) return
     setIsCreatingOrder(true)
@@ -1467,7 +1497,7 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   // Offert: the effective status (expired is derived, never stored) and what
   // can still happen to it. Once an invoice exists the decision is final.
   const quoteStatus = isQuote ? effectiveQuoteStatus(invoice) : null
-  const canDecideQuote = isQuote && invoice.status !== 'cancelled' && !quoteInvoice
+  const canDecideQuote = isQuote && invoice.status !== 'cancelled' && !quoteInvoice && !quoteOrder
   const canConvertQuote = canDecideQuote && quoteStatus !== 'declined'
   // #1693: only a fully paid faktura has a betalningsbekräftelse to offer.
   const canSendPaymentConfirmation = isPaymentConfirmationEligible(invoice)
@@ -1728,7 +1758,10 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   return (
     <div className="space-y-8 stagger-enter">
       {/* Back link + prev/next record pager on their own quiet row, so the
-          title below keeps a stable position while stepping between records */}
+          title below keeps a stable position while stepping between records.
+          Shell v2: the sidebar says where we are and the pager sits in the
+          top bar, so the row goes. */}
+      {shell !== 'v2' && (
       <div className="flex items-center justify-between gap-4">
         <button
           type="button"
@@ -1744,14 +1777,16 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
           currentId={id}
         />
       </div>
+      )}
 
       {/* Header: serif title with one status element, a quiet meta line, and
-          the next step on the right. Everything else lives in the ⋯ menu. */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
+          the next step on the right. Everything else lives in the ⋯ menu.
+          The page-header hooks turn it into the v2 top bar. */}
+      <div className="page-header flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="page-header-lead min-w-0">
           <div className="flex flex-wrap items-center gap-3">
             {/* data-ph-mask: the title carries the invoice number */}
-            <h1 data-ph-mask="" className="font-display text-2xl leading-8 tracking-tight">{title}</h1>
+            <h1 data-ph-mask="" className="page-header-title font-display text-2xl leading-8 tracking-tight">{title}</h1>
             {status.exception ? (
               <Badge variant={status.variant}>{status.label}</Badge>
             ) : (
@@ -1764,10 +1799,18 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
               </Badge>
             )}
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">{metaParts.join(' · ')}</p>
+          <p className="page-header-desc mt-1 text-sm text-muted-foreground">{metaParts.join(' · ')}</p>
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="page-header-action flex shrink-0 flex-wrap items-center gap-2">
+          {shell === 'v2' && (
+            <DetailPager
+              contextKey={listContextKey('invoices', company?.id)}
+              basePath="/invoices"
+              currentId={id}
+              className="shrink-0"
+            />
+          )}
           {isEditableDraft && canWrite && (
             <Button variant="outline" asChild>
               <Link href={`/invoices/${invoice.id}/edit`}>
@@ -1830,11 +1873,11 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
               {t('quote_create_invoice')}
             </Button>
           )}
-          {isProforma && invoice.status !== 'cancelled' && (
+          {((isProforma && invoice.status !== 'cancelled') || canConvertQuote) && (
             <Button
               variant="outline"
-              onClick={convertToOrder}
-              disabled={isCreatingOrder || !canWrite}
+              onClick={isQuote ? startQuoteOrder : convertToOrder}
+              disabled={isCreatingOrder || isConverting || isDeciding || !canWrite}
               title={!canWrite ? t('viewer_disabled_tooltip') : undefined}
             >
               {isCreatingOrder ? (
@@ -2283,6 +2326,13 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
             <DefRow label={t('def_invoiced')}>
               <Link href={`/invoices/${quoteInvoice.id}`} className="hover:underline">
                 {t('title_invoice', { number: quoteInvoice.invoice_number ?? '' })}
+              </Link>
+            </DefRow>
+          )}
+          {isQuote && quoteOrder && (
+            <DefRow label={t('def_sales_order')}>
+              <Link href={`/sales-orders/${quoteOrder.id}`} className="hover:underline">
+                {quoteOrder.order_number ?? t('open_sales_order')}
               </Link>
             </DefRow>
           )}
@@ -2898,6 +2948,20 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
         onConfirm={async () => {
           setShowExpiredConvertDialog(false)
           await convertToInvoice()
+        }}
+      />
+
+      <ConfirmDialog
+        open={showExpiredOrderDialog}
+        onOpenChange={setShowExpiredOrderDialog}
+        title={t('quote_expired_order_title')}
+        description={t('quote_expired_order_description', {
+          date: formatDate(invoice.valid_until ?? invoice.due_date),
+        })}
+        confirmLabel={t('create_order')}
+        onConfirm={async () => {
+          setShowExpiredOrderDialog(false)
+          await convertToOrder()
         }}
       />
 

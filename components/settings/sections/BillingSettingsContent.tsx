@@ -27,7 +27,7 @@ import { useBranding } from '@/lib/branding/brand-context'
 // capability in lib/entitlements/keys.ts (ai, bank_sync, skatteverket,
 // email_send, stripe_payments, woocommerce_sync + shopify_sync as one
 // "webshop" item). Keep in step with PAID_CAPABILITIES when a key is added.
-const UNLOCK_KEYS = ['unlock_ai', 'unlock_bank', 'unlock_skv', 'unlock_email', 'unlock_payments', 'unlock_webshop', 'unlock_users'] as const
+const UNLOCK_KEYS = ['unlock_ai', 'unlock_bank', 'unlock_skv', 'unlock_email', 'unlock_payments', 'unlock_webshop'] as const
 
 // Mirrors the checkout route's deferred-first-charge condition (Stripe's 48h
 // trial_end floor plus clock margin). Above this, checkout collects the card
@@ -300,10 +300,7 @@ function BillingCoreContent() {
     plan === 'yearly'
       ? t('price_note_yearly', { inc: formatCurrency(price.incVat), perMonth: formatCurrency(price.perMonthEquivalent) })
       : t('price_note_monthly', { inc: formatCurrency(price.incVat) })
-  const termsLine =
-    chargeDeferred && trialEndsAt
-      ? t('terms_deferred', { date: formatDateLong(trialEndsAt) })
-      : t('terms_now')
+  const termsLine = t('terms_now')
 
   return (
     <div>

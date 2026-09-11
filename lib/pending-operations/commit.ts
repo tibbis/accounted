@@ -14,6 +14,7 @@
  * private to this module: call `commitPendingOperation()` to invoke them.
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { parseEntityType, resolveCompanyEntityType } from '@/lib/company/entity-type'
 import { eventBus } from '@/lib/events'
 import { bulkBookMatchedInboxItems, categorizeMatchedTransaction } from '@/lib/transactions/categorize-core'
 import { getVatRules, getPermittedVatRates } from '@/lib/invoices/vat-rules'
@@ -188,6 +189,7 @@ import { createSalesOrder } from '@/lib/sales-orders/write'
 import { transitionSalesOrder } from '@/lib/sales-orders/transitions'
 import { registerSalesOrderDelivery } from '@/lib/sales-orders/register-delivery'
 import { createInvoiceFromSalesOrder } from '@/lib/sales-orders/create-invoice-from-order'
+import { convertToSalesOrder } from '@/lib/sales-orders/convert-to-sales-order'
 import type { ServiceFailure } from '@/lib/sales-orders/result'
 import { UpdateCompanySettingsParamsSchema } from '@/lib/pending-operations/schemas/company-settings'
 import { UpdateCustomerParamsSchema } from '@/lib/pending-operations/schemas/customer'
@@ -352,7 +354,7 @@ async function loadBookingContext(
 
   return {
     accountingMethod: (settings?.accounting_method as AccountingMethod) || 'accrual',
-    entityType: (settings?.entity_type as EntityType) || 'enskild_firma',
+    entityType: await resolveCompanyEntityType(supabase, companyId, settings?.entity_type),
   }
 }
 
@@ -3129,7 +3131,7 @@ async function commitSendInvoice(
 
   // Override `status` to 'sent' on the in-memory copy. The DB flip happens
   // after email delivery (line ~625); rendering with the stale 'draft' status
-  // would stamp the customer's PDF with "UTKAST: inte en giltig faktura".
+  // would stamp the customer's PDF with "UTKAST".
   const renderableInvoice = { ...(invoice as Invoice), status: 'sent' as const }
   const { branding, company: renderCompany } = await prepareInvoicePdfRender(
     company as CompanySettings,
@@ -3331,7 +3333,7 @@ async function commitMarkInvoiceSent(
     try {
       const je = await createInvoiceJournalEntry(
         supabase, companyId, userId, invoice as Invoice,
-        (settings?.entity_type as EntityType) || 'enskild_firma',
+        await resolveCompanyEntityType(supabase, companyId, settings?.entity_type),
         invoice.customer?.name
       )
       if (je) {
@@ -4468,7 +4470,7 @@ async function commitPostKontantmetodCutoff(
       companyId,
       period,
       nextFiscalPeriodId,
-      settings.entity_type ?? 'aktiebolag',
+      parseEntityType(settings.entity_type),
     )
 
     if (assessment.postings.complete || hasIncompleteKontantmetodCutoffPair(
@@ -4484,7 +4486,7 @@ async function commitPostKontantmetodCutoff(
     const currentFingerprint = cutoffPreviewFingerprint({
       collection: assessment.collection,
       lines: assessment.lines,
-      entityType: settings.entity_type ?? 'aktiebolag',
+      entityType: parseEntityType(settings.entity_type),
       periodEnd: period.period_end,
     })
     if (currentFingerprint !== stagedFingerprint) {
@@ -4501,7 +4503,7 @@ async function commitPostKontantmetodCutoff(
       periodEnd: period.period_end,
       receivables: assessment.collection.receivables,
       payables: assessment.collection.payables,
-      entityType: settings.entity_type ?? 'aktiebolag',
+      entityType: parseEntityType(settings.entity_type),
       unknownVatTreatment: assessment.collection.unknownVatTreatment,
       strayVatOnZeroRate: assessment.collection.strayVatOnZeroRate,
     })
@@ -5478,6 +5480,15 @@ async function commitConvertInvoice(
   const id = params.invoice_id as string
   if (!id) return { error: 'invoice_id is required', status: 400 }
 
+  // target 'order': shared with POST /api/invoices/[id]/convert-to-order,
+  // proforma or quote to a draft kundorder. Staged under the same operation
+  // type as the invoice conversion; the target rides in the params.
+  if (params.target === 'order') {
+    const converted = await convertToSalesOrder(supabase, { companyId, userId, invoiceId: id })
+    if (!converted.ok) return salesOrderFailure(converted)
+    return { data: { sales_order_id: converted.order.id, order_number: converted.order.order_number } }
+  }
+
   // Shared with POST /api/invoices/[id]/convert: proforma or quote to
   // invoice, F-number allocated last, source cancelled (proforma) or
   // accepted (quote).
@@ -5555,6 +5566,11 @@ async function commitImportSie(
         fiscal_period_id: result.fiscalPeriodId,
         opening_balance_entry_id: result.openingBalanceEntryId,
         journal_entries_created: result.journalEntriesCreated,
+        accounts_created: result.accountsCreated ?? 0,
+        // Informational facts that used to travel as warnings (#2462): the
+        // agent still needs them to explain a null opening_balance_entry_id.
+        accounts_renamed: result.accountsRenamed ?? 0,
+        opening_balance_skipped: result.details?.openingBalanceSkipped ?? null,
         warnings: result.warnings,
       },
     }

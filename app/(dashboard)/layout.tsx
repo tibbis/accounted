@@ -3,6 +3,7 @@ import { cookies, headers } from 'next/headers'
 import type { Metadata } from 'next'
 import DashboardNav from '@/components/dashboard/DashboardNav'
 import { MainContainer } from '@/components/dashboard/MainContainer'
+import { ShellProvider } from '@/components/dashboard/ShellProvider'
 import CompanyTabSync from '@/components/dashboard/CompanyTabSync'
 import AnalyticsIdentify from '@/components/AnalyticsIdentify'
 import { computeIdentityHash } from '@/lib/analytics/identity-hash'
@@ -12,11 +13,10 @@ import LazyCommandPalette from '@/components/common/LazyCommandPalette'
 import { SettingsHotkey } from '@/components/settings/SettingsHotkey'
 import { SessionTimeoutController } from '@/components/auth/SessionTimeoutController'
 import { SandboxBanner } from '@/components/dashboard/SandboxBanner'
+import { SystemNoticeBanner } from '@/components/dashboard/SystemNoticeBanner'
+import { parseSystemNoticeUntil } from '@/components/dashboard/system-notice'
 import TrialExpiredDialog from '@/components/billing/TrialExpiredDialog'
-import MultiUserGraceBanner from '@/components/billing/MultiUserGraceBanner'
 import { resolveDormantCompanyIds } from '@/lib/company/active-company'
-import { getMultiUserState } from '@/lib/entitlements/multi-user'
-import { createServiceClient } from '@/lib/supabase/server'
 import { getExtensionNavItems } from '@/lib/extensions/sectors'
 import { CompanyProvider, type ByraTeamRef } from '@/contexts/CompanyContext'
 import { ReferenceDataSeed } from '@/components/providers/ReferenceDataSeed'
@@ -37,7 +37,8 @@ import {
 import { getCompanyDisplayName } from '@/lib/company/context'
 import HomeDomainSignpost from '@/components/dashboard/HomeDomainSignpost'
 import { PwaWorklistBadge } from '@/components/pwa/PwaWorklistBadge'
-import type { AccountingFramework, EntityType, CompanyRole, Team } from '@/types'
+import type { AccountingFramework, EntityType, CompanyRole, Team, DashboardShell } from '@/types'
+import { parseEntityType } from '@/lib/company/entity-type'
 import {
   getDashboardAuthContext,
   getDashboardCompanyId,
@@ -146,6 +147,14 @@ export default async function DashboardLayout({
     pathname.startsWith(p)
   )
 
+  // Operator-set system notice (NEXT_PUBLIC_SYSTEM_NOTICE_UNTIL): null when
+  // unset or expired, so the banner is not even rendered outside its window.
+  // Computed before the shell branches below so every signed-in user sees it,
+  // byrå consultants and stale-cookie sessions included.
+  const systemNoticeUntil = parseSystemNoticeUntil(process.env.NEXT_PUBLIC_SYSTEM_NOTICE_UNTIL)
+  const systemNoticeBanner =
+    systemNoticeUntil !== null ? <SystemNoticeBanner until={systemNoticeUntil} /> : null
+
   // Team now carries `kind` directly (types/index.ts, WL-08).
   const membershipRows = teamMemberships
   const byraMembership = membershipRows.find((m) => m.teams?.kind === 'byra') ?? null
@@ -237,6 +246,7 @@ export default async function DashboardLayout({
         <AgentSheetProvider>
           <CompanyTabSync />
           <div className="min-h-dvh bg-frame md:flex md:flex-col">
+            {systemNoticeBanner}
             <DashboardNav
               companyName={getBranding().appName.toLowerCase()}
               entityType="enskild_firma"
@@ -396,6 +406,7 @@ export default async function DashboardLayout({
         <AgentSheetProvider>
           <CompanyTabSync />
           <div className="min-h-dvh bg-frame md:flex md:flex-col">
+            {systemNoticeBanner}
             <DashboardNav
               companyName={getBranding().appName.toLowerCase()}
               entityType="enskild_firma"
@@ -423,13 +434,10 @@ export default async function DashboardLayout({
 
   // Resolve entity type the same way the report engines and
   // getCompanyEntityType do: company_settings is read-primary, companies is the
-  // canonical fallback, then default to enskild_firma. Mirroring it onto the
-  // active company keeps the settings rail (useSettingsNavItems, which reads
-  // context) and the sidebar in agreement on who is an employer. #782
-  const entityType =
-    (settings?.entity_type as EntityType) ||
-    (companyRow.entity_type as EntityType) ||
-    'enskild_firma'
+  // canonical (NOT NULL) fallback; never a guessed default. Mirroring it onto
+  // the active company keeps the settings rail (useSettingsNavItems, which
+  // reads context) and the sidebar in agreement on who is an employer. #782
+  const entityType: EntityType = parseEntityType(settings?.entity_type ?? companyRow.entity_type)
   const paysSalaries = settings?.pays_salaries ?? false
   // Dimensions register visibility (Kostnadsställen & projekt nav row). Same
   // mechanism as paysSalaries: UI gate only, never load-bearing for
@@ -466,50 +474,16 @@ export default async function DashboardLayout({
       })),
   )
 
-  // The entitlements-derived multiUser state is computed from the grant rows
-  // the CALLER can see, and RLS hides team-scoped grants from users outside
-  // the team (byrå clients): re-verify any non-entitled answer through the
-  // SECURITY DEFINER state RPC before acting on it. One extra round trip only
-  // in the rare non-entitled case.
-  const activeMultiUser =
-    entitlements.multiUser.state === 'entitled'
-      ? entitlements.multiUser
-      : await getMultiUserState(supabase, companyId)
-
-  // Grace countdown banner data: only while the ACTIVE company is in its
-  // 20-day window AND actually has affected people (>= 1 non-owner member).
-  // Service client because other members' emails are not readable through
-  // the caller's RLS (same reason as GET /api/company/members).
-  let graceBanner: { graceEndsAt: string; affectedEmails: string[]; isAffectedUser: boolean } | null =
-    null
-  if (!isSandbox && activeMultiUser.state === 'grace' && activeMultiUser.graceEndsAt) {
-    const serviceClient = await createServiceClient()
-    const { data: memberRows } = await serviceClient
-      .from('company_members')
-      .select('user_id, role')
-      .eq('company_id', companyId)
-    const affected = (memberRows || []).filter((m) => m.role !== 'owner')
-    if (affected.length > 0) {
-      const { data: affectedProfiles } = await serviceClient
-        .from('profiles')
-        .select('id, email')
-        .in('id', affected.map((a) => a.user_id))
-      const emailById = new Map((affectedProfiles || []).map((p) => [p.id, p.email as string | null]))
-      graceBanner = {
-        graceEndsAt: activeMultiUser.graceEndsAt,
-        affectedEmails: affected
-          .map((a) => emailById.get(a.user_id))
-          .filter((e): e is string => !!e),
-        isAffectedUser: affected.some((a) => a.user_id === user.id),
-      }
-    }
-  }
-
   // Client-driven UI preferences (sidebar collapse + fold state). Read here
   // so the shell renders at the right width on first paint; the nav toggles
   // flip the data attribute client-side and persist via /api/user/ui-state.
   const uiState = (userPrefs?.ui_state ?? {}) as import('@/types').UserUiState
   const navCollapsed = uiState.nav_collapsed === true
+  // Shell v2 is the default (UI v2 PR 9a, cutover step one). Standard (v1)
+  // stays selectable under Inställningar → Konto → Layout until v1 is removed.
+  // Rendered as data-shell on the panel so the CSS in globals.css can restyle
+  // PageHeader without touching page code.
+  const shell: DashboardShell = uiState.shell === 'v1' ? 'v1' : 'v2'
 
   const allCompanyEntries = (allMemberships || [])
     .filter((m) => m.companies)
@@ -556,7 +530,6 @@ export default async function DashboardLayout({
     trialEndsAt: entitlements.trialEndsAt,
     entitlementState: entitlements.entitlementState,
     trialExpiredAt: entitlements.trialExpiredAt,
-    multiUser: activeMultiUser,
     lockedCompanyIds: [...dormantCompanyIds],
   }
 
@@ -601,7 +574,7 @@ export default async function DashboardLayout({
         <div
           id="dash-shell"
           className="min-h-dvh bg-frame md:flex md:flex-col"
-          style={{ '--nav-w': navCollapsed ? '64px' : '248px' } as React.CSSProperties}
+          style={{ '--nav-w': shell === 'v2' ? '220px' : navCollapsed ? '64px' : '248px' } as React.CSSProperties}
         >
           {/* Skip to content link for keyboard/screen reader users */}
           <a
@@ -612,14 +585,7 @@ export default async function DashboardLayout({
             Hoppa till innehåll
           </a>
           {isSandbox && <SandboxBanner />}
-          {graceBanner && (
-            <MultiUserGraceBanner
-              graceEndsAt={graceBanner.graceEndsAt}
-              affectedEmails={graceBanner.affectedEmails}
-              isAffectedUser={graceBanner.isAffectedUser}
-              companyName={displayName}
-            />
-          )}
+          {systemNoticeBanner}
           <DashboardNav
             companyName={settings?.company_name || 'Min verksamhet'}
             entityType={entityType}
@@ -634,9 +600,11 @@ export default async function DashboardLayout({
             userName={userProfile?.full_name ?? null}
             userEmail={user.email ?? null}
             initialUiState={uiState}
+            shell={shell}
           />
-          <main id="main-content" className={MAIN_PANEL_CLASS} role="main">
-            <MainContainer companyId={companyId}>
+          <main id="main-content" className={MAIN_PANEL_CLASS} role="main" data-shell={shell}>
+            <ShellProvider shell={shell}>
+            <MainContainer companyId={companyId} shell={shell}>
               {showSignpost ? (
                 <HomeDomainSignpost
                   activeCompanyName={displayName}
@@ -650,8 +618,9 @@ export default async function DashboardLayout({
                 children
               )}
             </MainContainer>
+            </ShellProvider>
           </main>
-          {/* One-time expired-trial notice. Sandbox/anonymous demo users have
+          {/* One-time post-trial invitation. Sandbox/anonymous demo users have
               no billing (their companies carry trial grants too), so the gate
               lives here where both flags are known. Acknowledgement persists
               per user AND company in user_preferences.ui_state, read here
@@ -659,7 +628,6 @@ export default async function DashboardLayout({
           {!isSandbox && !user.is_anonymous && (
             <TrialExpiredDialog
               state={entitlements.entitlementState}
-              trialExpiredAt={entitlements.trialExpiredAt}
               companyId={companyId}
               initialAcknowledged={!!uiState.trial_expired_ack?.[companyId]}
             />

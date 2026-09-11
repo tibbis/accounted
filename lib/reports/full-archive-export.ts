@@ -972,6 +972,8 @@ export const MASTER_DATA_DUMP_TABLES: MasterDataTableSpec[] = [
   { name: 'parties', file: 'parties.json', orderBy: 'created_at' },
   { name: 'party_facts', file: 'party_facts.json', orderBy: 'recorded_at' },
   { name: 'party_identities', file: 'party_identities.json', orderBy: 'created_at' },
+  // Bank-side counterpart names, including the person's own corrections.
+  { name: 'counterparty_aliases', file: 'counterparty_aliases.json', orderBy: 'created_at' },
   { name: 'party_decisions', file: 'party_decisions.json', orderBy: 'created_at' },
   { name: 'articles', file: 'articles.json', orderBy: 'created_at' },
   // Customer invoicing
@@ -1189,6 +1191,7 @@ export const ARCHIVE_EXCLUDED_TABLES: Record<string, string> = {
   calendar_feeds: 'feed tokens (secrets)',
   capability_grants: 'entitlement state',
   categorize_calibration_samples: 'auto-booking confidence telemetry, not räkenskapsinformation',
+  transaction_assistant_reads: "the assistant's proposal for an unbooked transaction, recomputed on demand; no bookkeeping content",
   chat_messages: 'AI assistant state, not räkenskapsinformation',
   chat_sessions: 'AI assistant state, not räkenskapsinformation',
   company_capability_config: 'entitlement state',
@@ -1252,6 +1255,7 @@ export const ARCHIVE_EXCLUDED_TABLES: Record<string, string> = {
   webhooks: 'automation config with signing secrets',
   woocommerce_connections: 'WooCommerce connection state (encrypted API secrets)',
   shopify_connections: 'Shopify connection state (encrypted API secrets)',
+  zettle_connections: 'Zettle connection state (encrypted OAuth refresh token)',
 }
 
 /** Max parent ids per `IN (...)` chunk: keeps the PostgREST URL well under limits. */

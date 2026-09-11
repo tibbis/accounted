@@ -1,6 +1,7 @@
 'use client'
 
 import useSWR from 'swr'
+import { REFERENCE_SWR_OPTIONS } from '@/lib/reference-data/hooks'
 import { createClient } from '@/lib/supabase/client'
 import { USER_UI_STATE_SWR_KEY } from '@/lib/ui-state/client'
 import type { UserUiState } from '@/types'
@@ -22,7 +23,7 @@ export function useUiState() {
       .select('ui_state')
       .maybeSingle()
     return (row?.ui_state as UserUiState) ?? {}
-  })
+  }, REFERENCE_SWR_OPTIONS)
 
   return { uiState: data, loaded: data !== undefined }
 }
