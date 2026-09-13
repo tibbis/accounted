@@ -380,9 +380,11 @@ export const enableBankingExtension: Extension = {
           const needsCompanyProfile =
             !explicitPsuType &&
             !(isReconnect && (existing?.psu_type === 'personal' || existing?.psu_type === 'business'))
+          // Always select both columns: a conditional select string breaks the
+          // generated Supabase types into a ParserError union.
           const { data: companyProfile } = await supabase
             .from('companies')
-            .select(needsCompanyProfile ? 'entity_type, org_number' : 'org_number')
+            .select('entity_type, org_number')
             .eq('id', companyId)
             .single()
 

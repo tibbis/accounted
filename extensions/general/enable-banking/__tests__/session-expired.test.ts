@@ -606,7 +606,8 @@ describe('auth_method selection (Handelsbanken Mobile BankID)', () => {
 
     await startAuthorization('Handelsbanken', 'SE', 'https://app/cb', 'state-1', 'business', 'BANKID')
 
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body))
     expect(body.auth_method).toBe('BANKID')
     expect(body.psu_type).toBe('business')
   })
@@ -623,7 +624,8 @@ describe('auth_method selection (Handelsbanken Mobile BankID)', () => {
 
     await startAuthorization('Nordea', 'SE', 'https://app/cb', 'state-1', 'personal')
 
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body))
     expect('auth_method' in body).toBe(false)
   })
 
@@ -648,7 +650,8 @@ describe('auth_method selection (Handelsbanken Mobile BankID)', () => {
       { credentials: { companyId: '556012-5790' } },
     )
 
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body))
     expect(body.credentials).toEqual({ companyId: '556012-5790' })
     expect(body.credentials_autosubmit).toBe(false)
   })
