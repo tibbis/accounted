@@ -199,6 +199,9 @@ export interface UserUiState {
   shell?: DashboardShell
   // Transaktioner column visibility in shell v2 (lib/transactions/columns-v2).
   tx_columns?: { hidden?: string[] }
+  // Home-screen PWA badge for Att göra. Omitted means off: turning it on
+  // is what requests notification permission on iOS.
+  pwa_worklist_badge?: boolean
 }
 
 export type DashboardShell = 'v1' | 'v2'
@@ -3490,6 +3493,7 @@ export type YearEndBlockerCode =
   | 'PERIOD_NOT_FOUND'
   | 'PERIOD_NOT_ENDED'
   | 'PERIOD_ALREADY_CLOSED'
+  | 'PERIOD_LOCKED'
   | 'CLOSING_ENTRY_EXISTS'
   | 'DRAFT_ENTRIES'
   | 'UNEXPLAINED_VOUCHER_GAP'
