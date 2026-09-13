@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import {
   startAuthorization,
   getASPSPs,
-  getPreferredAuthMethodDetails,
+  resolveConnectAuthOptions,
   deleteSession,
   isSandboxMode,
   SessionExpiredError,
@@ -370,35 +370,40 @@ export const enableBankingExtension: Extension = {
           // failing at the bank's signing step. The client can still pass an
           // explicit psu_type to switch account type in place.
           let psuType: 'personal' | 'business' = 'business'
+          let companyOrgNumber: string | null | undefined
           if (explicitPsuType === 'personal' || explicitPsuType === 'business') {
             psuType = explicitPsuType
           } else if (isReconnect && (existing?.psu_type === 'personal' || existing?.psu_type === 'business')) {
             psuType = existing.psu_type
-          } else {
-            const { data: company } = await supabase
-              .from('companies')
-              .select('entity_type')
-              .eq('id', companyId)
-              .single()
-            if (company?.entity_type === 'enskild_firma') {
-              psuType = 'personal'
-            }
           }
 
-          // Resolve the bank's preferred auth method. Handelsbanken (and some
-          // other Swedish banks) expose Mobile BankID only as a hidden DECOUPLED
-          // method; without pinning it, Enable Banking defaults to the REDIRECT
-          // method, which for Handelsbanken *corporate* PSUs cannot complete
-          // with Mobile BankID: the user approves in the app and then hits an
-          // error. Only hidden methods applicable to this psu_type are pinned;
-          // banks whose decoupled method is visible (e.g. Lunar) get undefined
-          // so their own working default flow runs untouched.
-          const preferredMethod = await getPreferredAuthMethodDetails(
+          const needsCompanyProfile =
+            !explicitPsuType &&
+            !(isReconnect && (existing?.psu_type === 'personal' || existing?.psu_type === 'business'))
+          const { data: companyProfile } = await supabase
+            .from('companies')
+            .select(needsCompanyProfile ? 'entity_type, org_number' : 'org_number')
+            .eq('id', companyId)
+            .single()
+
+          if (needsCompanyProfile && companyProfile?.entity_type === 'enskild_firma') {
+            psuType = 'personal'
+          }
+          companyOrgNumber = companyProfile?.org_number
+
+          // Resolve auth_method and optional org-number prefill. Handelsbanken
+          // (and some other Swedish banks) expose Mobile BankID only as a hidden
+          // DECOUPLED method; without pinning it, Enable Banking defaults to the
+          // REDIRECT method, which for Handelsbanken *corporate* PSUs cannot
+          // complete with Mobile BankID. For banks like SEB whose visible
+          // business flow asks for organisationsnummer, we pass credentials with
+          // credentials_autosubmit:false so the field is pre-filled on consent.
+          const { authMethod, credentials, preferredMethod } = await resolveConnectAuthOptions(
             resolvedAspspName,
             resolvedAspspCountry,
-            psuType
+            psuType,
+            companyOrgNumber,
           )
-          const authMethod = preferredMethod?.name
 
           log.info('[enable-banking] Starting bank connection', {
             user_id: user.id,
@@ -417,6 +422,7 @@ export const enableBankingExtension: Extension = {
             auth_method_psu_types: preferredMethod
               ? (preferredMethod.psu_types ?? '(all)')
               : '(aspsp default)',
+            org_number_prefill: credentials ? Object.keys(credentials)[0] : '(none)',
             reconnect: isReconnect,
           })
 
@@ -619,7 +625,8 @@ export const enableBankingExtension: Extension = {
               oauthState,
               psuType,
               authMethod,
-              companyId
+              companyId,
+              credentials ? { credentials } : undefined,
             )
 
             // Record the bank's authorization_id for audit/traceability. The
@@ -653,7 +660,8 @@ export const enableBankingExtension: Extension = {
             oauthState,
             psuType,
             authMethod,
-            companyId
+            companyId,
+            credentials ? { credentials } : undefined,
           )
 
           const { data: connection, error } = await supabase

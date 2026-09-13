@@ -189,9 +189,10 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
       // text-only local model still answers, just from the prompt (+ snapshot).
       const tools = capabilities.toolUse ? toSdkTools(req.tools) : undefined
       const maxSteps = req.maxSteps ?? DEFAULT_MAX_STEPS
-      const hasHistory = req.history && req.history.length > 0
+      const history = req.history ?? []
+      const hasHistory = history.length > 0
       const initialMessages: ModelMessage[] = hasHistory
-        ? messagesWithHistory(req.prompt, req.history)
+        ? messagesWithHistory(req.prompt, history)
         : [{ role: 'user', content: req.prompt }]
 
       const result = await generateText({

@@ -626,4 +626,30 @@ describe('auth_method selection (Handelsbanken Mobile BankID)', () => {
     const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
     expect('auth_method' in body).toBe(false)
   })
+
+  it('startAuthorization pre-fills credentials without autosubmit when provided', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ url: 'https://bank.example/auth', authorization_id: 'auth-1' }),
+      text: async () => '',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startAuthorization(
+      'SEB',
+      'SE',
+      'https://app/cb',
+      'state-1',
+      'business',
+      'REDIRECT',
+      undefined,
+      { credentials: { companyId: '556012-5790' } },
+    )
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
+    expect(body.credentials).toEqual({ companyId: '556012-5790' })
+    expect(body.credentials_autosubmit).toBe(false)
+  })
 })

@@ -50,7 +50,6 @@ const BodySchema = z
       .object({ hidden: z.array(z.string().max(32)).max(16).optional() })
       .strict()
       .optional(),
-    pwa_worklist_badge: z.boolean().optional(),
   })
   .strict()
 

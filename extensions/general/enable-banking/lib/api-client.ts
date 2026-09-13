@@ -18,6 +18,11 @@ import { FALLBACK_DESCRIPTION } from '@/lib/transactions/external-id'
 import { bankConnectorMode, CONNECTOR_COMPANY_HEADER } from '@/lib/connect/instance/upstreams'
 import { normalizeBankTransactionCode } from '@accounted/connect-contract'
 import { dateFromDaysBefore, historyWindowDays } from './history-window'
+import {
+  buildBusinessOrgCredentials,
+  type AuthMethodCredential,
+  type AuthMethodWithCredentials,
+} from './auth-credentials'
 
 // Prefer _PRODUCTION variant; sandbox uses api.tilisy.com, production uses api.enablebanking.com
 const ENABLE_BANKING_API_URL =
@@ -48,7 +53,10 @@ export interface AuthMethod {
   // explicitly via auth_method (it is not the implicit default).
   hidden_method?: boolean
   psu_types?: ('personal' | 'business')[]
+  credentials?: AuthMethodCredential[]
 }
+
+export type { AuthMethodCredential, AuthMethodWithCredentials }
 
 export interface AuthResponse {
   url: string
@@ -597,6 +605,58 @@ export async function getPreferredAuthMethod(
   return method?.name
 }
 
+export interface ConnectAuthOptions {
+  authMethod?: string
+  credentials?: Record<string, string>
+  preferredMethod?: AuthMethod
+}
+
+/**
+ * Resolve auth_method and optional org-number credentials for POST /auth.
+ * Pins a visible business method when needed so Enable Banking accepts
+ * credentials (required by their API when credentials are sent).
+ */
+export async function resolveConnectAuthOptions(
+  aspspName: string,
+  country: string,
+  psuType: 'personal' | 'business',
+  orgNumber: string | null | undefined,
+): Promise<ConnectAuthOptions> {
+  try {
+    const aspsps = await getASPSPs(country, psuType)
+    const aspsp = aspsps.find((a) => a.name === aspspName)
+    const preferredMethod = selectPreferredAuthMethod(
+      aspsp?.auth_methods as AuthMethodWithCredentials[] | undefined,
+      psuType,
+    )
+    const built = buildBusinessOrgCredentials(
+      aspsp?.auth_methods as AuthMethodWithCredentials[] | undefined,
+      preferredMethod,
+      psuType,
+      orgNumber,
+    )
+    return {
+      authMethod: built.authMethod,
+      credentials: built.credentials,
+      preferredMethod,
+    }
+  } catch (error) {
+    console.error('[enable-banking] resolveConnectAuthOptions failed; using ASPSP default', {
+      aspspName,
+      country,
+      psuType,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return {}
+  }
+}
+
+export interface StartAuthorizationOptions {
+  credentials?: Record<string, string>
+  /** When false, Enable Banking pre-fills credential fields without submitting. */
+  credentialsAutosubmit?: boolean
+}
+
 /**
  * Start bank authorization flow
  *
@@ -616,7 +676,8 @@ export async function startAuthorization(
   state: string,
   psuType: 'personal' | 'business' = 'personal',
   authMethod?: string,
-  companyId?: string
+  companyId?: string,
+  startOptions?: StartAuthorizationOptions,
 ): Promise<AuthResponse> {
   // Calculate consent validity (90 days)
   const validUntil = new Date()
@@ -629,6 +690,8 @@ export async function startAuthorization(
     redirect_url: string
     psu_type: 'personal' | 'business'
     auth_method?: string
+    credentials?: Record<string, string>
+    credentials_autosubmit?: boolean
   } = {
     access: {
       valid_until: validUntil.toISOString()
@@ -643,6 +706,10 @@ export async function startAuthorization(
   }
   if (authMethod) {
     requestBody.auth_method = authMethod
+  }
+  if (startOptions?.credentials && Object.keys(startOptions.credentials).length > 0) {
+    requestBody.credentials = startOptions.credentials
+    requestBody.credentials_autosubmit = startOptions.credentialsAutosubmit ?? false
   }
 
   // In connector mode the hosted bank proxy meters the per-company connection

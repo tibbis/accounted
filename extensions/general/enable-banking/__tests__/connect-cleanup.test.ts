@@ -7,9 +7,9 @@ vi.mock('@/lib/entitlements/has-capability', async (importOriginal) => {
   return { ...actual, requireCapability: vi.fn() }
 })
 
-const { mockStartAuthorization, mockGetPreferredAuthMethod } = vi.hoisted(() => ({
+const { mockStartAuthorization, mockResolveConnectAuthOptions } = vi.hoisted(() => ({
   mockStartAuthorization: vi.fn(),
-  mockGetPreferredAuthMethod: vi.fn(),
+  mockResolveConnectAuthOptions: vi.fn(),
 }))
 
 vi.mock('../lib/api-client', async (importOriginal) => {
@@ -17,10 +17,7 @@ vi.mock('../lib/api-client', async (importOriginal) => {
   return {
     ...actual,
     startAuthorization: (...args: unknown[]) => mockStartAuthorization(...args),
-    // index.ts resolves the pinned auth method (with metadata for logging)
-    // through the details variant; both point at one mock for simplicity.
-    getPreferredAuthMethod: (...args: unknown[]) => mockGetPreferredAuthMethod(...args),
-    getPreferredAuthMethodDetails: (...args: unknown[]) => mockGetPreferredAuthMethod(...args),
+    resolveConnectAuthOptions: (...args: unknown[]) => mockResolveConnectAuthOptions(...args),
   }
 })
 
@@ -99,11 +96,25 @@ function makeConnectRequest() {
   })
 }
 
+function connectFrom(
+  onBankConnection: (step: number) => RecordedChain,
+  companyData: { org_number?: string | null; entity_type?: string } = { org_number: '5560125790' },
+) {
+  let bankStep = 0
+  return (table: string) => {
+    if (table === 'companies') {
+      return makeChain({ data: companyData })
+    }
+    bankStep += 1
+    return onBankConnection(bankStep)
+  }
+}
+
 describe('POST /connect never-activated row cleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(requireCapability).mockResolvedValue(null)
-    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
+    mockResolveConnectAuthOptions.mockResolvedValue({})
     mockStartAuthorization.mockResolvedValue({
       url: 'https://bank.example/auth',
       authorization_id: 'auth-1',
@@ -112,19 +123,17 @@ describe('POST /connect never-activated row cleanup', () => {
 
   it('deletes stale pending and error zombies instead of parking them in error', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         // Latest pending row is stale (45s > 30s threshold): not a live attempt.
         chain = makeChain({
           data: { id: 'stale-1', created_at: new Date(Date.now() - 45_000).toISOString() },
         })
-      } else if (call === 2) {
+      } else if (step === 2) {
         // The sweep: returns the deleted never-activated rows.
         chain = makeChain({ data: [{ id: 'stale-1' }, { id: 'old-error' }] })
-      } else if (call === 3) {
+      } else if (step === 3) {
         // Existing-connection guard: nothing established remains post-sweep.
         chain = makeChain({ data: null })
       } else {
@@ -133,7 +142,7 @@ describe('POST /connect never-activated row cleanup', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -166,14 +175,15 @@ describe('POST /connect never-activated row cleanup', () => {
 
   it('still rejects a duplicate connect while a recent pending attempt is live', async () => {
     const chains: RecordedChain[] = []
-    const ctx = makeContext(() => {
+    const ctx = makeContext(connectFrom((step) => {
+      if (step !== 1) throw new Error(`unexpected bank_connections step ${step}`)
       // Latest pending row is 5s old: the user is mid-redirect at the bank.
       const chain = makeChain({
         data: { id: 'live-1', created_at: new Date(Date.now() - 5_000).toISOString() },
       })
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -187,15 +197,13 @@ describe('POST /connect never-activated row cleanup', () => {
 
   it('sweeps error zombies even when no pending row exists', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         chain = makeChain({ data: [{ id: 'old-error' }] })
-      } else if (call === 3) {
+      } else if (step === 3) {
         // Existing-connection guard: the swept zombie is gone, nothing remains.
         chain = makeChain({ data: null })
       } else {
@@ -203,7 +211,7 @@ describe('POST /connect never-activated row cleanup', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -227,14 +235,12 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   // existing-connection guard, insert. Explicit psu_type in the body skips
   // the companies entity_type lookup.
   function makeFreshConnectContext() {
-    let call = 0
-    return makeContext(() => {
-      call++
-      if (call === 1) return makeChain({ data: null })
-      if (call === 2) return makeChain({ data: [] })
-      if (call === 3) return makeChain({ data: null })
+    return makeContext(connectFrom((step) => {
+      if (step === 1) return makeChain({ data: null })
+      if (step === 2) return makeChain({ data: [] })
+      if (step === 3) return makeChain({ data: null })
       return makeChain({ data: { id: 'new-conn' } })
-    })
+    }))
   }
 
   function makeHandelsbankenRequest() {
@@ -248,18 +254,26 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   it('forwards the pinned method name into the auth_method argument (Handelsbanken corporate regression)', async () => {
     // The documented real Handelsbanken shape: Mobile BankID is a hidden
     // DECOUPLED method carrying NO psu_types restriction.
-    mockGetPreferredAuthMethod.mockResolvedValue({
-      name: 'BANKID',
-      approach: 'DECOUPLED',
-      hidden_method: true,
-      title: 'Bank ID',
+    mockResolveConnectAuthOptions.mockResolvedValue({
+      authMethod: 'BANKID',
+      preferredMethod: {
+        name: 'BANKID',
+        approach: 'DECOUPLED',
+        hidden_method: true,
+        title: 'Bank ID',
+      },
     })
 
     const ctx = makeFreshConnectContext()
     const response = await connectRoute().handler(makeHandelsbankenRequest(), ctx)
     expect(response.status).toBe(200)
 
-    expect(mockGetPreferredAuthMethod).toHaveBeenCalledWith('Handelsbanken', 'SE', 'business')
+    expect(mockResolveConnectAuthOptions).toHaveBeenCalledWith(
+      'Handelsbanken',
+      'SE',
+      'business',
+      expect.anything(),
+    )
 
     // startAuthorization(aspspName, aspspCountry, redirectUrl, state, psuType,
     // authMethod): the pinned method's NAME must land in the auth_method
@@ -286,7 +300,7 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   })
 
   it('passes undefined auth_method when no method is pinned (ASPSP default flow)', async () => {
-    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
+    mockResolveConnectAuthOptions.mockResolvedValue({})
 
     const ctx = makeFreshConnectContext()
     const response = await connectRoute().handler(makeHandelsbankenRequest(), ctx)
@@ -307,17 +321,23 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   })
 
   it('forwards the pinned method name on the reconnect path too', async () => {
-    mockGetPreferredAuthMethod.mockResolvedValue({
-      name: 'BANKID',
-      approach: 'DECOUPLED',
-      hidden_method: true,
-      title: 'Bank ID',
+    mockResolveConnectAuthOptions.mockResolvedValue({
+      authMethod: 'BANKID',
+      preferredMethod: {
+        name: 'BANKID',
+        approach: 'DECOUPLED',
+        hidden_method: true,
+        title: 'Bank ID',
+      },
     })
 
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
-      if (call === 1) {
+    let bankStep = 0
+    const ctx = makeContext((table) => {
+      if (table === 'companies') {
+        return makeChain({ data: { org_number: '5560125790' } })
+      }
+      bankStep += 1
+      if (bankStep === 1) {
         // The existing connection loaded up front: reconnect derives the bank
         // identity and psu_type from this row. session_id null skips the
         // sibling check + revoke.
@@ -359,7 +379,7 @@ describe('POST /connect existing-connection guard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(requireCapability).mockResolvedValue(null)
-    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
+    mockResolveConnectAuthOptions.mockResolvedValue({})
     mockStartAuthorization.mockResolvedValue({
       url: 'https://bank.example/auth',
       authorization_id: 'auth-1',
@@ -368,14 +388,12 @@ describe('POST /connect existing-connection guard', () => {
 
   it('returns 409 EXISTING_CONNECTION when a dead (expired) row for the same bank exists', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         // No live pending attempt.
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         // Sweep finds nothing to delete.
         chain = makeChain({ data: [] })
       } else {
@@ -384,7 +402,7 @@ describe('POST /connect existing-connection guard', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -414,15 +432,13 @@ describe('POST /connect existing-connection guard', () => {
 
   it('never 409s over an ACTIVE same-bank connection: the guard status filter excludes it', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         chain = makeChain({ data: [] })
-      } else if (call === 3) {
+      } else if (step === 3) {
         // Guard: only an ACTIVE row exists for this bank; the dead-status
         // filter matches nothing, so the query returns null.
         chain = makeChain({ data: null })
@@ -431,7 +447,7 @@ describe('POST /connect existing-connection guard', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -451,22 +467,20 @@ describe('POST /connect existing-connection guard', () => {
 
   it('force_new: true bypasses the guard and inserts a fresh row', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         chain = makeChain({ data: [] })
       } else {
-        // With force_new the guard query is skipped entirely: call 3 is the
+        // With force_new the guard query is skipped entirely: step 3 is the
         // insert of the fresh connection row.
         chain = makeChain({ data: { id: 'new-conn' } })
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const req = new Request('https://test.local/api/extensions/ext/enable-banking/connect', {
       method: 'POST',
