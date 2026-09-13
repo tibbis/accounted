@@ -26,6 +26,7 @@ vi.mock('web-push', () => ({
 }))
 
 const USER_ID = '11111111-1111-4111-8111-111111111111'
+const COMPANY_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const SUBSCRIPTION = {
   endpoint: 'https://push.example.test/v1/synthetic-endpoint',
   p256dh: 'synthetic-p256dh',
@@ -120,6 +121,12 @@ function makeSupabaseStub(config: StubConfig): SupabaseClient {
           return rowsResult(config.journalEntries, 'list')
         case 'push_subscriptions':
           return rowsResult(config.subscriptions ?? [SUBSCRIPTION], 'list')
+        case 'company_members':
+          return rowsResult([{ user_id: USER_ID }], 'list')
+        case 'companies':
+          return rowsResult([{ id: COMPANY_ID, name: 'Synthetic AB' }], 'list')
+        case 'company_settings':
+          return rowsResult([], 'list')
         default:
           // document_attachments, supplier_invoices, supplier_invoice_payments,
           // journal_entry_no_doc_required: empty is the neutral answer.
@@ -183,7 +190,13 @@ beforeEach(() => {
 })
 
 const oneDeadline = () => [
-  { id: 'dl-1', user_id: USER_ID, title: 'Momsdeklaration', due_date: todayStr() },
+  {
+    id: 'dl-1',
+    user_id: USER_ID,
+    company_id: COMPANY_ID,
+    title: 'Momsdeklaration',
+    due_date: todayStr(),
+  },
 ]
 
 describe('tax deadline gate polarity', () => {
@@ -265,6 +278,7 @@ describe('invoice gate polarity', () => {
         {
           id: 'inv-1',
           user_id: USER_ID,
+          company_id: COMPANY_ID,
           invoice_number: 1001,
           total: 1250,
           currency: 'SEK',
@@ -298,7 +312,7 @@ describe('missing underlag gate polarity', () => {
   it('does NOT send when the settings read fails', async () => {
     const supabase = makeSupabaseStub({
       settings: 'unreadable',
-      journalEntries: [{ id: 'je-1', user_id: USER_ID }],
+      journalEntries: [{ id: 'je-1', user_id: USER_ID, company_id: COMPANY_ID }],
     })
 
     const result = await sendMissingUnderlagNotifications(supabase)

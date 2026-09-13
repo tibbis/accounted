@@ -46,6 +46,7 @@ export interface NotificationPayload {
     url?: string
     type?: string
     id?: string
+    companyId?: string
   }
   actions?: Array<{
     action: string

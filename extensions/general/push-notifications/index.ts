@@ -19,8 +19,41 @@ import {
   createInvoiceSentPayload,
   createReceiptExtractedPayload,
   createReceiptMatchedPayload,
+  withCompanyDeepLink,
 } from './payload-builders'
+import { listCompanyMemberUserIds, loadCompanyNames } from './company-targets'
 import { invoiceNumberDisplay } from '@/lib/invoices/display'
+import type { NotificationPayload } from './notification-sender'
+import type { NotificationType } from '@/types'
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+async function notifyCompany(
+  supabase: SupabaseClient,
+  companyId: string,
+  basePayload: NotificationPayload,
+  type: NotificationType,
+  referenceId: string,
+  log: { info: (msg: string) => void } | Console,
+  successMessage: string,
+): Promise<void> {
+  const [members, names] = await Promise.all([
+    listCompanyMemberUserIds(supabase, companyId),
+    loadCompanyNames(supabase, [companyId]),
+  ])
+  if (members.length === 0) return
+
+  const payload = withCompanyDeepLink(basePayload, {
+    companyId,
+    companyName: names.get(companyId) ?? null,
+  })
+
+  let sent = false
+  for (const userId of members) {
+    const result = await sendNotificationToUser(supabase, userId, payload, type, referenceId)
+    if (result.sent) sent = true
+  }
+  if (sent) log.info(successMessage)
+}
 
 // ============================================================
 // Settings
@@ -122,132 +155,106 @@ async function handlePeriodLocked(
   payload: EventPayload<'period.locked'>,
   ctx?: ExtensionContext
 ): Promise<void> {
-  const { period, userId } = payload
+  const { period, userId, companyId } = payload
 
   // getSettings() returns null when the row is unreadable: do not notify.
   const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
   if (!settings?.periodLockedEnabled) return
 
   const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  const notificationPayload = createPeriodLockedPayload(period.name, period.id)
-
-  const result = await sendNotificationToUser(
+  await notifyCompany(
     supabase,
-    userId,
-    notificationPayload,
+    companyId,
+    createPeriodLockedPayload(period.name, period.id),
     'period_locked',
-    period.id
+    period.id,
+    ctx?.log ?? console,
+    `Period locked notification sent for ${period.name}`,
   )
-
-  if (result.sent) {
-    (ctx?.log ?? console).info(`Period locked notification sent for ${period.name}`)
-  }
 }
 
 async function handleYearClosed(
   payload: EventPayload<'period.year_closed'>,
   ctx?: ExtensionContext
 ): Promise<void> {
-  const { period, userId } = payload
+  const { period, userId, companyId } = payload
 
   const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
   if (!settings?.periodYearClosedEnabled) return
 
   const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  const notificationPayload = createYearClosedPayload(period.name, period.id)
-
-  const result = await sendNotificationToUser(
+  await notifyCompany(
     supabase,
-    userId,
-    notificationPayload,
+    companyId,
+    createYearClosedPayload(period.name, period.id),
     'period_year_closed',
-    period.id
+    period.id,
+    ctx?.log ?? console,
+    `Year closed notification sent for ${period.name}`,
   )
-
-  if (result.sent) {
-    (ctx?.log ?? console).info(`Year closed notification sent for ${period.name}`)
-  }
 }
 
 async function handleInvoiceSent(
   payload: EventPayload<'invoice.sent'>,
   ctx?: ExtensionContext
 ): Promise<void> {
-  const { invoice, userId } = payload
+  const { invoice, userId, companyId } = payload
 
   const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
   if (!settings?.invoiceSentEnabled) return
 
   const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  const notificationPayload = createInvoiceSentPayload(
-    invoiceNumberDisplay(invoice.invoice_number),
-    invoice.id
-  )
-
-  const result = await sendNotificationToUser(
+  await notifyCompany(
     supabase,
-    userId,
-    notificationPayload,
+    companyId,
+    createInvoiceSentPayload(invoiceNumberDisplay(invoice.invoice_number), invoice.id),
     'invoice_sent',
-    invoice.id
+    invoice.id,
+    ctx?.log ?? console,
+    `Invoice sent notification for #${invoice.invoice_number}`,
   )
-
-  if (result.sent) {
-    (ctx?.log ?? console).info(`Invoice sent notification for #${invoice.invoice_number}`)
-  }
 }
 
 async function handleReceiptExtracted(
   payload: EventPayload<'receipt.extracted'>,
   ctx?: ExtensionContext
 ): Promise<void> {
-  const { receipt, userId } = payload
+  const { receipt, userId, companyId } = payload
 
   const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
   if (!settings?.receiptExtractedEnabled) return
 
   const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  const notificationPayload = createReceiptExtractedPayload(
-    receipt.merchant_name,
-    receipt.id
-  )
-
-  const result = await sendNotificationToUser(
+  await notifyCompany(
     supabase,
-    userId,
-    notificationPayload,
+    companyId,
+    createReceiptExtractedPayload(receipt.merchant_name, receipt.id),
     'receipt_extracted',
-    receipt.id
+    receipt.id,
+    ctx?.log ?? console,
+    `Receipt extracted notification for ${receipt.id}`,
   )
-
-  if (result.sent) {
-    (ctx?.log ?? console).info(`Receipt extracted notification for ${receipt.id}`)
-  }
 }
 
 async function handleReceiptMatched(
   payload: EventPayload<'receipt.matched'>,
   ctx?: ExtensionContext
 ): Promise<void> {
-  const { receipt, transaction, userId } = payload
+  const { receipt, transaction, userId, companyId } = payload
 
   const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
   if (!settings?.receiptMatchedEnabled) return
 
   const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  const notificationPayload = createReceiptMatchedPayload(receipt.id, transaction.id)
-
-  const result = await sendNotificationToUser(
+  await notifyCompany(
     supabase,
-    userId,
-    notificationPayload,
+    companyId,
+    createReceiptMatchedPayload(receipt.id, transaction.id),
     'receipt_matched',
-    receipt.id
+    receipt.id,
+    ctx?.log ?? console,
+    `Receipt matched notification for ${receipt.id}`,
   )
-
-  if (result.sent) {
-    (ctx?.log ?? console).info(`Receipt matched notification for ${receipt.id}`)
-  }
 }
 
 // ============================================================

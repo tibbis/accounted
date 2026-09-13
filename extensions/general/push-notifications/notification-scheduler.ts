@@ -20,7 +20,9 @@ import {
   createInvoiceOverduePayload,
   createInvoiceDuePayload,
   createMissingUnderlagPayload,
+  withCompanyDeepLink,
 } from './payload-builders'
+import { listCompanyMemberUserIds, loadCompanyNames } from './company-targets'
 
 /**
  * Send tax deadline notifications.
@@ -46,7 +48,7 @@ export async function sendTaxDeadlineNotifications(
 
   const { data: deadlines } = await supabase
     .from('deadlines')
-    .select('id, user_id, title, due_date')
+    .select('id, user_id, company_id, title, due_date')
     .eq('deadline_type', 'tax')
     .eq('is_completed', false)
     .in('status', ['upcoming', 'action_needed'])
@@ -56,38 +58,36 @@ export async function sendTaxDeadlineNotifications(
     return { sent: 0, skipped: 0 }
   }
 
-  // Group by user
-  const userDeadlines = new Map<string, typeof deadlines>()
+  const companyIds = [...new Set(deadlines.map((d) => d.company_id as string).filter(Boolean))]
+  const names = await loadCompanyNames(supabase, companyIds)
+
   for (const deadline of deadlines) {
-    const list = userDeadlines.get(deadline.user_id) || []
-    list.push(deadline)
-    userDeadlines.set(deadline.user_id, list)
-  }
-
-  for (const [userId, userDls] of userDeadlines) {
-    // Check user-level tax_deadlines_enabled. Unreadable settings mean no
-    // send; a missing row means the defaults (enabled) apply.
-    const settingsRead = await readNotificationSettings(supabase, userId)
-    if (!settingsRead.readable) {
-      skipped += userDls.length
-      continue
-    }
-    if (settingsRead.settings && !settingsRead.settings.tax_deadlines_enabled) {
-      skipped += userDls.length
+    const companyId = deadline.company_id as string
+    if (!companyId) {
+      skipped++
       continue
     }
 
-    for (const deadline of userDls) {
-      const daysUntil = Math.ceil(
-        (new Date(deadline.due_date).getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-      )
+    const daysUntil = Math.ceil(
+      (new Date(deadline.due_date).getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+    )
 
-      const payload = createTaxDeadlinePayload(
-        deadline.title,
-        deadline.due_date,
-        daysUntil,
-        deadline.id
-      )
+    const payload = withCompanyDeepLink(
+      createTaxDeadlinePayload(deadline.title, deadline.due_date, daysUntil, deadline.id),
+      { companyId, companyName: names.get(companyId) ?? null },
+    )
+
+    const members = await listCompanyMemberUserIds(supabase, companyId)
+    if (members.length === 0) {
+      skipped++
+      continue
+    }
+
+    let anySent = false
+    for (const userId of members) {
+      const settingsRead = await readNotificationSettings(supabase, userId)
+      if (!settingsRead.readable) continue
+      if (settingsRead.settings && !settingsRead.settings.tax_deadlines_enabled) continue
 
       const result = await sendNotificationToUser(
         supabase,
@@ -97,13 +97,11 @@ export async function sendTaxDeadlineNotifications(
         deadline.id,
         daysUntil
       )
-
-      if (result.sent) {
-        sent++
-      } else {
-        skipped++
-      }
+      if (result.sent) anySent = true
     }
+
+    if (anySent) sent++
+    else skipped++
   }
 
   return { sent, skipped }
@@ -137,7 +135,9 @@ export async function sendInvoiceNotifications(
 
   const { data: invoices } = await supabase
     .from('invoices')
-    .select('id, user_id, invoice_number, total, currency, due_date, customer:customers(name)')
+    .select(
+      'id, user_id, company_id, invoice_number, total, currency, due_date, customer:customers(name)',
+    )
     // Proformas, delivery notes and quotes are never receivables: nothing is
     // due on them, so they get no förfallo push.
     .eq('document_type', 'invoice')
@@ -148,55 +148,60 @@ export async function sendInvoiceNotifications(
     return { sent: 0, skipped: 0 }
   }
 
-  // Group by user
-  const userInvoices = new Map<string, typeof invoices>()
+  const companyIds = [...new Set(invoices.map((inv) => inv.company_id as string).filter(Boolean))]
+  const names = await loadCompanyNames(supabase, companyIds)
+
   for (const invoice of invoices) {
-    const list = userInvoices.get(invoice.user_id) || []
-    list.push(invoice)
-    userInvoices.set(invoice.user_id, list)
-  }
-
-  for (const [userId, userInvs] of userInvoices) {
-    // Check user-level invoice_reminders_enabled. Unreadable settings mean no
-    // send; a missing row means the defaults (enabled) apply.
-    const settingsRead = await readNotificationSettings(supabase, userId)
-    if (!settingsRead.readable) {
-      skipped += userInvs.length
-      continue
-    }
-    if (settingsRead.settings && !settingsRead.settings.invoice_reminders_enabled) {
-      skipped += userInvs.length
+    const companyId = invoice.company_id as string
+    if (!companyId) {
+      skipped++
       continue
     }
 
-    for (const invoice of userInvs) {
-      const dueDate = new Date(invoice.due_date)
-      const daysUntil = Math.ceil(
-        (dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-      )
-      const isOverdue = daysUntil < 0
-      const notificationType: NotificationType = isOverdue ? 'invoice_overdue' : 'invoice_due'
+    const dueDate = new Date(invoice.due_date)
+    const daysUntil = Math.ceil(
+      (dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+    )
+    const isOverdue = daysUntil < 0
+    const notificationType: NotificationType = isOverdue ? 'invoice_overdue' : 'invoice_due'
 
-      const customer = invoice.customer as unknown as { name: string } | null
-      const customerName = customer?.name || 'Okänd kund'
+    const customer = invoice.customer as unknown as { name: string } | null
+    const customerName = customer?.name || 'Okänd kund'
 
-      const payload = isOverdue
-        ? createInvoiceOverduePayload(
-            invoice.invoice_number,
-            customerName,
-            invoice.total,
-            invoice.currency,
-            invoice.due_date,
-            invoice.id
-          )
-        : createInvoiceDuePayload(
-            invoice.invoice_number,
-            customerName,
-            invoice.total,
-            invoice.currency,
-            invoice.due_date,
-            invoice.id
-          )
+    const basePayload = isOverdue
+      ? createInvoiceOverduePayload(
+          invoice.invoice_number,
+          customerName,
+          invoice.total,
+          invoice.currency,
+          invoice.due_date,
+          invoice.id
+        )
+      : createInvoiceDuePayload(
+          invoice.invoice_number,
+          customerName,
+          invoice.total,
+          invoice.currency,
+          invoice.due_date,
+          invoice.id
+        )
+
+    const payload = withCompanyDeepLink(basePayload, {
+      companyId,
+      companyName: names.get(companyId) ?? null,
+    })
+
+    const members = await listCompanyMemberUserIds(supabase, companyId)
+    if (members.length === 0) {
+      skipped++
+      continue
+    }
+
+    let anySent = false
+    for (const userId of members) {
+      const settingsRead = await readNotificationSettings(supabase, userId)
+      if (!settingsRead.readable) continue
+      if (settingsRead.settings && !settingsRead.settings.invoice_reminders_enabled) continue
 
       const result = await sendNotificationToUser(
         supabase,
@@ -206,13 +211,11 @@ export async function sendInvoiceNotifications(
         invoice.id,
         Math.abs(daysUntil)
       )
-
-      if (result.sent) {
-        sent++
-      } else {
-        skipped++
-      }
+      if (result.sent) anySent = true
     }
+
+    if (anySent) sent++
+    else skipped++
   }
 
   return { sent, skipped }
@@ -242,14 +245,15 @@ export async function sendMissingUnderlagNotifications(
   // past PostgREST's 1000-row cap: a truncated read here would under-count
   // candidates, and a truncated docs/reference read would over-count missing
   // underlag, producing false "saknade underlag" notifications.
-  const entries = await fetchAllRows<{ id: string; user_id: string }>(({ from, to }) =>
-    supabase
-      .from('journal_entries')
-      .select('id, user_id')
-      .eq('status', 'posted')
-      .in('source_type', NEEDS_ATTACHMENT_SOURCE_TYPES)
-      .order('id')
-      .range(from, to)
+  const entries = await fetchAllRows<{ id: string; user_id: string; company_id: string }>(
+    ({ from, to }) =>
+      supabase
+        .from('journal_entries')
+        .select('id, user_id, company_id')
+        .eq('status', 'posted')
+        .in('source_type', NEEDS_ATTACHMENT_SOURCE_TYPES)
+        .order('id')
+        .range(from, to)
   )
 
   if (entries.length === 0) {
@@ -379,45 +383,54 @@ export async function sendMissingUnderlagNotifications(
 
   const exemptedEntries = new Set(exempted.map((e) => e.journal_entry_id))
 
-  // Group missing counts by user
-  const userMissingCounts = new Map<string, number>()
+  // Group missing counts by company (not by the posting user): every member
+  // of that company should see the same underlag debt, with a company-scoped
+  // deep link and lock-screen tag.
+  const companyMissingCounts = new Map<string, number>()
   for (const entry of entries) {
+    if (!entry.company_id) continue
     if (!entriesWithDocs.has(entry.id) && !exemptedEntries.has(entry.id)) {
-      userMissingCounts.set(
-        entry.user_id,
-        (userMissingCounts.get(entry.user_id) || 0) + 1
+      companyMissingCounts.set(
+        entry.company_id,
+        (companyMissingCounts.get(entry.company_id) || 0) + 1
       )
     }
   }
 
-  for (const [userId, count] of userMissingCounts) {
-    // Check user setting. Unreadable settings mean no send; a missing row
-    // means the defaults (enabled) apply.
-    const settingsRead = await readNotificationSettings(supabase, userId)
-    if (!settingsRead.readable) {
+  const names = await loadCompanyNames(supabase, [...companyMissingCounts.keys()])
+
+  for (const [companyId, count] of companyMissingCounts) {
+    const payload = withCompanyDeepLink(createMissingUnderlagPayload(count), {
+      companyId,
+      companyName: names.get(companyId) ?? null,
+    })
+
+    const members = await listCompanyMemberUserIds(supabase, companyId)
+    if (members.length === 0) {
       skipped++
       continue
     }
-    if (settingsRead.settings && settingsRead.settings.missing_underlag_enabled === false) {
-      skipped++
-      continue
+
+    let anySent = false
+    for (const userId of members) {
+      const settingsRead = await readNotificationSettings(supabase, userId)
+      if (!settingsRead.readable) continue
+      if (settingsRead.settings && settingsRead.settings.missing_underlag_enabled === false) {
+        continue
+      }
+
+      const result = await sendNotificationToUser(
+        supabase,
+        userId,
+        payload,
+        'missing_underlag',
+        companyId
+      )
+      if (result.sent) anySent = true
     }
 
-    const payload = createMissingUnderlagPayload(count)
-
-    const result = await sendNotificationToUser(
-      supabase,
-      userId,
-      payload,
-      'missing_underlag',
-      'weekly-check'
-    )
-
-    if (result.sent) {
-      sent++
-    } else {
-      skipped++
-    }
+    if (anySent) sent++
+    else skipped++
   }
 
   return { sent, skipped }

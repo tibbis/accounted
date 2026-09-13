@@ -5,6 +5,7 @@
  * Both event handlers and the cron scheduler import from here.
  */
 
+import { companyDeepLink } from '@/lib/pwa/deep-link'
 import type { NotificationPayload } from './notification-sender'
 
 // ============================================================
@@ -17,6 +18,30 @@ function formatDate(dateStr: string): string {
     day: 'numeric',
     month: 'short',
   })
+}
+
+/**
+ * Route the tap through /open?company=…&next=… and label the body with the
+ * company name so multi-company users can tell which tenant it is about.
+ * Tag is company-scoped so notifications from two companies do not replace
+ * each other on the lock screen.
+ */
+export function withCompanyDeepLink(
+  payload: NotificationPayload,
+  opts: { companyId: string; companyName?: string | null },
+): NotificationPayload {
+  const path = payload.data?.url ?? '/'
+  const name = opts.companyName?.trim()
+  return {
+    ...payload,
+    body: name ? `${payload.body} · ${name}` : payload.body,
+    tag: payload.tag ? `${payload.tag}:${opts.companyId}` : `company:${opts.companyId}`,
+    data: {
+      ...payload.data,
+      url: companyDeepLink(path, opts.companyId),
+      companyId: opts.companyId,
+    },
+  }
 }
 
 // ============================================================
@@ -118,13 +143,16 @@ export function createReceiptMatchedPayload(
 // Missing underlag payload
 // ============================================================
 
-export function createMissingUnderlagPayload(count: number): NotificationPayload {
+export function createMissingUnderlagPayload(
+  count: number,
+  companyId?: string,
+): NotificationPayload {
   return {
     title: 'Saknade underlag',
     body: `${count} verifikation(er) saknar underlag. Bifoga för att uppfylla bokföringslagen.`,
     icon: '/icons/icon-192.png',
     badge: '/icons/badge-72.png',
-    tag: 'missing-underlag-weekly',
+    tag: companyId ? `missing-underlag-weekly:${companyId}` : 'missing-underlag-weekly',
     data: {
       url: '/bookkeeping?missingUnderlag=true',
       type: 'missing_underlag',
