@@ -25,6 +25,7 @@ import {
 import {
   AccountsNotInChartError,
   BookkeepingDatabaseError,
+  CannotCancelNonDraftError,
   CannotCorrectNonPostedError,
   CannotReverseNonPostedError,
   CannotReverseStornoError,
@@ -36,6 +37,8 @@ import {
   InvalidMappingResultError,
   JournalEntryNotBalancedError,
   JournalEntryNotFoundError,
+  JournalLineBothSidesNonZeroError,
+  JournalLineNegativeAmountError,
   CurrencyRevaluationAlreadyExistsError,
   MeaninglessCorrectionError,
   NoOpenPeriodForDateError,
@@ -452,6 +455,22 @@ function extractBookkeepingDetails(err: unknown): { code: string; details?: unkn
       details: { totalDebit: err.totalDebit, totalCredit: err.totalCredit, kind: err.kind },
     }
   }
+  // Both malformed-line errors. Without an arm here they fall through to the
+  // INTERNAL_ERROR default below and a caller-side mistake surfaces as a 500
+  // on /api/v1; the negative-amount arm was missing for the same reason.
+  if (
+    err instanceof JournalLineNegativeAmountError ||
+    err instanceof JournalLineBothSidesNonZeroError
+  ) {
+    return {
+      code: err.code,
+      details: {
+        accountNumber: err.accountNumber,
+        debitAmount: err.debitAmount,
+        creditAmount: err.creditAmount,
+      },
+    }
+  }
   if (err instanceof FiscalPeriodNotFoundError) return { code: err.code }
   if (err instanceof EntryDateOutsideFiscalPeriodError) {
     return {
@@ -472,6 +491,9 @@ function extractBookkeepingDetails(err: unknown): { code: string; details?: unkn
     return { code: err.code, details: { sourceType: err.sourceType } }
   }
   if (err instanceof CannotCorrectNonPostedError) {
+    return { code: err.code, details: { currentStatus: err.currentStatus } }
+  }
+  if (err instanceof CannotCancelNonDraftError) {
     return { code: err.code, details: { currentStatus: err.currentStatus } }
   }
   if (err instanceof EntryAlreadyReversedError) return { code: err.code }
@@ -524,6 +546,12 @@ function buildResponse(
       ...(requestId ? { requestId } : {}),
       ...(details !== undefined ? { details } : {}),
     },
+  }
+  // Consumers that read only error.message need the same actionable summary
+  // as the app. Keep the full issues array and stable code for API clients.
+  if (code === 'VALIDATION_ERROR' && Array.isArray((details as { issues?: unknown } | undefined)?.issues)) {
+    body.error.message = getErrorMessage(body, { locale: 'sv' })
+    body.error.message_en = getErrorMessage(body, { locale: 'en' })
   }
   const res = NextResponse.json(body, { status: entry.httpStatus })
   if (requestId) res.headers.set('X-Request-Id', requestId)

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { loadTaxAdjustmentSnapshot } from '@/lib/bokslut/tax-provision/tax-adjustment-service'
 import { generateTrialBalance } from '@/lib/reports/trial-balance'
+import { truncateToWholeKronor } from '@/lib/money'
 import {
   SIGN_RECLASSIFICATION_RULES,
   selectReclassifiedAccounts,
@@ -75,13 +76,6 @@ const SIGN_RECLASSIFICATION_ROUTES: Record<
   tax_account_credit_to_liability: { from: '7261', to: '7368' },
   tax_liability_debit_to_receivable: { from: '7368', to: '7261' },
   vat_liability_debit_to_receivable: { from: '7369', to: '7261' },
-}
-
-/**
- * Truncate to nearest krona (drop öre) per SFL 22 kap. 1 §
- */
-function truncateToKrona(value: number): number {
-  return value >= 0 ? Math.floor(value) : Math.ceil(value)
 }
 
 /**
@@ -353,14 +347,15 @@ export async function generateINK2Declaration(
       breakdown[code].accounts.push({
         accountNumber: contribution.accountNumber,
         accountName: contribution.accountName,
-        amount: truncateToKrona(amount),
+        amount: truncateToWholeKronor(amount),
       })
     }
   }
 
-  // Truncate all INK2R rutor to whole kronor
+  // Normalize accumulated float drift to öre before dropping them. A raw
+  // sum of 2495.99999999999955 represents 2496 kronor (#2597).
   for (const code of allCodes) {
-    ink2r[code] = truncateToKrona(ink2r[code])
+    ink2r[code] = truncateToWholeKronor(ink2r[code])
     breakdown[code].total = ink2r[code]
   }
 
@@ -484,7 +479,7 @@ export async function generateINK2Declaration(
   // booked result of 469 542 kr, nothing warned, because the balance sheet
   // still tied out on its own. A customer found it instead.
   if (resultClosedIntoEquity) {
-    const bookedResult = truncateToKrona(-(balanceSheetBalances.get('2099') ?? 0))
+    const bookedResult = truncateToWholeKronor(-(balanceSheetBalances.get('2099') ?? 0))
     const declaredResult = aretsResultat
     if (Math.abs(bookedResult - declaredResult) > ROUNDING_TOLERANCE_KR) {
       warnings.push(

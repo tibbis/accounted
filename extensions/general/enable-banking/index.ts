@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import {
   startAuthorization,
   getASPSPs,
-  resolveConnectAuthOptions,
+  getPreferredAuthMethodDetails,
   deleteSession,
   isSandboxMode,
   SessionExpiredError,
@@ -15,7 +15,9 @@ import {
   BANK_UNAVAILABLE_MESSAGE,
   type ASPSP,
 } from './lib/api-client'
+import { buildPrefilledCredentials, wantsCompanyId } from './lib/prefill-credentials'
 import { syncAccountTransactions } from './lib/sync'
+import { emitBankSyncFailed } from './lib/sync-failure-event'
 import { triggerConnectionSync } from './lib/trigger-sync'
 import { findReusableSessions, countLiveSiblings } from './lib/session-sharing'
 import {
@@ -369,43 +371,57 @@ export const enableBankingExtension: Extension = {
           // personal Mobile BankID) back to 'business' on every consent renewal,
           // failing at the bank's signing step. The client can still pass an
           // explicit psu_type to switch account type in place.
+          // entity_type decides the default PSU type; org_number is the
+          // företags-ID some banks ask for on Enable Banking's page. Read
+          // once, and only when one of them is needed.
+          type CompanyRow = { entity_type: string | null; org_number: string | null }
+          let companyRow: CompanyRow | null | undefined
+          const loadCompany = async (): Promise<CompanyRow | null> => {
+            if (companyRow === undefined) {
+              const { data } = await supabase
+                .from('companies')
+                .select('entity_type, org_number')
+                .eq('id', companyId)
+                .single()
+              companyRow = (data as CompanyRow | null) ?? null
+            }
+            return companyRow
+          }
+
           let psuType: 'personal' | 'business' = 'business'
-          let companyOrgNumber: string | null | undefined
           if (explicitPsuType === 'personal' || explicitPsuType === 'business') {
             psuType = explicitPsuType
           } else if (isReconnect && (existing?.psu_type === 'personal' || existing?.psu_type === 'business')) {
             psuType = existing.psu_type
-          }
-
-          const needsCompanyProfile =
-            !explicitPsuType &&
-            !(isReconnect && (existing?.psu_type === 'personal' || existing?.psu_type === 'business'))
-          // Always select both columns: a conditional select string breaks the
-          // generated Supabase types into a ParserError union.
-          const { data: companyProfile } = await supabase
-            .from('companies')
-            .select('entity_type, org_number')
-            .eq('id', companyId)
-            .single()
-
-          if (needsCompanyProfile && companyProfile?.entity_type === 'enskild_firma') {
+          } else if ((await loadCompany())?.entity_type === 'enskild_firma') {
             psuType = 'personal'
           }
-          companyOrgNumber = companyProfile?.org_number
 
-          // Resolve auth_method and optional org-number prefill. Handelsbanken
-          // (and some other Swedish banks) expose Mobile BankID only as a hidden
-          // DECOUPLED method; without pinning it, Enable Banking defaults to the
-          // REDIRECT method, which for Handelsbanken *corporate* PSUs cannot
-          // complete with Mobile BankID. For banks like SEB whose visible
-          // business flow asks for organisationsnummer, we pass credentials with
-          // credentials_autosubmit:false so the field is pre-filled on consent.
-          const { authMethod, credentials, preferredMethod } = await resolveConnectAuthOptions(
+          // Resolve the bank's preferred auth method. Handelsbanken (and some
+          // other Swedish banks) expose Mobile BankID only as a hidden DECOUPLED
+          // method; without pinning it, Enable Banking defaults to the REDIRECT
+          // method, which for Handelsbanken *corporate* PSUs cannot complete
+          // with Mobile BankID: the user approves in the app and then hits an
+          // error. Only hidden methods applicable to this psu_type are pinned;
+          // banks whose decoupled method is visible (e.g. Lunar) get undefined
+          // so their own working default flow runs untouched.
+          const preferredMethod = await getPreferredAuthMethodDetails(
             resolvedAspspName,
             resolvedAspspCountry,
-            psuType,
-            companyOrgNumber,
+            psuType
           )
+          const authMethod = preferredMethod?.name
+
+          // Prefill what the ledger already knows (the organisationsnummer
+          // as företags-ID) so the person is not asked to type it in a
+          // format Enable Banking's page never explains. Value stays out of
+          // the log; only whether one was sent.
+          const credentials = wantsCompanyId(preferredMethod)
+            ? buildPrefilledCredentials(preferredMethod, {
+                org_number: (await loadCompany())?.org_number ?? null,
+                entity_type: (await loadCompany())?.entity_type ?? null,
+              })
+            : undefined
 
           log.info('[enable-banking] Starting bank connection', {
             user_id: user.id,
@@ -413,6 +429,7 @@ export const enableBankingExtension: Extension = {
             country: resolvedAspspCountry,
             psu_type: psuType,
             auth_method: authMethod ?? '(aspsp default)',
+            credentials_prefilled: credentials ? Object.keys(credentials) : [],
             // Chosen method's metadata, so prod logs can verify per-bank pinning
             // behavior after deploy (hidden-only + psu_types selection). A
             // pinned method with no psu_types (the documented Handelsbanken
@@ -628,7 +645,7 @@ export const enableBankingExtension: Extension = {
               psuType,
               authMethod,
               companyId,
-              credentials ? { credentials } : undefined,
+              credentials
             )
 
             // Record the bank's authorization_id for audit/traceability. The
@@ -663,7 +680,7 @@ export const enableBankingExtension: Extension = {
             psuType,
             authMethod,
             companyId,
-            credentials ? { credentials } : undefined,
+            credentials
           )
 
           const { data: connection, error } = await supabase
@@ -958,6 +975,22 @@ export const enableBankingExtension: Extension = {
             history_from: historyFrom,
           })
         } catch (error) {
+          // One durable row per failed sync, whichever branch below answers
+          // (feedback seq 340107). status is the row's state after this
+          // handler: expired for a dead session, unchanged otherwise.
+          const emitFailed =
+            ctx?.emit ??
+            (await import('@/lib/events/bus')).eventBus.emit.bind((await import('@/lib/events/bus')).eventBus)
+          await emitBankSyncFailed(emitFailed, {
+            connectionId: connection.id,
+            companyId,
+            userId: user.id,
+            bankName: connection.bank_name,
+            status: error instanceof SessionExpiredError ? 'expired' : connection.status,
+            trigger: 'manual',
+            error,
+          })
+
           // The bank refused a window it has answered before, or every
           // narrower one: not a dead session and not a broken connection, so
           // the row is left alone (no 'error', no renewal advice) and the
@@ -1273,6 +1306,7 @@ export const enableBankingExtension: Extension = {
             delete next.claimed_by_company_id
             delete next.claimed_by_company_name
             delete next.deselected_elsewhere
+            delete next.mirror_card_account
           }
           return next
         })

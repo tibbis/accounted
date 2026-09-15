@@ -58,6 +58,8 @@ Systemdokumentationen ska förvaras tillsammans med övrig räkenskapsinformatio
 3.4. Företagsspecifika anpassningar av kontoplanen:
 [BESKRIV EVENTUELLA TILLAGDA ELLER BORTTAGNA KONTON, t.ex. "Konto 4010 Inköp varor, 5010 Lokalhyra har lagts till. Inga standardkonton har tagits bort."]
 
+3.5. Vid SIE-import kan oanvända kontodefinitioner i klass 0 och 9 bevaras. Konton med belopp måste mappas till konton 1000-8999 innan importen startas, eftersom Accounteds ekonomiska rapporter inte har stöd för dessa målklasser. Detta är en begränsning i programmet. Källfil och kontomappningar bevaras i importarkivet. Säkerhetsbackupens systemdokumentation innehåller den aktuella kontoplanens namn, kontoklasser, SRU-kopplingar och beskrivningar.
+
 ## 4. Samlingsplan (BFNAR 2013:2 punkt 9.2 c, 9.4, 9.11)
 
 Samlingsplanen beskriver hur bokföringen är organiserad i form av delsystem, grundbokföring och huvudbokföring.

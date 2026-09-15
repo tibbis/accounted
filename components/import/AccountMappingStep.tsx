@@ -32,6 +32,7 @@ import {
 } from 'lucide-react'
 import type { AccountMapping } from '@/lib/import/types'
 import { isValidBASRange } from '@/lib/import/account-mapper'
+import { isAccountNumber } from '@/lib/invariants/account-number'
 import type { BASAccount } from '@/types'
 import { getAccountClassName } from '@/lib/bookkeeping/account-descriptions'
 import {
@@ -178,6 +179,7 @@ export default function AccountMappingStep({
   const accountsByClass = useMemo(() => {
     const groups: { [key: string]: BASAccount[] } = {}
     for (const account of basAccounts) {
+      if (!isAccountNumber(account.account_number)) continue
       const className = getAccountClassName(account.account_class)
       if (!groups[className]) {
         groups[className] = []
@@ -378,6 +380,7 @@ export default function AccountMappingStep({
                     <TableCell>
                       {mapping.sourceAccount === mapping.targetAccount &&
                       ['3', '4', '5', '6'].includes(mapping.sourceAccount.charAt(0)) ? (
+                        <>
                         <div className="flex gap-2">
                           <Select
                             value={mapping.defaultVatTreatment ?? 'none'}
@@ -435,6 +438,12 @@ export default function AccountMappingStep({
                             </SelectContent>
                           </Select>
                         </div>
+                        {mapping.providerVatCode ? (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {t('vat_treatment_source_code', { code: mapping.providerVatCode })}
+                          </p>
+                        ) : null}
+                        </>
                       ) : (
                         <span className="text-muted-foreground">-</span>
                       )}

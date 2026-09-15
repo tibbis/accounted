@@ -123,7 +123,7 @@ describe('GET /api/salary/runs/[id]/preview', () => {
     expect(lines.find((l) => l.account_number === '3740')?.credit_amount).toBe(0.84)
   })
 
-  it('returns the ACTUAL posted verifikat for a booked run, voucher labels included', async () => {
+  it('returns the ACTUAL posted verifikat for a booked run, voucher label and entry id as own fields', async () => {
     enqueue({
       data: {
         ...CALCULATED_RUN,
@@ -170,12 +170,128 @@ describe('GET /api/salary/runs/[id]/preview', () => {
     const { data } = await response.json()
 
     expect(data.booked).toBe(true)
-    expect(data.salaryEntry.description).toBe('Lön 2026-07 (A-214)')
-    expect(data.avgifterEntry.description).toBe('Lön 2026-07: Arbetsgivaravgifter (A-215)')
+    // The voucher label rides beside the description, not inside it: the page
+    // turns it into a link to /bookkeeping/<entry id>.
+    expect(data.salaryEntry.description).toBe('Lön 2026-07')
+    expect(data.salaryEntry.voucher).toBe('A-214')
+    expect(data.salaryEntry.journal_entry_id).toBe('je-1')
+    expect(data.avgifterEntry.description).toBe('Lön 2026-07: Arbetsgivaravgifter')
+    expect(data.avgifterEntry.voucher).toBe('A-215')
+    expect(data.avgifterEntry.journal_entry_id).toBe('je-2')
     const avgifterLines = data.avgifterEntry.lines as Array<{ account_number: string; credit_amount: number }>
     expect(avgifterLines.find((l) => l.account_number === '2731')?.credit_amount).toBe(16073.84)
     expect(avgifterLines.some((l) => l.account_number === '3740')).toBe(false)
     expect(data.vacationEntry).toBeNull()
     expect(data.pensionEntry).toBeNull()
+  })
+
+  it('keeps the link target for an entry that has no voucher number yet', async () => {
+    enqueue({
+      data: { ...CALCULATED_RUN, status: 'booked', salary_entry_id: 'je-1' },
+    }) // salary_runs
+    enqueue({
+      data: [
+        {
+          id: 'je-1',
+          description: 'Lön 2026-07',
+          voucher_series: 'A',
+          voucher_number: null,
+          lines: [],
+        },
+      ],
+    }) // journal_entries
+
+    const response = await GET(
+      createMockRequest('/api/salary/runs/run-1/preview'),
+      createMockRouteParams({ id: 'run-1' }),
+    )
+    const { data } = await response.json()
+
+    // No label to print, but the verifikat is still reachable: the page simply
+    // renders no link rather than a label that goes nowhere.
+    expect(data.salaryEntry.voucher).toBeNull()
+    expect(data.salaryEntry.journal_entry_id).toBe('je-1')
+  })
+})
+
+describe('GET /api/salary/runs/[id]/preview: previews the booking builder (feedback seq 384229)', () => {
+  const mockUser = { id: 'user-1', email: 'test@test.se' }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    reset()
+    requireAuthMock.mockResolvedValue({ user: mockUser, supabase: mockSupabase, error: null })
+  })
+
+  type Line = { account_number: string; debit_amount: number; credit_amount: number }
+  const sum = (lines: Line[], side: 'debit_amount' | 'credit_amount') =>
+    Math.round(lines.reduce((s, l) => s + l[side], 0) * 100) / 100
+
+  it('previews a bilförmån run balanced: no 7385 debit without a counterpart', async () => {
+    enqueue({ data: CALCULATED_RUN }) // salary_runs
+    enqueue({
+      data: [
+        {
+          ...EMPLOYEE_ROW,
+          line_items: [
+            { item_type: 'base_salary', amount: 51158, account_number: '7210', is_net_deduction: false, is_gross_deduction: false },
+            // The benefit raises the tax base but has no cash flow: the
+            // booking skips it, so the preview must too.
+            { item_type: 'benefit_car', amount: 7049, account_number: '7385', is_net_deduction: false, is_gross_deduction: false },
+          ],
+        },
+      ],
+    }) // salary_run_employees
+
+    const response = await GET(
+      createMockRequest('/api/salary/runs/run-1/preview'),
+      createMockRouteParams({ id: 'run-1' }),
+    )
+    expect(response.status).toBe(200)
+    const { data } = await response.json()
+
+    const lines = data.salaryEntry.lines as Line[]
+    expect(lines.some((l) => l.account_number === '7385')).toBe(false)
+    expect(lines.find((l) => l.account_number === '7210')?.debit_amount).toBe(51158)
+    expect(lines.find((l) => l.account_number === '2710')?.credit_amount).toBe(12268)
+    expect(lines.find((l) => l.account_number === '1930')?.credit_amount).toBe(38890)
+    expect(sum(lines, 'debit_amount')).toBe(sum(lines, 'credit_amount'))
+    expect(data.salaryEntry.balanced).toBe(true)
+    expect(data.salaryEntry.difference).toBe(0)
+    expect(data.avgifterEntry.balanced).toBe(true)
+    expect(data.balanced).toBe(true)
+  })
+
+  it('applies the per-employee tax override exactly like the booking', async () => {
+    enqueue({ data: CALCULATED_RUN }) // salary_runs
+    enqueue({ data: [{ ...EMPLOYEE_ROW, tax_withheld_override: 12000 }] }) // salary_run_employees
+
+    const response = await GET(
+      createMockRequest('/api/salary/runs/run-1/preview'),
+      createMockRouteParams({ id: 'run-1' }),
+    )
+    expect(response.status).toBe(200)
+    const { data } = await response.json()
+    const lines = data.salaryEntry.lines as Line[]
+    expect(lines.find((l) => l.account_number === '2710')?.credit_amount).toBe(12000)
+    expect(lines.find((l) => l.account_number === '1930')?.credit_amount).toBe(39158)
+    expect(data.salaryEntry.balanced).toBe(true)
+  })
+
+  it('drops the zero-shaped avgifter entry for a run without avgifter, like the booking', async () => {
+    enqueue({ data: CALCULATED_RUN }) // salary_runs
+    enqueue({
+      data: [{ ...EMPLOYEE_ROW, avgifter_amount: 0, avgifter_basis: 0, employee: { employment_type: 'employee', f_skatt_status: 'f_skatt' } }],
+    }) // salary_run_employees
+
+    const response = await GET(
+      createMockRequest('/api/salary/runs/run-1/preview'),
+      createMockRouteParams({ id: 'run-1' }),
+    )
+    expect(response.status).toBe(200)
+    const { data } = await response.json()
+    expect(data.avgifterEntry).toBeNull()
+    expect(data.salaryEntry.balanced).toBe(true)
+    expect(data.balanced).toBe(true)
   })
 })

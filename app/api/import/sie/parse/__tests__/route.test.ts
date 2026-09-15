@@ -120,6 +120,36 @@ describe('POST /api/import/sie/parse', () => {
     expect(response.status).toBe(400)
   })
 
+  it('keeps unused non-four-digit definitions visible as archive-only and out of target mappings', async () => {
+    const response = await POST(fileRequest(CLEAN_SIE + '\n#KONTO 999 "Unused"\n#KONTO 193000 "Unused subaccount"'), emptyParams)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body.parsed.accounts.map((account: { number: string }) => account.number)).toContain('193000')
+    expect(body.preview.archivedOnlyAccounts.map((account: { number: string }) => account.number)).toEqual(['999', '193000'])
+    expect(body.mappings.map((mapping: { sourceAccount: string }) => mapping.sourceAccount)).not.toContain('193000')
+    expect(body.mappingStats.unmapped).toBe(0)
+    expect(body.preview.accountCount).toBe(4)
+  })
+
+  // #2546: SIE4I subsystem files carry the .si extension, which this route
+  // rejected even though the MCP upload tool already accepted it.
+  it.each(['test.se', 'test.sie', 'test.si', 'TEST.SI'])('accepts %s', async (filename) => {
+    enqueue({ data: [] }) // company chart
+    enqueue({ data: { id: 'p-2024' } }) // containing fiscal period
+
+    const response = await POST(fileRequest(CLEAN_SIE, filename), emptyParams)
+    expect(response.status).toBe(200)
+  })
+
+  it('returns 400 for a file extension that is not SIE', async () => {
+    const response = await POST(fileRequest(CLEAN_SIE, 'test.txt'), emptyParams)
+    const body = (await response.json()) as { error?: { code?: string; message?: string } }
+
+    expect(response.status).toBe(400)
+    expect(body.error?.code).toBe('SIE_PARSE_INVALID_TYPE')
+    expect(body.error?.message).toContain('.si')
+  })
+
   it('adds a mojibake warning to the preview issues without blocking the parse', async () => {
     const response = await POST(fileRequest(MOJIBAKE_SIE), emptyParams)
     const body = (await response.json()) as ParseResponse

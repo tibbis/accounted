@@ -1,5 +1,8 @@
+import { readSIEIntakeFile } from '@/lib/import/sie-intake'
+import { submitSIEJob } from '@/lib/import/sie-jobs'
+import { runSIEWorker } from '@/lib/import/sie-job-worker'
 import type { Extension, ExtensionContext } from '@/lib/extensions/types'
-import { NextResponse } from 'next/server'
+import { after, NextResponse } from 'next/server'
 import {
   createConsent,
   getConsent,
@@ -15,6 +18,7 @@ import {
   deleteConsent,
   resolveConsent,
   fetchCompanyInfoDirect,
+  fetchAccountingAccountsDirect,
   ProviderTokenInvalidError,
   ProviderCompanyMismatchError,
   ConsentNotFoundError,
@@ -37,13 +41,16 @@ import {
 import { fetchFortnoxAssetPreview } from './lib/import-assets'
 import { reconcileSupplierInvoiceVouchers } from '@/lib/invoices/bulk-reconcile-supplier-vouchers'
 import { relinkRegistrationVouchers } from './lib/relink-registration-vouchers'
+import { refreshMigratedSupplierPaymentState } from './lib/refresh-migrated-payment-state'
 import type { ArcimProvider } from './types'
 import { ARCIM_PROVIDERS } from './types'
 import { parseSIEFile, validateSIEFile } from '@/lib/import/sie-parser'
 import { mergeParsedSIEFiles } from '@/lib/import/sie-merge'
 import { scanSieForCp1252Artifacts, formatSieArtifactWarning } from '@/lib/import/sie-artifact-scan'
 import { suggestMappings, getMappingStats, isSystemAccount } from '@/lib/import/account-mapper'
-import { loadMappings, generateImportPreview, executeSIEImport, findOverlappingPeriodImports } from '@/lib/import/sie-import'
+import { applySourceVatCodes } from '@/lib/import/account-vat-treatment'
+import { fortnoxVatCodeToTreatment } from '@/lib/providers/fortnox/vat-codes'
+import { loadMappings, generateImportPreview, findOverlappingPeriodImports } from '@/lib/import/sie-import'
 import { buildMappingTargets } from './lib/mapping-targets'
 import type { ProviderName } from '@/lib/providers/types'
 import { FORTNOX_DOCUMENT_SCOPES_APPROVED } from '@/lib/providers/fortnox/oauth'
@@ -64,6 +71,20 @@ import { createLogger } from '@/lib/logger'
 import { resolveBrandByHost } from '@/lib/branding/resolve'
 
 const moduleLog = createLogger('extensions/arcim-migration')
+
+/**
+ * Wall-clock budget for one /migrate run.
+ *
+ * The dispatcher (app/api/extensions/ext/[...path]/route.ts) runs under
+ * maxDuration = 800, and a run that is still going when Vercel terminates
+ * the function never writes its terminal NDJSON line: the wizard reports a
+ * dropped connection over a job that half-landed. The orchestrator fits its
+ * budget-aware steps inside this deadline and keeps the rest of the ceiling
+ * for the unbudgeted tail (voucher links, reconciliation, party
+ * suggestions, the accept write). Self-hosted has no ceiling; the same
+ * budget keeps a run bounded there too.
+ */
+const MIGRATE_RUN_BUDGET_MS = 660_000
 
 /**
  * The one answer the unauthenticated OAuth callback gives for every state
@@ -314,12 +335,27 @@ export const arcimMigrationExtension: Extension = {
           const consents = allConsents.filter(c => c.status === 1)
 
           // Get SIE import history
+          const SIE_IMPORT_COLUMNS = 'id, filename, status, accounts_count, transactions_count, company_name, fiscal_year_start, fiscal_year_end, imported_at, created_at'
           const { data: sieImports } = await supabase
             .from('sie_imports')
-            .select('id, filename, status, accounts_count, transactions_count, company_name, fiscal_year_start, fiscal_year_end, imported_at, created_at')
+            .select(SIE_IMPORT_COLUMNS)
             .eq('company_id', companyId)
             .order('created_at', { ascending: false })
             .limit(10)
+
+          // The history above is for display. Whether a completed import
+          // EXISTS is asked on its own: failed and replaced rows can push the
+          // completed one out of the newest-10 window, and the wizard then
+          // gated Visma/Bokio behind "SIE krävs först" for a company that had
+          // imported. Same predicate as the /migrate guard.
+          const { data: latestCompletedSieImport } = await supabase
+            .from('sie_imports')
+            .select(SIE_IMPORT_COLUMNS)
+            .eq('company_id', companyId)
+            .eq('status', 'completed')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
 
           // Get entity counts (to show what's already been imported)
           const [
@@ -341,6 +377,8 @@ export const arcimMigrationExtension: Extension = {
               createdAt: c.createdAt,
             })),
             sieImports: sieImports ?? [],
+            hasCompletedSieImport: latestCompletedSieImport != null,
+            latestCompletedSieImport: latestCompletedSieImport ?? null,
             entityCounts: {
               customers: customerCount ?? 0,
               suppliers: supplierCount ?? 0,
@@ -1229,7 +1267,30 @@ export const arcimMigrationExtension: Extension = {
           // such an account was impossible to map onto. See
           // ./lib/mapping-targets.
           const mappingTargets = await buildMappingTargets(supabase, companyId)
-          const mappings = suggestMappings(allAccounts, mappingTargets, existingRecords)
+          let mappings = suggestMappings(allAccounts, mappingTargets, existingRecords)
+
+          // The momskod each account has in the source system. SIE4 #KONTO
+          // carries none, so without this the mapping step can only guess
+          // from the label, and a Fortnox user saw it propose codes that
+          // differed from their own kontoplan (#2585). Optional enrichment:
+          // a failed chart fetch is logged and the step falls back to the
+          // label suggestion rather than failing an import that does not
+          // need it.
+          try {
+            const sourceAccounts = await fetchAccountingAccountsDirect(provider, resolved.accessToken)
+            const codesByAccount = new Map<string, string>()
+            for (const account of sourceAccounts) {
+              if (account.vatCode) codesByAccount.set(account.accountNumber, account.vatCode)
+            }
+            if (codesByAccount.size > 0) {
+              mappings = applySourceVatCodes(mappings, codesByAccount, fortnoxVatCodeToTreatment)
+              const translated = mappings.filter((m) => m.providerVatTreatment).length
+              log.info(`Account mapping: ${codesByAccount.size} ${provider} VAT codes fetched, ${translated} translated to a treatment`)
+            }
+          } catch (err) {
+            log.warn(`Account mapping: ${provider} chart fetch failed, VAT codes fall back to label suggestions`, err as Error)
+          }
+
           const mappingStats = getMappingStats(mappings)
 
           log.info(`Account mapping: ${allAccounts.length} unique accounts across ${sieFiles.length} files, ${mappingStats.unmapped} unmapped`)
@@ -1244,6 +1305,7 @@ export const arcimMigrationExtension: Extension = {
             fiscalYear: number
             rawContent: string
             previousImport: {
+              id: string
               importedAt: string | null
               fiscalYearStart: string | null
               fiscalYearEnd: string | null
@@ -1254,6 +1316,7 @@ export const arcimMigrationExtension: Extension = {
             const fyEnd = fileParsed.stats.fiscalYearEnd
 
             let priorImport: {
+              id: string
               imported_at: string | null
               fiscal_year_start: string | null
               fiscal_year_end: string | null
@@ -1278,6 +1341,7 @@ export const arcimMigrationExtension: Extension = {
               rawContent: file.rawContent,
               previousImport: priorImport
                 ? {
+                    id: priorImport.id,
                     importedAt: priorImport.imported_at,
                     fiscalYearStart: priorImport.fiscal_year_start,
                     fiscalYearEnd: priorImport.fiscal_year_end,
@@ -1339,7 +1403,9 @@ export const arcimMigrationExtension: Extension = {
 
         const companyId = ctx?.companyId ?? user.id
 
-        const { rawContent, mappings, options } = await request.json() as {
+        const { rawContent: inlineContent, storagePath, filename, mappings, options } = await request.json() as {
+          storagePath?:string
+          filename?:string
           rawContent: string
           mappings: import('@/lib/import/types').AccountMapping[]
           options: {
@@ -1348,9 +1414,12 @@ export const arcimMigrationExtension: Extension = {
             importTransactions: boolean
             voucherSeries?: string
             updateAccountNames?: boolean
+            supersedesImportId?: string
           }
         }
 
+        const originalFile = storagePath ? await readSIEIntakeFile(supabase,companyId,storagePath,filename ?? 'migration.se') : undefined
+        const rawContent = originalFile ? await originalFile.text() : inlineContent
         if (!rawContent || !mappings) {
           return NextResponse.json({ error: 'rawContent and mappings are required' }, { status: 400 })
         }
@@ -1385,47 +1454,15 @@ export const arcimMigrationExtension: Extension = {
             }, { status: 400 })
           }
 
-          // Account creation (and #KONTO renames) happen inside
-          // executeSIEImport via syncMappedAccounts: the auto-activate block
-          // that used to live here was a duplicate of that logic. Mapping
-          // persistence ALSO happens inside executeSIEImport, with the
-          // correct companyId + userId and non-fatal warning handling: the
-          // direct saveMappings call that used to sit here passed user.id in
-          // the companyId slot, which throws on RLS/FK now that the helper
-          // surfaces upsert failures, 500ing every provider-migration import
-          // before a single voucher was written. Do not re-add it.
-          const result = await executeSIEImport(supabase, companyId, user.id, parsed, mappings, {
-            filename: `migration-sie-${Date.now()}.se`,
-            fileContent: rawContent,
-            createFiscalPeriod: options.createFiscalPeriod,
-            importOpeningBalances: options.importOpeningBalances,
-            importTransactions: options.importTransactions,
-            voucherSeries: options.voucherSeries,
-            // Default ON: re-syncs keep account names current with the source
-            // system (idempotent: equal names are a no-op in the rename pass).
-            updateAccountNames: options.updateAccountNames ?? true,
-            // Provider re-sync semantics: a prior completed import for the
-            // same fiscal year is automatically replaced (its imported
-            // entries are cancelled) so the user can pull updated data
-            // without manual cleanup. Manual SIE upload keeps default
-            // 'block' behavior.
-            onExistingPeriod: 'replace',
-          })
-
-          // Surface the tripwire on the result the workspace UI already
-          // renders (its "Remaining warnings" card shows result.warnings).
-          if (artifactScan.flagged) {
-            result.warnings.push(formatSieArtifactWarning(artifactScan))
-          }
-
-          log.info('SIE import completed:', {
-            success: result.success,
-            journalEntriesCreated: result.journalEntriesCreated,
-            errors: result.errors.length,
-            errorDetails: result.errors.slice(0, 10),
-          })
-
-          return NextResponse.json(result)
+          const job = await submitSIEJob(supabase,companyId,user.id,rawContent,mappings,{
+            filename: 'migration-sie-'+parsed.stats.fiscalYearStart+'.se',
+            ...options,updateAccountNames:options.updateAccountNames ?? true,
+            onExistingPeriod:options.supersedesImportId ? 'replace' : 'block',
+          },originalFile)
+          after(async () => { await runSIEWorker({importId:job.id}) })
+          return NextResponse.json({importId:job.id,state:job.job_state,
+            warnings:artifactScan.flagged ? [formatSieArtifactWarning(artifactScan)] : [],
+            statusUrl:'/api/import/sie/'+job.id}, {status:202})
         } catch (error) {
           log.error('arcim sie import failed', error as Error)
           return providerFailureResponse(error, 'SIE_IMPORT_UNEXPECTED')
@@ -1602,6 +1639,7 @@ export const arcimMigrationExtension: Extension = {
             importSupplierInvoices,
             importAssets,
             reconcileVouchers,
+            deadlineMs: Date.now() + MIGRATE_RUN_BUDGET_MS,
           }
 
           // Streaming mode (the migration wizard opts in via Accept): one
@@ -1683,15 +1721,20 @@ export const arcimMigrationExtension: Extension = {
     // { dryRun: true } to preview the plan (incl. items needing manual review)
     // without writing.
     //
-    // Pass { consentId } to ALSO re-link registration vouchers (the verifikat
-    // that BOOKED each invoice). The imported rows do not store the provider's
-    // voucher ref, so that pass re-fetches both registers from the provider
-    // through the given consent; without a consentId it is skipped and the
-    // response carries no `registrationLinks`. The consent is validated
-    // (company-scoped) BEFORE the payment reconcile writes anything, so a
-    // wrong id is a clean 404; a provider failure during the relink itself is
-    // reported beside the payment result, which was already persisted, as
-    // `registrationLinksError` rather than by discarding that result.
+    // Pass { consentId } to ALSO run the two provider-backed passes:
+    //   `registrationLinks`: re-link registration vouchers (the verifikat that
+    //     BOOKED each invoice). The imported rows do not store the provider's
+    //     voucher ref, so the registers are re-fetched through the consent.
+    //   `paymentRefresh`: refresh the payment state of migrated supplier
+    //     invoices that are still open here, from what the provider reports
+    //     now. This is the repair path for invoices imported by a mapper that
+    //     could not read the provider's payment fields (Bokio, 2026-09-14).
+    // Without a consentId both are skipped and the response carries neither.
+    // The consent is validated (company-scoped) BEFORE the payment reconcile
+    // writes anything, so a wrong id is a clean 404; a provider failure inside
+    // either pass is reported beside the results that were already persisted,
+    // as `registrationLinksError` / `paymentRefreshError`, rather than by
+    // discarding them. The two passes are independent of each other.
     {
       method: 'POST',
       path: '/reconcile',
@@ -1753,8 +1796,22 @@ export const arcimMigrationExtension: Extension = {
           return NextResponse.json({ success: true, dryRun, result })
         }
 
+        // resolveConsent throws plain `{ status, message }` objects for a
+        // consent that vanished or lost its tokens between the check above
+        // and here; classifyProviderError handles the provider-side ones.
+        const providerErrorCode = (error: unknown): string => {
+          const status = typeof error === 'object' && error !== null && 'status' in error
+            ? (error as { status?: unknown }).status
+            : undefined
+          return error instanceof ConsentNotFoundError || status === 404
+            ? 'PROVIDER_CONSENT_NOT_FOUND'
+            : classifyProviderError(error) ?? 'PROVIDER_MIGRATE_FAILED'
+        }
+
+        let registrationLinks: Awaited<ReturnType<typeof relinkRegistrationVouchers>> | null = null
+        let registrationLinksError: { code: string } | null = null
         try {
-          const registrationLinks = await relinkRegistrationVouchers({
+          registrationLinks = await relinkRegistrationVouchers({
             supabase,
             companyId,
             consentId,
@@ -1770,26 +1827,50 @@ export const arcimMigrationExtension: Extension = {
             ambiguous: registrationLinks.ambiguous,
             amountMismatch: registrationLinks.amountMismatch,
           })
-          return NextResponse.json({ success: true, dryRun, result, registrationLinks })
         } catch (error) {
-          // resolveConsent throws plain `{ status, message }` objects for a
-          // consent that vanished or lost its tokens between the check above
-          // and here; classifyProviderError handles the provider-side ones.
           log.error('arcim registration relink failed', error as Error)
-          const status = typeof error === 'object' && error !== null && 'status' in error
-            ? (error as { status?: unknown }).status
-            : undefined
-          const code = error instanceof ConsentNotFoundError || status === 404
-            ? 'PROVIDER_CONSENT_NOT_FOUND'
-            : classifyProviderError(error) ?? 'PROVIDER_MIGRATE_FAILED'
-          return NextResponse.json({
-            success: true,
-            dryRun,
-            result,
-            registrationLinks: null,
-            registrationLinksError: { code },
-          })
+          registrationLinksError = { code: providerErrorCode(error) }
         }
+
+        // The same consent also knows which migrated supplier invoices the
+        // provider considers settled. A migration can only write what its
+        // mapper read, and the Bokio supplier-invoice mapper read fields that
+        // schema does not have, so those rows stand as "Registrerad" with
+        // their whole total open. Ask the provider and write what it says,
+        // by the same rule the import uses. Independent of the relink: a
+        // provider failure in one must not discard the other's result.
+        let paymentRefresh: Awaited<ReturnType<typeof refreshMigratedSupplierPaymentState>> | null = null
+        let paymentRefreshError: { code: string } | null = null
+        try {
+          paymentRefresh = await refreshMigratedSupplierPaymentState({
+            supabase,
+            companyId,
+            consentId,
+            dryRun,
+          })
+          log.info('arcim supplier payment-state refresh completed', {
+            companyId,
+            dryRun,
+            providerInvoices: paymentRefresh.providerInvoices,
+            matched: paymentRefresh.matched,
+            updated: paymentRefresh.updated,
+            unchanged: paymentRefresh.unchanged,
+            unmatched: paymentRefresh.unmatched,
+          })
+        } catch (error) {
+          log.error('arcim supplier payment-state refresh failed', error as Error)
+          paymentRefreshError = { code: providerErrorCode(error) }
+        }
+
+        return NextResponse.json({
+          success: true,
+          dryRun,
+          result,
+          registrationLinks,
+          ...(registrationLinksError ? { registrationLinksError } : {}),
+          paymentRefresh,
+          ...(paymentRefreshError ? { paymentRefreshError } : {}),
+        })
       },
     },
 

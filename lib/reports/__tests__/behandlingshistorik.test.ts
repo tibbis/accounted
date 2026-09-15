@@ -93,7 +93,7 @@ describe('AUDIT_ROW_FILTER', () => {
 
   it('is the exact literal used in the audit_log query (schema guard needs a literal there)', () => {
     const source = readFileSync(path.join(__dirname, '..', 'behandlingshistorik.ts'), 'utf-8')
-    expect(source).toContain(`.or(\n        '${AUDIT_ROW_FILTER}',\n      )`)
+    expect(source.replace(/\r\n/g, '\n')).toContain(`.or(\n        '${AUDIT_ROW_FILTER}',\n      )`)
   })
 })
 
@@ -175,6 +175,16 @@ describe('commitEventFromEntry', () => {
 // ============================================================
 
 describe('auditRowToEvent: journal_entries', () => {
+  it('renders the exact voucher identities and hash of a compact SIE receipt', () => {
+    const event = auditRowToEvent(auditRow({ table_name: 'sie_import_chunks', action: 'COMMIT', new_state: {
+      import_id: 'batch-1', phase: 'vouchers', chunk_no: 2, payload_hash: 'hash-1',
+      entries: [{ id: 'entry-7', series: 'A', voucherNumber: 7 }],
+    } }))!
+    expect(event.code).toBe('sie_import.chunk_committed')
+    expect(event.object).toBe('batch-1')
+    expect(event.details.join(' ')).toContain('entry-7')
+    expect(event.details.join(' ')).toContain('hash-1')
+  })
   it('ignores COMMIT rows (the bokföringspost comes from journal_entries)', () => {
     expect(auditRowToEvent(auditRow({ action: 'COMMIT', new_state: { status: 'posted' } }))).toBeNull()
   })
@@ -241,6 +251,100 @@ describe('auditRowToEvent: journal_entries', () => {
     expect(ev.code).toBe('journal_entry.committed_at_override')
     expect(ev.actor.type).toBe('system')
     expect(ev.details[0]).toContain('2025-01-01')
+  })
+})
+
+describe('auditRowToEvent: bypassed guards (issue #2366)', () => {
+  const bypassRow = (state: Record<string, unknown>) =>
+    auditRow({
+      action: 'GUARD_BYPASSED',
+      table_name: 'supplier_invoices',
+      record_id: 'si-1',
+      description: 'Duplicate-payment guard bypassed with force on supplier invoice LF-7',
+      new_state: {
+        guard: 'supplier_invoice_duplicate_payment',
+        reason: 'force',
+        supplier_invoice_id: 'si-1',
+        supplier_invoice_number: 'LF-7',
+        payment_amount: 1000,
+        payment_currency: 'SEK',
+        payment_date: '2026-05-12',
+        payment_account: '1930',
+        journal_entry_id: 'entry-1',
+        detector_failed: false,
+        candidate_count: 0,
+        candidates: [],
+        ...state,
+      },
+    })
+
+  const ctxWithEntries = (entries: Array<Record<string, unknown>>) => ({
+    rattelseMetadataAt: new Map<string, number[]>(),
+    entryById: new Map(entries.map((e) => [e.id as string, { ...baseEntry, ...e }])),
+  })
+
+  it('labels the override in Swedish and hangs it on the payment voucher', () => {
+    const ev = auditRowToEvent(
+      bypassRow({}),
+      ctxWithEntries([{ id: 'entry-1', voucher_series: 'B', voucher_number: 4 }]),
+    )!
+    expect(ev).toMatchObject({
+      category: 'verifikation',
+      code: 'supplier_invoice.duplicate_payment_guard_bypassed',
+      event: 'Dubbelbetalningskontroll förbikopplad',
+      object: 'B4',
+    })
+    expect(ev.details).toEqual([
+      'Kontroll: möjlig dubbelbetalning av leverantörsfaktura LF-7',
+      'Orsak: användaren valde att bokföra ändå (force)',
+      'Betalning: 1\u00a0000,00 SEK, 2026-05-12, konto 1930',
+      'Kontrollen hittade inga möjliga dubbletter vid bokföringstillfället.',
+    ])
+  })
+
+  it('names each flagged bank row, and the verifikat an already-booked row carries', () => {
+    const ev = auditRowToEvent(
+      bypassRow({
+        candidate_count: 2,
+        candidates: [
+          {
+            transaction_id: 'tx-1',
+            date: '2026-05-11',
+            amount: -1000,
+            match_reason: 'already_booked',
+            match_confidence: 0.85,
+            journal_entry_id: 'entry-2',
+          },
+          {
+            transaction_id: 'tx-2',
+            date: '2026-05-10',
+            amount: -1000,
+            match_reason: 'name_amount_fuzzy',
+            match_confidence: 0.7,
+            journal_entry_id: null,
+          },
+        ],
+      }),
+      ctxWithEntries([
+        { id: 'entry-1', voucher_series: 'B', voucher_number: 4 },
+        { id: 'entry-2', voucher_series: 'A', voucher_number: 9 },
+      ]),
+    )!
+    expect(ev.details[3]).toBe(
+      'Möjliga dubbletter vid bokföringstillfället (2): ' +
+        '2026-05-11 1\u00a0000,00 (redan bokförd som egen verifikation, verifikation A9); ' +
+        '2026-05-10 1\u00a0000,00 (motpart och belopp stämmer)',
+    )
+  })
+
+  it('says so when the guard could not be re-run, rather than reading as "no duplicates"', () => {
+    const ev = auditRowToEvent(bypassRow({ detector_failed: true }), ctxWithEntries([]))!
+    expect(ev.object).toBe('Leverantörsfaktura LF-7')
+    expect(ev.details[3]).toBe('Kontrollen kunde inte köras om vid bokföringstillfället.')
+  })
+
+  it('drops a row whose guard is unknown to this version rather than half-labelling it', () => {
+    expect(auditRowToEvent(bypassRow({ guard: 'some_future_guard' }), ctxWithEntries([]))).toBeNull()
   })
 })
 

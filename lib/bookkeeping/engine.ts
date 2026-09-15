@@ -1,9 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import type { SIEChunkResult, SIEJob } from '@/lib/import/sie-job-contract'
+
 import { eventBus } from '@/lib/events'
 import { createLogger } from '@/lib/logger'
 import {
   AccountsNotInChartError,
   BookkeepingDatabaseError,
+  CannotCancelNonDraftError,
   CannotEditNonDraftError,
   CannotReverseNonPostedError,
   CannotReverseStornoError,
@@ -14,6 +17,7 @@ import {
   withUnusedVoucherAllocation,
   JournalEntryNotBalancedError,
   JournalLineNegativeAmountError,
+  JournalLineBothSidesNonZeroError,
   JournalEntryNotFoundError,
 } from '@/lib/bookkeeping/errors'
 import {
@@ -49,6 +53,27 @@ import type {
   VatTreatment,
 } from '@/types'
 
+/** The only application entry point for a durable SIE voucher commit. */
+export async function commitSIEImportChunk(supabase: SupabaseClient, job: SIEJob, chunk: number, phase: 'vouchers' | 'finalize'): Promise<SIEChunkResult> {
+  const { data, error } = await supabase.rpc('import_sie_chunk', {
+    p_company_id: job.company_id, p_import_id: job.id, p_worker_id: job.worker_id,
+    p_attempt: job.job_attempt, p_phase: phase, p_chunk_no: chunk,
+  })
+  if (error) throw new BookkeepingDatabaseError('import_sie_chunk', error.message)
+  if (!data) throw new BookkeepingDatabaseError('import_sie_chunk', 'Missing completion receipt')
+  return data as SIEChunkResult
+}
+
+/** Reversals and their receipt commit together under the execution lease. */
+export async function reverseSIEImportChunk(supabase: SupabaseClient, job: SIEJob): Promise<{ reversed: number; done: boolean }> {
+  const rpc = job.job_kind === 'duplicate_repair' ? 'undo_sie_duplicate_repair_chunk' : 'undo_sie_import_chunk'
+  const { data, error } = await supabase.rpc(rpc, {
+    p_company_id: job.company_id, p_import_id: job.id, p_worker_id: job.worker_id, p_attempt: job.job_attempt,
+  })
+  if (error) throw new BookkeepingDatabaseError(rpc, error.message)
+  return data as { reversed: number; done: boolean }
+}
+
 const log = createLogger('bookkeeping.engine')
 
 /**
@@ -74,17 +99,32 @@ export function validateBalance(lines: CreateJournalEntryLineInput[]): {
 }
 
 /**
- * Refuse any line whose debit_amount or credit_amount is below zero. The
- * balance check cannot catch this (a negative debit nets like a credit), so
- * it is the engine's job to keep the one-non-negative-side invariant that the
- * DB CHECK `journal_entry_lines_amounts_non_negative` mirrors.
+ * Enforce the one-side invariant every journal line carries: exactly one of
+ * debit_amount / credit_amount is above zero, and neither is below zero.
+ *
+ * `validateBalance` above sums the two columns and can see neither half of
+ * this, which is why the engine has to:
+ *
+ *   - a negative debit nets like a credit, so the totals still match. The
+ *     row is stored, but every reader assumes one non-negative side: the
+ *     verifikat page hides it and the visible sums disagree.
+ *   - a line with BOTH sides above zero cancels itself. The totals still
+ *     match, so the entry posts as a nollverifikat; storno then reverses the
+ *     line on its net, lands on {0, 0} and dies on the voucher trigger's
+ *     "has zero total", leaving the entry uncorrectable (issue #2551).
+ *
+ * The DB CHECKs `journal_entry_lines_amounts_non_negative` and
+ * `journal_entry_lines_single_side` mirror the two halves.
  */
-export function assertLinesNonNegative(lines: CreateJournalEntryLineInput[]): void {
+export function assertLinesWellFormed(lines: CreateJournalEntryLineInput[]): void {
   for (const line of lines) {
     const debit = line.debit_amount || 0
     const credit = line.credit_amount || 0
     if (debit < 0 || credit < 0) {
       throw new JournalLineNegativeAmountError(line.account_number, debit, credit)
+    }
+    if (debit > 0 && credit > 0) {
+      throw new JournalLineBothSidesNonZeroError(line.account_number, debit, credit)
     }
   }
 }
@@ -267,7 +307,7 @@ export async function createDraftEntry(
   input: CreateJournalEntryInput
 ): Promise<JournalEntry> {
   // Validate sides and balance
-  assertLinesNonNegative(input.lines)
+  assertLinesWellFormed(input.lines)
   const balance = validateBalance(input.lines)
   if (!balance.valid) {
     throw new JournalEntryNotBalancedError(balance.totalDebit, balance.totalCredit, 'draft')
@@ -468,7 +508,7 @@ export async function updateDraftEntry(
   }
 
   // Same side and balance gates as createDraftEntry.
-  assertLinesNonNegative(input.lines)
+  assertLinesWellFormed(input.lines)
   const balance = validateBalance(input.lines)
   if (!balance.valid) {
     throw new JournalEntryNotBalancedError(balance.totalDebit, balance.totalCredit, 'draft')
@@ -582,6 +622,127 @@ export async function updateDraftEntry(
     .single()
 
   return completeEntry as JournalEntry
+}
+
+/**
+ * Cancel a DRAFT journal entry: the one sanctioned way out of the draft state
+ * that is not a commit.
+ *
+ * A draft holds no voucher_number (drafts are outside the verifikationsserie),
+ * so cancelling one leaves no löpnummer gap in the sense BFL 5 kap 7 § means
+ * (verifikationsnummer in unbroken löpande nummerordning) and therefore needs
+ * no documented gap explanation. The header row is kept as `cancelled` rather than
+ * deleted: the immutability trigger's own instruction ("Use cancelled status
+ * instead") and the same reason reverseEntry keeps its failed reversal headers
+ * around, which is that a row someone looked at should stay explainable.
+ *
+ * Guards, in order:
+ *   - not found / other company  → JournalEntryNotFoundError
+ *   - already cancelled          → returned unchanged (idempotent; no event)
+ *   - posted / reversed          → CannotCancelNonDraftError (storno instead)
+ *
+ * The status guard lives here and not only in the DB: the immutability
+ * trigger ALLOWS posted → cancelled (migration 20260428160000 relies on it
+ * for orphaned payment vouchers, which must also write a voucher-gap
+ * explanation). Cancelling a posted verifikat through this path would
+ * silently drop a number out of the series, so the application is the
+ * authority on which statuses may pass.
+ *
+ * Period locks are NOT worked around: the update runs through
+ * enforce_period_lock / enforce_company_lock_date like any other write, and a
+ * draft stranded behind a lock surfaces the DB refusal as a
+ * BookkeepingDatabaseError. Callers on the v1 surface pre-check the lock so
+ * the client gets PERIOD_LOCKED instead.
+ */
+export async function cancelDraftEntry(
+  supabase: SupabaseClient,
+  companyId: string,
+  userId: string,
+  entryId: string
+): Promise<JournalEntry> {
+  const { data: existing, error: loadError } = await supabase
+    .from('journal_entries')
+    .select('*, lines:journal_entry_lines(*)')
+    .eq('id', entryId)
+    .eq('company_id', companyId)
+    .maybeSingle()
+
+  if (loadError) {
+    log.error('load journal entry for cancel failed', loadError, {
+      operation: 'cancel_draft_entry',
+      companyId,
+      userId,
+      entityType: 'journal_entry',
+      entityId: entryId,
+      pgCode: (loadError as { code?: string }).code,
+    })
+    throw new BookkeepingDatabaseError('cancel_draft_entry', loadError.message)
+  }
+  if (!existing) {
+    throw new JournalEntryNotFoundError()
+  }
+
+  const entry = existing as JournalEntry
+  // Idempotent: a repeated cancel is the caller reaching the state it asked
+  // for, not a conflict. Returned without emitting a second event.
+  if (entry.status === 'cancelled') {
+    return entry
+  }
+  if (entry.status !== 'draft') {
+    throw new CannotCancelNonDraftError(entry.status)
+  }
+
+  // CAS on status: a concurrent commit between the read and this write must
+  // lose, not silently un-post a verifikat. The trigger would reject
+  // posted → cancelled only for the statuses it protects, so the filter is
+  // the guarantee, not a convenience.
+  const { data: cancelled, error: cancelError } = await supabase
+    .from('journal_entries')
+    .update({ status: 'cancelled' })
+    .eq('id', entryId)
+    .eq('company_id', companyId)
+    .eq('status', 'draft')
+    .select('*, lines:journal_entry_lines(*)')
+    .maybeSingle()
+
+  if (cancelError) {
+    log.error('cancel draft journal entry failed', cancelError, {
+      operation: 'cancel_draft_entry',
+      companyId,
+      userId,
+      entityType: 'journal_entry',
+      entityId: entryId,
+      pgCode: (cancelError as { code?: string }).code,
+      pgDetails: (cancelError as { details?: string }).details,
+      pgHint: (cancelError as { hint?: string }).hint,
+    })
+    throw new BookkeepingDatabaseError('cancel_draft_entry', cancelError.message)
+  }
+
+  if (!cancelled) {
+    // Zero rows matched: the entry left 'draft' between the read and the
+    // write. Re-read so the caller is told what it actually became.
+    const { data: current } = await supabase
+      .from('journal_entries')
+      .select('status')
+      .eq('id', entryId)
+      .eq('company_id', companyId)
+      .maybeSingle()
+    const status = (current as { status?: string } | null)?.status
+    if (status === 'cancelled') {
+      return { ...entry, status: 'cancelled' }
+    }
+    throw new CannotCancelNonDraftError(status ?? 'unknown')
+  }
+
+  const result = cancelled as JournalEntry
+
+  await eventBus.emit({
+    type: 'journal_entry.cancelled',
+    payload: { entry: result, userId, companyId },
+  })
+
+  return result
 }
 
 /**
@@ -904,7 +1065,7 @@ export async function replaceOpeningBalanceEntry(
     )
   }
 
-  assertLinesNonNegative(input.lines)
+  assertLinesWellFormed(input.lines)
   const balance = validateBalance(input.lines)
   if (!balance.valid) {
     throw new JournalEntryNotBalancedError(

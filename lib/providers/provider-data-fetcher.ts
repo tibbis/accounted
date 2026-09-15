@@ -1,11 +1,12 @@
 import type {
+  AccountingAccountDto,
   CompanyInformationDto,
   CustomerDto,
   SupplierDto,
   SalesInvoiceDto,
   SupplierInvoiceDto,
 } from './dto';
-import type { ProviderName } from './types';
+import type { BjornLundenResourceConfig, ProviderName } from './types';
 
 import { FortnoxClient } from './fortnox/client';
 import { FORTNOX_RESOURCE_CONFIGS } from './fortnox/config';
@@ -70,6 +71,24 @@ async function blPaginate<T>(
   } while (page <= totalPages);
 
   return allItems;
+}
+
+/**
+ * List a Björn Lundén resource the way its endpoint is shaped. The batch
+ * endpoints page; the registers (/customer, /supplier) ignore paging and
+ * answer the whole register as one bare array, so they take the single-call
+ * path. The config's `paginated` flag has said which is which since the
+ * provider was added; the fetchers never read it, and paged the registers.
+ */
+async function blList<T>(
+  accessToken: string,
+  userKey: string,
+  config: BjornLundenResourceConfig,
+): Promise<T[]> {
+  if (config.paginated === false) {
+    return bjornLundenClient.getAll<T>(accessToken, userKey, config.listEndpoint);
+  }
+  return blPaginate<T>(accessToken, userKey, config.listEndpoint);
 }
 
 // ── Public fetch functions ──────────────────────────────────────────
@@ -145,6 +164,33 @@ export async function fetchCompanyInfoDirect(
  * orchestrator's ProviderRunState.grantProven, which counts rows instead).
  * A failed request still throws; only genuinely absent resources return [].
  */
+/**
+ * The provider's chart of accounts, with the per-account momskod the SIE
+ * export leaves out (SIE4 #KONTO carries no VAT code). Fortnox only so far:
+ * its VATCode is a named code whose meaning is documented
+ * (lib/providers/fortnox/vat-codes.ts). Visma's VatCodeId is an opaque id
+ * that needs a second lookup, and the Björn Lundén and Briox code sets are
+ * unverified, so those answer [] until their semantics are pinned down.
+ *
+ * Fortnox lists the chart of the CURRENT financial year when no
+ * financialyear filter is given; that is the chart the user sees in Fortnox
+ * today, which is what the mapping step should agree with.
+ */
+export async function fetchAccountingAccountsDirect(
+  provider: ProviderName,
+  accessToken: string,
+): Promise<AccountingAccountDto[]> {
+  if (provider === 'fortnox') {
+    const config = FORTNOX_RESOURCE_CONFIGS[ResourceType.AccountingAccounts]!;
+    const items = await fortnoxClient.getPaginated<Record<string, unknown>>(
+      accessToken, config.listEndpoint, config.listKey, { pageSize: 500 },
+    );
+    return items.map((item) => config.mapper(item) as AccountingAccountDto);
+  }
+
+  return [];
+}
+
 export async function fetchCustomersDirect(
   provider: ProviderName,
   accessToken: string,
@@ -186,7 +232,7 @@ export async function fetchCustomersDirect(
   if (provider === 'bjornlunden') {
     const config = BL_RESOURCE_CONFIGS[ResourceType.Customers]!;
     if (!providerCompanyId) return [];
-    const items = await blPaginate<Record<string, unknown>>(accessToken, providerCompanyId, config.listEndpoint);
+    const items = await blList<Record<string, unknown>>(accessToken, providerCompanyId, config);
     return items.map((item) => config.mapper(item) as CustomerDto);
   }
 
@@ -242,7 +288,7 @@ export async function fetchSuppliersDirect(
   if (provider === 'bjornlunden') {
     const config = BL_RESOURCE_CONFIGS[ResourceType.Suppliers]!;
     if (!providerCompanyId) return [];
-    const items = await blPaginate<Record<string, unknown>>(accessToken, providerCompanyId, config.listEndpoint);
+    const items = await blList<Record<string, unknown>>(accessToken, providerCompanyId, config);
     return items.map((item) => config.mapper(item) as SupplierDto);
   }
 
@@ -294,7 +340,7 @@ export async function fetchSalesInvoicesDirect(
   if (provider === 'bjornlunden') {
     const config = BL_RESOURCE_CONFIGS[ResourceType.SalesInvoices]!;
     if (!providerCompanyId) return [];
-    const items = await blPaginate<Record<string, unknown>>(accessToken, providerCompanyId, config.listEndpoint);
+    const items = await blList<Record<string, unknown>>(accessToken, providerCompanyId, config);
     return items.map((item) => config.mapper(item) as SalesInvoiceDto);
   }
 
@@ -350,7 +396,7 @@ export async function fetchSupplierInvoicesDirect(
   if (provider === 'bjornlunden') {
     const config = BL_RESOURCE_CONFIGS[ResourceType.SupplierInvoices]!;
     if (!providerCompanyId) return [];
-    const items = await blPaginate<Record<string, unknown>>(accessToken, providerCompanyId, config.listEndpoint);
+    const items = await blList<Record<string, unknown>>(accessToken, providerCompanyId, config);
     return items.map((item) => config.mapper(item) as SupplierInvoiceDto);
   }
 
@@ -820,9 +866,24 @@ export async function fetchSupplierInvoicesHydrated(
 ): Promise<HydratedInvoices<SupplierInvoiceDto>> {
   const listed = await fetchSupplierInvoicesDirect(provider, accessToken, providerCompanyId);
   const { kept, excluded } = partitionBySelect(listed, select);
+  const hydrated = await hydrateSupplierInvoices(provider, accessToken, providerCompanyId, kept, budgetMs);
+  return { ...hydrated, excluded };
+}
 
+/**
+ * Hydrate a caller-chosen set of already-listed supplier invoices: the
+ * supplier-side twin of hydrateSalesInvoices, for callers that list first,
+ * drop what they already hold, and spend the budget on the rest.
+ */
+export async function hydrateSupplierInvoices(
+  provider: ProviderName,
+  accessToken: string,
+  providerCompanyId: string | undefined,
+  invoices: SupplierInvoiceDto[],
+  budgetMs: number = DEFAULT_HYDRATION_BUDGET_MS,
+): Promise<HydratedInvoices<SupplierInvoiceDto>> {
   const { items, report, unhydratedIds } = await hydrateInvoices<SupplierInvoiceDto>(
-    kept,
+    invoices,
     supplierInvoiceNeedsDetail,
     detailFetcher(provider, ResourceType.SupplierInvoices, accessToken, providerCompanyId),
     resourceMapper(provider, ResourceType.SupplierInvoices),
@@ -830,5 +891,5 @@ export async function fetchSupplierInvoicesHydrated(
     budgetMs,
   );
 
-  return { invoices: items, hydration: report, unhydratedIds, excluded };
+  return { invoices: items, hydration: report, unhydratedIds };
 }

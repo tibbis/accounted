@@ -7,6 +7,7 @@ import { COMPANY_PICKED_COOKIE } from '@/lib/company/context'
 import { isCockpitLandingRole } from '@/lib/company/home-domain'
 import { OAUTH_MCP_KEY_NAME } from '@/lib/auth/api-keys'
 import { claudeStepDone } from '@/lib/onboarding/checklist'
+import { loadConnectedAiClients } from '@/lib/onboarding/ai-clients.server'
 import { createServiceClient } from '@/lib/supabase/server'
 import {
   getDashboardAuthContext,
@@ -19,13 +20,12 @@ import { HemChecklistSection, HemNoticesSection, HemPanesSection } from './hem-s
 import { PageHeader } from '@/components/ui/page-header'
 import { HelpPopover } from '@/components/ui/help-popover'
 import { getTranslations } from 'next-intl/server'
-import type { DashboardShell } from '@/types'
 
 export const dynamic = 'force-dynamic'
 
 // Home route = Hem (concept scene 14): greeting + Att göra + Fortsätt.
-// The KPI/revenue/deadline widgets left the page (founder direction,
-// dev_docs/last_session_resume.md §8), which also pruned their fetches:
+// The KPI/revenue/deadline widgets left the page (founder direction),
+// which also pruned their fetches:
 // the journal-line YTD aggregation, unpaid-invoice totals and deadline
 // queries are gone and the page got faster.
 //
@@ -93,7 +93,7 @@ export default async function DashboardPage() {
     agentProfile,
     { count: skatteverketTokenCount },
     { count: oauthKeyCount, error: oauthKeyError },
-    { data: userPrefs },
+    aiClients,
   ] =
     await Promise.all([
       getDashboardSettings(),
@@ -102,7 +102,7 @@ export default async function DashboardPage() {
       getResolvedDashboardAgentProfile(),
       // The Skatteverket promo below the panes needs this flag in the shell;
       // the checklist section reads it again for its own step (cheap head count).
-      supabase.from('skatteverket_tokens').select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('company_id', companyId),
+      supabase.from('skatteverket_tokens').select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('company_id', companyId).eq('status', 'active'),
       // The checklist's "Anslut till Claude" step is done when the MCP OAuth
       // token route has minted a key for this user (claudeStepDone). Keyed on
       // the user, not the company: the Claude connection follows the person,
@@ -115,9 +115,10 @@ export default async function DashboardPage() {
         .eq('user_id', user.id)
         .eq('name', OAUTH_MCP_KEY_NAME)
         .is('revoked_at', null),
-      // Shell v2 opt-in (ui_state.shell): picks the three-pane Att göra over
-      // the v1 Hem. Same row the layout reads for the sidebar.
-      supabase.from('user_preferences').select('ui_state').eq('user_id', user.id).maybeSingle(),
+      // Which of Claude / ChatGPT / Grok completed the OAuth sign-in: the
+      // Att göra footer hands the first row to a connected client. Same
+      // per-user rule as the count above; a failed read answers none.
+      loadConnectedAiClients(serviceClient, user.id),
     ])
 
   // A FAILED settings read must not masquerade as "onboarding not done":
@@ -163,7 +164,7 @@ export default async function DashboardPage() {
   }
   const setupOpen = !settings.initial_setup_completed_at && !settings.initial_setup_dismissed_at
 
-  // The streamed sections, shared by both shells: the notice line and the
+  // The streamed sections: the notice line and the
   // setup checklist fill in behind their own Suspense boundaries.
   const notices = (
     <Suspense fallback={null}>
@@ -185,41 +186,39 @@ export default async function DashboardPage() {
   )
 
   // Hem: greeting, notice line, setup checklist, then the Att göra and
-  // Fortsätt panes side by side. In shell v2 the same content runs under the
-  // Att göra top bar, and MainContainer's full-bleed frame stretches it to
-  // the panel instead of the v1 max-w-5xl card. The three-pane queue of
-  // PR 3 was tried and dropped (founder direction 2026-09-10: "the to-do
-  // page should be the old homepage, but stretched").
+  // Fortsätt panes side by side. The content runs under the Att göra top
+  // bar, and MainContainer's full-bleed frame stretches it to the panel. The
+  // three-pane queue of PR 3 was tried and dropped (founder direction
+  // 2026-09-10: "the to-do page should be the old homepage, but stretched").
   const hem = (
     <DashboardContent
       companyId={companyId}
       agentBuilt={agentBuilt}
       userFirstName={userFirstName}
       initialSetup={initialSetup}
-      hasSkatteverketConnected={(skatteverketTokenCount || 0) > 0}
       notices={notices}
       checklist={checklist}
       panes={
         <Suspense fallback={<PanesSkeleton />}>
-          <HemPanesSection companyId={companyId} now={now} setupOpen={setupOpen} />
+          <HemPanesSection
+            companyId={companyId}
+            now={now}
+            setupOpen={setupOpen}
+            hasSkatteverketConnected={(skatteverketTokenCount || 0) > 0}
+            aiClients={aiClients}
+          />
         </Suspense>
       }
     />
   )
 
-  const shell: DashboardShell =
-    (userPrefs?.ui_state as { shell?: DashboardShell } | null)?.shell === 'v1' ? 'v1' : 'v2'
-  if (shell === 'v2') {
-    const tV2 = await getTranslations('att_gora_v2')
-    const header = <PageHeader title={tV2('title')} help={<HelpPopover>{tV2('help')}</HelpPopover>} />
+  const tV2 = await getTranslations('att_gora_v2')
+  const header = <PageHeader title={tV2('title')} help={<HelpPopover>{tV2('help')}</HelpPopover>} />
 
-    return (
-      <>
-        {header}
-        {hem}
-      </>
-    )
-  }
-
-  return hem
+  return (
+    <>
+      {header}
+      {hem}
+    </>
+  )
 }

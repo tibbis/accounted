@@ -17,7 +17,7 @@ import {
 import { AttnLine } from '@/components/ui/attn-line'
 import CustomerForm from '@/components/customers/CustomerForm'
 import { DestructiveConfirmDialog, useDestructiveConfirm } from '@/components/ui/destructive-confirm-dialog'
-import { ArrowLeft, Loader2, Lock, Eye, EyeOff } from 'lucide-react'
+import { Loader2, Lock, Eye, EyeOff } from 'lucide-react'
 import { useLocale } from 'next-intl'
 import { useCanWrite } from '@/lib/hooks/use-can-write'
 import { getErrorMessage, type ErrorLocale } from '@/lib/errors/get-error-message'
@@ -29,7 +29,6 @@ import { DetailPageSkeleton } from '@/components/common/DetailPageSkeleton'
 import { PartyFactsSection } from '@/components/parties/PartyFactsSection'
 import { usePartyDossier } from '@/components/parties/use-party-dossier'
 import { fromRegistry, addressRowsFromRegistry, listSv } from '@/lib/parties/registry-summary'
-import { useShell } from '@/components/dashboard/ShellProvider'
 
 const CUSTOMER_TYPE_KEY: Record<CustomerType, string> = {
   individual: 'type_individual',
@@ -62,7 +61,6 @@ export default function CustomerDetailPage({
   const router = useRouter()
   const { toast } = useToast()
   const { canWrite } = useCanWrite()
-  const shell = useShell()
   const t = useTranslations('customer_detail')
   const tParties = useTranslations('parties')
   const errorLocale = useLocale() as ErrorLocale
@@ -232,15 +230,6 @@ export default function CustomerDetailPage({
     <div className="space-y-8 stagger-enter">
       {/* Header: serif name over a quiet type kicker, quiet actions right */}
       <div>
-        {shell !== 'v2' && (
-        <Link
-          href="/customers"
-          className="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1 mb-6"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {t('back')}
-        </Link>
-        )}
         <div className="page-header flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="page-header-lead min-w-0">
             <h1 className="page-header-title font-display text-2xl leading-8 tracking-tight">{customer.name}</h1>
@@ -279,6 +268,9 @@ export default function CustomerDetailPage({
       <div className="grid gap-8 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start lg:gap-x-12">
       <div className="space-y-8">
       <DetailSection kicker={t('section_contact')}>
+        <DefRow label={t('def_contact_person')}>
+          {customer.contact_person || <DefEmpty />}
+        </DefRow>
         <DefRow label={t('def_email')}>
           {customer.email ? (
             <a href={`mailto:${customer.email}`} className="hover:underline">
@@ -464,6 +456,14 @@ export default function CustomerDetailPage({
               name: customer.name,
               customer_type: customer.customer_type,
               customer_number: customer.customer_number || undefined,
+              // Every field the form submits must round-trip here: the form
+              // sends '' / [] for an omitted value on edit as an explicit
+              // clear, so leaving one out wiped it on the next save
+              // (contact_person and the per-customer copy lists did exactly
+              // that, and the contact person also never showed on the page).
+              contact_person: customer.contact_person || undefined,
+              invoice_email_cc_addresses: customer.invoice_email_cc_addresses ?? undefined,
+              invoice_email_bcc_addresses: customer.invoice_email_bcc_addresses ?? undefined,
               email: customer.email || undefined,
               phone: customer.phone || undefined,
               address_line1: customer.address_line1 || undefined,

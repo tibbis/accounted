@@ -6,7 +6,8 @@ import {
   decodeBuffer,
   calculateFileHash,
 } from '@/lib/import/sie-parser'
-import { suggestMappings, getMappingStats, isSystemAccount } from '@/lib/import/account-mapper'
+import { suggestMappings, getMappingStats } from '@/lib/import/account-mapper'
+import { prepareSIEPreviewMappings } from '@/lib/import/sie-preview-mappings'
 import { planChartChanges } from '@/lib/import/chart-plan'
 import { scanSieForCp1252Artifacts, formatSieArtifactWarning } from '@/lib/import/sie-artifact-scan'
 import {
@@ -20,7 +21,10 @@ import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import { errorResponseFromCode } from '@/lib/errors/get-structured-error'
 import type { SIEAccountMappingRecord } from '@/lib/import/types'
+import { hasSIEFileExtension } from '@/lib/import/sie-file-extensions'
 import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
+import { readSIERequestFile } from '@/lib/import/sie-intake'
+import { resolveSIEFiscalYear } from '@/lib/import/sie-jobs'
 
 /**
  * POST /api/import/sie/parse
@@ -32,14 +36,13 @@ export const POST = withRouteContext(
     const { supabase, companyId, log, requestId } = ctx
 
     const formData = await request.formData()
-    const file = formData.get('file') as File | null
+    const file = await readSIERequestFile(formData,supabase,companyId)
 
     if (!file) {
       return errorResponseFromCode('SIE_PARSE_NO_FILE', log, { requestId })
     }
 
-    const filename = file.name.toLowerCase()
-    if (!filename.endsWith('.sie') && !filename.endsWith('.se')) {
+    if (!hasSIEFileExtension(file.name)) {
       return errorResponseFromCode('SIE_PARSE_INVALID_TYPE', log, {
         requestId,
         details: { filename: file.name },
@@ -66,17 +69,8 @@ export const POST = withRouteContext(
       const content = decodeBuffer(arrayBuffer, encoding)
 
       const duplicate = await checkDuplicateImport(supabase, companyId!, content)
-      if (duplicate) {
-        return errorResponseFromCode('SIE_DUPLICATE_FILE', opLog, {
-          requestId,
-          details: {
-            importId: duplicate.id,
-            importedAt: duplicate.imported_at,
-          },
-        })
-      }
-
       const parsed = parseSIEFile(content)
+      await resolveSIEFiscalYear(supabase,companyId,parsed)
 
       // Mojibake tripwire (warn, never block): CP437 bytes decoded as
       // windows-1252 somewhere upstream leave C1 specials mid-word in account
@@ -101,25 +95,9 @@ export const POST = withRouteContext(
         })
       }
 
-      if (parsed.stats.fiscalYearStart && parsed.stats.fiscalYearEnd) {
-        const periodDuplicate = await checkDuplicatePeriodImport(
-          supabase,
-          companyId!,
-          parsed.stats.fiscalYearStart,
-          parsed.stats.fiscalYearEnd,
-        )
-        if (periodDuplicate) {
-          return errorResponseFromCode('SIE_DUPLICATE_PERIOD', opLog, {
-            requestId,
-            details: {
-              importId: periodDuplicate.id,
-              fiscalYearStart: periodDuplicate.fiscal_year_start,
-              fiscalYearEnd: periodDuplicate.fiscal_year_end,
-              importedAt: periodDuplicate.imported_at,
-            },
-          })
-        }
-      }
+      const periodDuplicate = parsed.stats.fiscalYearStart && parsed.stats.fiscalYearEnd
+        ? await checkDuplicatePeriodImport(supabase,companyId!,parsed.stats.fiscalYearStart,parsed.stats.fiscalYearEnd)
+        : null
 
       const validation = validateSIEFile(parsed)
 
@@ -130,25 +108,22 @@ export const POST = withRouteContext(
         })
       }
 
-      const excludedSystemAccounts = parsed.accounts
-        .filter((a) => isSystemAccount(a.number))
-        .map((a) => ({ number: a.number, name: a.name }))
-      const bookkeepingAccounts = parsed.accounts.filter((a) => !isSystemAccount(a.number))
-
       const { data: storedMappings } = await supabase
         .from('sie_account_mappings')
         .select('*')
         .eq('company_id', companyId)
 
-      const mappings = suggestMappings(
-        bookkeepingAccounts,
+      const suggested = suggestMappings(
+        parsed.accounts,
         BAS_REFERENCE,
         (storedMappings as SIEAccountMappingRecord[]) || undefined,
       )
+      const { mappings, archivedOnlyAccounts, excludedSystemAccounts } = prepareSIEPreviewMappings(parsed, suggested)
 
       const preview = generateImportPreview(parsed, mappings)
       preview.excludedSystemAccounts = excludedSystemAccounts
-      preview.accountCount = bookkeepingAccounts.length
+      preview.archivedOnlyAccounts = archivedOnlyAccounts
+      preview.accountCount = parsed.accounts.length - excludedSystemAccounts.length
 
       // The mapping stats above score the file against the BAS reference. A
       // consultant with a 41-account seeded company reads "150 mappade" as
@@ -182,6 +157,7 @@ export const POST = withRouteContext(
 
       return NextResponse.json({
         success: true,
+        existingImport: duplicate ?? periodDuplicate,
         encoding,
         fileHash,
         parsed: {

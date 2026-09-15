@@ -119,6 +119,7 @@ interface EntryRow {
   commit_method: string | null
   reverses_id: string | null
   correction_of_id: string | null
+  import_batch_id?: string | null
 }
 
 interface RattelseRow {
@@ -213,6 +214,7 @@ export const AUDITED_TABLES = [
   'categorization_templates',
   'booking_template_library',
   'sie_imports',
+  'sie_import_chunks',
   'bank_file_imports',
   // Verifikationsserie per bankkonto (audited since migration 20260902124513):
   // the per-account override outranks the per-source-type map above, so it is
@@ -230,12 +232,16 @@ export const AUDITED_TABLES = [
  */
 export const GLOBAL_AUDITED_TABLES = ['salary_payroll_config'] as const
 
-/** Actions that matter regardless of table (security / integrity / retention). */
+/** Actions that matter regardless of table (security / integrity / retention / overridden guards). */
 export const GLOBAL_ACTIONS = [
   'SECURITY_EVENT',
   'INTEGRITY_FAILURE',
   'RETENTION_BLOCK',
   'DOCUMENT_DELETE_BLOCKED',
+  // A guard that warns before a booking was deliberately overridden. Selected
+  // by action, not by table, because the tables such guards sit in front of
+  // (supplier_invoices today) are registers that are otherwise out of scope.
+  'GUARD_BYPASSED',
 ] as const
 
 /**
@@ -244,7 +250,7 @@ export const GLOBAL_ACTIONS = [
  * names statically; a unit test pins it to AUDITED_TABLES / GLOBAL_ACTIONS.
  */
 export const AUDIT_ROW_FILTER =
-  'table_name.in.(journal_entries,chart_of_accounts,company_settings,fiscal_periods,api_keys,dimensions,dimension_values,account_dimension_rules,accrual_schedules,document_attachments,mapping_rules,categorization_templates,booking_template_library,sie_imports,bank_file_imports,cash_accounts,invoice_payee_defaults),action.in.(SECURITY_EVENT,INTEGRITY_FAILURE,RETENTION_BLOCK,DOCUMENT_DELETE_BLOCKED)'
+  'table_name.in.(journal_entries,chart_of_accounts,company_settings,fiscal_periods,api_keys,dimensions,dimension_values,account_dimension_rules,accrual_schedules,document_attachments,mapping_rules,categorization_templates,booking_template_library,sie_imports,sie_import_chunks,bank_file_imports,cash_accounts,invoice_payee_defaults),action.in.(SECURITY_EVENT,INTEGRITY_FAILURE,RETENTION_BLOCK,DOCUMENT_DELETE_BLOCKED,GUARD_BYPASSED)'
 
 const SOURCE_TYPE_LABELS: Record<string, string> = {
   manual: 'Manuell',
@@ -1108,11 +1114,113 @@ function globalActionEvent(row: AuditLogEntry): RawBehandlingshistorikEvent | nu
   })
 }
 
+/**
+ * Guards that warn before a booking and can be overridden. The key is
+ * `new_state.guard` on a GUARD_BYPASSED row; an unknown guard renders nothing
+ * rather than a half-labelled event.
+ */
+const GUARD_LABELS: Record<string, { code: string; event: string; check: string }> = {
+  supplier_invoice_duplicate_payment: {
+    code: 'supplier_invoice.duplicate_payment_guard_bypassed',
+    event: 'Dubbelbetalningskontroll förbikopplad',
+    check: 'möjlig dubbelbetalning av leverantörsfaktura',
+  },
+}
+
+/** Why the detector flagged a bank row (DuplicatePaymentMatchReason). */
+const DUPLICATE_MATCH_REASON_LABELS: Record<string, string> = {
+  already_booked: 'redan bokförd som egen verifikation',
+  ocr_exact: 'OCR eller referens stämmer',
+  aggregate_exact: 'samlingsbetalning',
+  name_amount_fuzzy: 'motpart och belopp stämmer',
+  amount_only: 'endast beloppet stämmer',
+}
+
+/** One flagged bank row as a sentence fragment: date, amount, why, and the verifikat it already carries. */
+function describeGuardCandidate(candidate: unknown, ctx: NormaliseContext): string {
+  if (!candidate || typeof candidate !== 'object') return String(candidate)
+  const c = candidate as Record<string, unknown>
+  const amount = num(c.amount)
+  // Absolute value: the direction is already in the event (a supplier payment
+  // is outbound), and the sign adds nothing to a one-line summary.
+  const head = [str(c.date) ?? '(okänt datum)', amount === null ? null : fmtAmount(Math.abs(amount))]
+    .filter((part): part is string => !!part)
+    .join(' ')
+  const reason = str(c.match_reason)
+  const why = reason ? (DUPLICATE_MATCH_REASON_LABELS[reason] ?? reason) : null
+  const bookedOn = str(c.journal_entry_id)
+  const entry = bookedOn ? ctx.entryById.get(bookedOn) : undefined
+  const label = entry ? voucherLabel(entry.voucher_series, entry.voucher_number) : null
+  const tail = [why, label ? `verifikation ${label}` : null].filter((part): part is string => !!part)
+  return tail.length > 0 ? `${head} (${tail.join(', ')})` : head
+}
+
+/**
+ * A guard the user overrode (audit_log GUARD_BYPASSED, migration
+ * 20260914150102). The row is written by the bypass path itself, so the
+ * statutory wording is built here from its structured `new_state` rather than
+ * from the writer's own English description.
+ */
+function guardBypassedEvent(
+  row: AuditLogEntry,
+  ctx: NormaliseContext,
+): RawBehandlingshistorikEvent | null {
+  const state = (row.new_state ?? {}) as Record<string, unknown>
+  const guard = str(state.guard)
+  const meta = guard ? GUARD_LABELS[guard] : undefined
+  if (!meta) return null
+
+  const invoiceNumber = str(state.supplier_invoice_number)
+  const entryId = str(state.journal_entry_id)
+  const entry = entryId ? ctx.entryById.get(entryId) : undefined
+  const object = entry
+    ? voucherLabel(entry.voucher_series, entry.voucher_number)
+    : invoiceNumber
+      ? `Leverantörsfaktura ${invoiceNumber}`
+      : null
+
+  const details: string[] = [
+    `Kontroll: ${meta.check}${invoiceNumber ? ` ${invoiceNumber}` : ''}`,
+    'Orsak: användaren valde att bokföra ändå (force)',
+  ]
+  const amount = num(state.payment_amount)
+  if (amount !== null) {
+    const account = str(state.payment_account)
+    details.push(
+      `Betalning: ${fmtAmount(amount)} ${str(state.payment_currency) ?? 'SEK'}` +
+        `, ${str(state.payment_date) ?? '(okänt datum)'}` +
+        (account ? `, konto ${account}` : ''),
+    )
+  }
+  const candidates = Array.isArray(state.candidates) ? state.candidates : []
+  if (state.detector_failed === true) {
+    details.push('Kontrollen kunde inte köras om vid bokföringstillfället.')
+  } else if (candidates.length === 0) {
+    details.push('Kontrollen hittade inga möjliga dubbletter vid bokföringstillfället.')
+  } else {
+    details.push(
+      `Möjliga dubbletter vid bokföringstillfället (${candidates.length}): ` +
+        candidates.map((candidate) => describeGuardCandidate(candidate, ctx)).join('; '),
+    )
+  }
+
+  return auditEvent(row, {
+    category: 'verifikation',
+    code: meta.code,
+    event: meta.event,
+    object,
+    details,
+  })
+}
+
 /** One audit_log row → zero or one behandlingshistorik event. Exported for tests. */
 export function auditRowToEvent(
   row: AuditLogEntry,
   ctx: NormaliseContext = { rattelseMetadataAt: new Map(), entryById: new Map() },
 ): RawBehandlingshistorikEvent | null {
+  // Ahead of the generic global branch: a bypassed guard is a verifikat event
+  // with its own wording, not an untyped "Säkerhetshändelse".
+  if (row.action === 'GUARD_BYPASSED') return guardBypassedEvent(row, ctx)
   if ((GLOBAL_ACTIONS as readonly string[]).includes(row.action)) return globalActionEvent(row)
   switch (row.table_name) {
     case 'journal_entries':
@@ -1220,6 +1328,22 @@ export function auditRowToEvent(
         event: 'SIE-importlogg raderad',
         object: str(row.old_state?.filename),
       })
+    case 'sie_import_chunks': {
+      if (row.action !== 'COMMIT') return null
+      const state = row.new_state
+      const entries = Array.isArray(state?.entries) ? state.entries as Array<Record<string, unknown>> : []
+      return auditEvent(row, {
+        category: 'import',
+        code: 'sie_import.chunk_committed',
+        event: 'SIE-importdel bokförd',
+        object: str(state?.import_id),
+        details: [
+          `Del: ${fmtValue(state?.phase)} ${fmtValue(state?.chunk_no)}`,
+          `Kontrollsumma: ${fmtValue(state?.payload_hash)}`,
+          ...entries.map(entry => `${voucherLabel(entry.series, entry.voucherNumber)}: ${fmtValue(entry.id)}`),
+        ],
+      })
+    }
     case 'bank_file_imports':
       if (row.action !== 'DELETE') return null
       return auditEvent(row, {
@@ -1558,9 +1682,6 @@ export function collapseBursts(
   return out
 }
 
-/** @deprecated name kept for readers of the first revision; use collapseBursts. */
-export const collapseAccountBursts = collapseBursts
-
 const MAX_LISTED_OBJECTS = 5
 
 function summariseRun(run: RawBehandlingshistorikEvent[], rule: CollapseRule): RawBehandlingshistorikEvent {
@@ -1637,7 +1758,7 @@ async function fetchPeriodEntries(supabase: SupabaseClient, companyId: string, p
     supabase
       .from('journal_entries')
       .select(
-        'id, voucher_series, voucher_number, entry_date, description, source_type, status, committed_at, user_id, committed_actor_type, committed_actor_label, commit_method, reverses_id, correction_of_id',
+        'id, voucher_series, voucher_number, entry_date, description, source_type, status, committed_at, user_id, committed_actor_type, committed_actor_label, commit_method, reverses_id, correction_of_id, import_batch_id',
       )
       .eq('company_id', companyId)
       .eq('fiscal_period_id', periodId)
@@ -1651,6 +1772,7 @@ async function fetchAuditRows(
   companyId: string,
   window: { fromTs: string; toTs: string },
   recordIds: string[],
+  importIds: string[] = [],
 ): Promise<AuditLogEntry[]> {
   const byId = new Map<string, AuditLogEntry>()
 
@@ -1664,7 +1786,7 @@ async function fetchAuditRows(
       // Literal on purpose (not AUDIT_ROW_FILTER): the schema guard only
       // resolves string literals here. A test pins the two to each other.
       .or(
-        'table_name.in.(journal_entries,chart_of_accounts,company_settings,fiscal_periods,api_keys,dimensions,dimension_values,account_dimension_rules,accrual_schedules,document_attachments,mapping_rules,categorization_templates,booking_template_library,sie_imports,bank_file_imports,cash_accounts,invoice_payee_defaults),action.in.(SECURITY_EVENT,INTEGRITY_FAILURE,RETENTION_BLOCK,DOCUMENT_DELETE_BLOCKED)',
+        'table_name.in.(journal_entries,chart_of_accounts,company_settings,fiscal_periods,api_keys,dimensions,dimension_values,account_dimension_rules,accrual_schedules,document_attachments,mapping_rules,categorization_templates,booking_template_library,sie_imports,sie_import_chunks,bank_file_imports,cash_accounts,invoice_payee_defaults),action.in.(SECURITY_EVENT,INTEGRITY_FAILURE,RETENTION_BLOCK,DOCUMENT_DELETE_BLOCKED,GUARD_BYPASSED)',
       )
       .order('created_at', { ascending: true })
       .order('id', { ascending: true })
@@ -1683,6 +1805,32 @@ async function fetchAuditRows(
         .order('id', { ascending: true })
         .range(from, to),
     )
+    for (const row of rows) byId.set(row.id, row)
+  }
+  // A bypassed guard is dated by when it was overridden, which is not always
+  // inside the year it belongs to: a payment booked after year end (or a
+  // bokslut-period payment) would fall outside the window and vanish from the
+  // year whose voucher it explains. Selected by the voucher instead, the same
+  // record-id union the journal_entries rows above get.
+  for (const ids of chunk(recordIds, ID_CHUNK)) {
+    const rows = await fetchAllRows<AuditLogEntry>(({ from, to }) =>
+      supabase
+        .from('audit_log')
+        .select('*')
+        .eq('company_id', companyId)
+        .eq('action', 'GUARD_BYPASSED')
+        .in('new_state->>journal_entry_id', ids)
+        .order('id', { ascending: true })
+        .range(from, to),
+    )
+    for (const row of rows) byId.set(row.id, row)
+  }
+  // An older fiscal year can be imported today. Its immutable chunk receipts
+  // belong to that year's history even outside the registration-time window.
+  for (const ids of chunk(importIds, ID_CHUNK)) {
+    const rows = await fetchAllRows<AuditLogEntry>(({ from, to }) => supabase.from('audit_log')
+      .select('*').eq('company_id', companyId).eq('table_name', 'sie_import_chunks')
+      .in('new_state->>import_id', ids).order('id').range(from, to))
     for (const row of rows) byId.set(row.id, row)
   }
   return [...byId.values()]
@@ -1823,7 +1971,8 @@ export async function generateBehandlingshistorik(
   const unionIds = mode === 'fiscal_year' ? entryIds : []
 
   const [auditRows, rattelseRows, resets, sieImports, bankImports, releases, globalAuditRows] = await Promise.all([
-    fetchAuditRows(supabase, companyId, window, unionIds),
+    fetchAuditRows(supabase, companyId, window, unionIds, mode === 'fiscal_year'
+      ? [...new Set(entries.map(entry => entry.import_batch_id).filter((id): id is string => !!id))] : []),
     fetchRattelseRows(supabase, companyId, window, unionIds),
     fetchMigrationResets(supabase, companyId),
     fetchSieImports(supabase, companyId),

@@ -19,6 +19,7 @@ export { DimensionValidationError, MandatoryDimensionMissingError } from './dime
 export const ACCOUNTS_NOT_IN_CHART = 'ACCOUNTS_NOT_IN_CHART' as const
 export const JOURNAL_ENTRY_NOT_BALANCED = 'JOURNAL_ENTRY_NOT_BALANCED' as const
 export const JOURNAL_LINE_NEGATIVE_AMOUNT = 'JOURNAL_LINE_NEGATIVE_AMOUNT' as const
+export const JOURNAL_LINE_BOTH_SIDES_NONZERO = 'JOURNAL_LINE_BOTH_SIDES_NONZERO' as const
 export const FISCAL_PERIOD_NOT_FOUND = 'FISCAL_PERIOD_NOT_FOUND' as const
 export const ENTRY_DATE_OUTSIDE_FISCAL_PERIOD = 'ENTRY_DATE_OUTSIDE_FISCAL_PERIOD' as const
 export const JOURNAL_ENTRY_NOT_FOUND = 'JOURNAL_ENTRY_NOT_FOUND' as const
@@ -26,6 +27,7 @@ export const CANNOT_REVERSE_NON_POSTED = 'CANNOT_REVERSE_NON_POSTED' as const
 export const CANNOT_REVERSE_STORNO = 'CANNOT_REVERSE_STORNO' as const
 export const CANNOT_CORRECT_NON_POSTED = 'CANNOT_CORRECT_NON_POSTED' as const
 export const CANNOT_EDIT_NON_DRAFT = 'CANNOT_EDIT_NON_DRAFT' as const
+export const CANNOT_CANCEL_NON_DRAFT = 'CANNOT_CANCEL_NON_DRAFT' as const
 export const ENTRY_ALREADY_REVERSED = 'ENTRY_ALREADY_REVERSED' as const
 export const CURRENCY_REVALUATION_ALREADY_EXISTS = 'CURRENCY_REVALUATION_ALREADY_EXISTS' as const
 export const INVALID_MAPPING_RESULT = 'INVALID_MAPPING_RESULT' as const
@@ -116,6 +118,29 @@ export class JournalLineNegativeAmountError extends Error {
   }
 }
 
+/**
+ * A line arrived with BOTH debit_amount and credit_amount above zero. The
+ * line cancels itself, and totals-only balance math cannot see it: the entry
+ * "balances" and posts as a nollverifikat. A later storno then nets the line
+ * to {0, 0} and dies on the voucher trigger's "has zero total" (issue #2551).
+ * A journal line carries one side; a producer holding both amounts must net
+ * them onto the larger side (lib/bookkeeping/line-side.ts) or split them into
+ * two lines.
+ */
+export class JournalLineBothSidesNonZeroError extends Error {
+  readonly code = JOURNAL_LINE_BOTH_SIDES_NONZERO
+  constructor(
+    public readonly accountNumber: string,
+    public readonly debitAmount: number,
+    public readonly creditAmount: number
+  ) {
+    super(
+      `Journal line on ${accountNumber} carries both sides (debit ${debitAmount}, credit ${creditAmount}); a line carries one side only`
+    )
+    this.name = 'JournalLineBothSidesNonZeroError'
+  }
+}
+
 export class FiscalPeriodNotFoundError extends Error {
   readonly code = FISCAL_PERIOD_NOT_FOUND
   constructor() {
@@ -192,6 +217,26 @@ export class CannotEditNonDraftError extends Error {
   constructor(public readonly currentStatus: string) {
     super('Only draft entries can be edited')
     this.name = 'CannotEditNonDraftError'
+  }
+}
+
+/**
+ * Raised when a cancel is attempted on an entry that is not a draft.
+ *
+ * Only drafts can be cancelled: they hold no voucher_number, so removing one
+ * leaves the verifikationsserie unbroken (BFL 5 kap 7 §). A posted entry
+ * carries a number and may only be undone through a rättelse, never
+ * overwritten: BFL 5 kap 5 § keeps the original post visible and records who
+ * corrected it and when, which is what storno does. The DB immutability
+ * trigger cannot make this call on its
+ * own: it permits posted -> cancelled for the orphaned-voucher compensation
+ * path, which pairs the cancel with a voucher-gap explanation.
+ */
+export class CannotCancelNonDraftError extends Error {
+  readonly code = CANNOT_CANCEL_NON_DRAFT
+  constructor(public readonly currentStatus: string) {
+    super('Only draft entries can be cancelled')
+    this.name = 'CannotCancelNonDraftError'
   }
 }
 
@@ -320,10 +365,14 @@ export class InvalidMappingResultError extends Error {
 // ============================================================================
 
 export type BookkeepingOperation =
+  | 'import_sie_chunk'
+  | 'undo_sie_import_chunk'
+  | 'undo_sie_duplicate_repair_chunk'
   | 'get_next_voucher_number'
   | 'resolve_account_ids'
   | 'create_draft_entry'
   | 'create_entry_lines'
+  | 'cancel_draft_entry'
   | 'commit_entry'
   | 'commit_asset_disposal'
   | 'fetch_asset_disposal_entry'
@@ -397,6 +446,7 @@ export function isBookkeepingError(err: unknown): boolean {
     err instanceof AccountsNotInChartError ||
     err instanceof JournalEntryNotBalancedError ||
     err instanceof JournalLineNegativeAmountError ||
+    err instanceof JournalLineBothSidesNonZeroError ||
     err instanceof FiscalPeriodNotFoundError ||
     err instanceof EntryDateOutsideFiscalPeriodError ||
     err instanceof JournalEntryNotFoundError ||
@@ -404,6 +454,7 @@ export function isBookkeepingError(err: unknown): boolean {
     err instanceof CannotReverseStornoError ||
     err instanceof CannotCorrectNonPostedError ||
     err instanceof CannotEditNonDraftError ||
+    err instanceof CannotCancelNonDraftError ||
     err instanceof EntryAlreadyReversedError ||
     err instanceof CurrencyRevaluationAlreadyExistsError ||
     err instanceof InvalidMappingResultError ||
@@ -493,6 +544,23 @@ export function bookkeepingErrorResponse(err: unknown): NextResponse | null {
     )
   }
 
+  if (err instanceof JournalLineBothSidesNonZeroError) {
+    return NextResponse.json(
+      {
+        error: {
+          code: err.code,
+          message: err.message,
+          details: {
+            accountNumber: err.accountNumber,
+            debitAmount: err.debitAmount,
+            creditAmount: err.creditAmount,
+          },
+        },
+      },
+      { status: 400 }
+    )
+  }
+
   if (err instanceof FiscalPeriodNotFoundError) {
     return NextResponse.json(
       { error: { code: err.code, message: err.message } },
@@ -565,6 +633,19 @@ export function bookkeepingErrorResponse(err: unknown): NextResponse | null {
   }
 
   if (err instanceof CannotEditNonDraftError) {
+    return NextResponse.json(
+      {
+        error: {
+          code: err.code,
+          message: err.message,
+          details: { currentStatus: err.currentStatus },
+        },
+      },
+      { status: 409 }
+    )
+  }
+
+  if (err instanceof CannotCancelNonDraftError) {
     return NextResponse.json(
       {
         error: {

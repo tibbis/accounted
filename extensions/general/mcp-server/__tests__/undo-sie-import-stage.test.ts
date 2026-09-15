@@ -26,7 +26,7 @@ describe('gnubok_undo_sie_import: stage-time validation', () => {
         fiscal_year_end: '2020-06-30',
         transactions_count: 109,
         opening_balance_entry_id: null,
-        status: 'completed',
+        status: 'completed', job_state: 'completed',
         fiscal_period_id: 'fp-1',
         imported_at: '2026-05-28T10:00:00Z',
       },
@@ -72,7 +72,7 @@ describe('gnubok_undo_sie_import: stage-time validation', () => {
     ).rejects.toThrow(/hittades inte/i)
   })
 
-  it('rejects when the import is not in completed status', async () => {
+  it('directs a legacy import to outcome review', async () => {
     const { supabase, enqueue } = createQueuedMockSupabase()
     enqueue({
       data: {
@@ -97,7 +97,7 @@ describe('gnubok_undo_sie_import: stage-time validation', () => {
         supabase as never,
         { type: 'api_key' },
       ),
-    ).rejects.toThrow(/slutförda importer kan ångras/i)
+    ).rejects.toMatchObject({ code: 'SIE_IMPORT_LEGACY_REVIEW_REQUIRED' })
   })
 
   it('rejects when the linked fiscal period is locked', async () => {
@@ -110,7 +110,7 @@ describe('gnubok_undo_sie_import: stage-time validation', () => {
         fiscal_year_end: '2024-12-31',
         transactions_count: 1,
         opening_balance_entry_id: 'ob-1',
-        status: 'completed',
+        status: 'completed', job_state: 'completed',
         fiscal_period_id: 'fp-locked',
         imported_at: '2026-05-01T00:00:00Z',
       },

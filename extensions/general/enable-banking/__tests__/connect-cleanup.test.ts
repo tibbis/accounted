@@ -7,9 +7,9 @@ vi.mock('@/lib/entitlements/has-capability', async (importOriginal) => {
   return { ...actual, requireCapability: vi.fn() }
 })
 
-const { mockStartAuthorization, mockResolveConnectAuthOptions } = vi.hoisted(() => ({
+const { mockStartAuthorization, mockGetPreferredAuthMethod } = vi.hoisted(() => ({
   mockStartAuthorization: vi.fn(),
-  mockResolveConnectAuthOptions: vi.fn(),
+  mockGetPreferredAuthMethod: vi.fn(),
 }))
 
 vi.mock('../lib/api-client', async (importOriginal) => {
@@ -17,7 +17,8 @@ vi.mock('../lib/api-client', async (importOriginal) => {
   return {
     ...actual,
     startAuthorization: (...args: unknown[]) => mockStartAuthorization(...args),
-    resolveConnectAuthOptions: (...args: unknown[]) => mockResolveConnectAuthOptions(...args),
+    getPreferredAuthMethod: (...args: unknown[]) => mockGetPreferredAuthMethod(...args),
+    getPreferredAuthMethodDetails: (...args: unknown[]) => mockGetPreferredAuthMethod(...args),
   }
 })
 
@@ -110,11 +111,65 @@ function connectFrom(
   }
 }
 
+describe('POST /connect credential prefill', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(requireCapability).mockResolvedValue(null)
+    mockStartAuthorization.mockResolvedValue({ url: 'https://bank.example/auth', authorization_id: 'auth-1' })
+  })
+
+  function ctxWithCompany(orgNumber: string | null) {
+    let call = 0
+    return makeContext((table: string) => {
+      if (table === 'companies') return makeChain({ data: { entity_type: 'aktiebolag', org_number: orgNumber } })
+      call++
+      if (call === 1) return makeChain({ data: null }) // no recent pending
+      if (call === 2) return makeChain({ data: [] }) // sweep
+      if (call === 3) return makeChain({ data: null }) // existing-connection guard
+      return makeChain({ data: { id: 'new-conn' } }) // insert
+    })
+  }
+
+  it('prefills companyId from the org number when the pinned method asks for it (Handelsbanken business)', async () => {
+    mockGetPreferredAuthMethod.mockResolvedValue({
+      name: 'BANKID',
+      approach: 'DECOUPLED',
+      hidden_method: true,
+      credentials: [
+        { name: 'userId', required: true, template: '^(19|20)\\d{2}[01]\\d[0-3]\\d\\d{4}$' },
+        { name: 'companyId', required: true, template: '^\\d{10}$' },
+      ],
+    })
+    const ctx = ctxWithCompany('556809-8239')
+    const response = await connectRoute().handler(makeConnectRequest(), ctx)
+    expect(response.status).toBe(200)
+    expect(mockStartAuthorization).toHaveBeenCalledTimes(1)
+    const args = mockStartAuthorization.mock.calls[0]
+    expect(args[5]).toBe('BANKID')
+    expect(args[7]).toEqual({ companyId: '5568098239' })
+    const started = (ctx.log.info as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => String(c[0]).includes('Starting bank connection'),
+    )
+    expect(started?.[1]).toMatchObject({ credentials_prefilled: ['companyId'] })
+    expect(JSON.stringify(started?.[1])).not.toContain('5568098239')
+  })
+
+  it('sends no credentials, and never reads the company, when the method declares none', async () => {
+    mockGetPreferredAuthMethod.mockResolvedValue({ name: 'BANKID', approach: 'DECOUPLED', hidden_method: true })
+    const ctx = ctxWithCompany('556809-8239')
+    const response = await connectRoute().handler(makeConnectRequest(), ctx)
+    expect(response.status).toBe(200)
+    expect(mockStartAuthorization.mock.calls[0][7]).toBeUndefined()
+    const tables = (ctx.supabase.from as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])
+    expect(tables).not.toContain('companies')
+  })
+})
+
 describe('POST /connect never-activated row cleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(requireCapability).mockResolvedValue(null)
-    mockResolveConnectAuthOptions.mockResolvedValue({})
+    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
     mockStartAuthorization.mockResolvedValue({
       url: 'https://bank.example/auth',
       authorization_id: 'auth-1',
@@ -254,25 +309,21 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   it('forwards the pinned method name into the auth_method argument (Handelsbanken corporate regression)', async () => {
     // The documented real Handelsbanken shape: Mobile BankID is a hidden
     // DECOUPLED method carrying NO psu_types restriction.
-    mockResolveConnectAuthOptions.mockResolvedValue({
-      authMethod: 'BANKID',
-      preferredMethod: {
-        name: 'BANKID',
-        approach: 'DECOUPLED',
-        hidden_method: true,
-        title: 'Bank ID',
-      },
+    mockGetPreferredAuthMethod.mockResolvedValue({
+      name: 'BANKID',
+      approach: 'DECOUPLED',
+      hidden_method: true,
+      title: 'Bank ID',
     })
 
     const ctx = makeFreshConnectContext()
     const response = await connectRoute().handler(makeHandelsbankenRequest(), ctx)
     expect(response.status).toBe(200)
 
-    expect(mockResolveConnectAuthOptions).toHaveBeenCalledWith(
+    expect(mockGetPreferredAuthMethod).toHaveBeenCalledWith(
       'Handelsbanken',
       'SE',
       'business',
-      expect.anything(),
     )
 
     // startAuthorization(aspspName, aspspCountry, redirectUrl, state, psuType,
@@ -300,7 +351,7 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   })
 
   it('passes undefined auth_method when no method is pinned (ASPSP default flow)', async () => {
-    mockResolveConnectAuthOptions.mockResolvedValue({})
+    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
 
     const ctx = makeFreshConnectContext()
     const response = await connectRoute().handler(makeHandelsbankenRequest(), ctx)
@@ -321,14 +372,11 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
   })
 
   it('forwards the pinned method name on the reconnect path too', async () => {
-    mockResolveConnectAuthOptions.mockResolvedValue({
-      authMethod: 'BANKID',
-      preferredMethod: {
-        name: 'BANKID',
-        approach: 'DECOUPLED',
-        hidden_method: true,
-        title: 'Bank ID',
-      },
+    mockGetPreferredAuthMethod.mockResolvedValue({
+      name: 'BANKID',
+      approach: 'DECOUPLED',
+      hidden_method: true,
+      title: 'Bank ID',
     })
 
     let bankStep = 0
@@ -379,7 +427,7 @@ describe('POST /connect existing-connection guard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(requireCapability).mockResolvedValue(null)
-    mockResolveConnectAuthOptions.mockResolvedValue({})
+    mockGetPreferredAuthMethod.mockResolvedValue(undefined)
     mockStartAuthorization.mockResolvedValue({
       url: 'https://bank.example/auth',
       authorization_id: 'auth-1',

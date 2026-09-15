@@ -3,7 +3,6 @@
 import { useState, type ReactNode } from 'react'
 import { useTranslations } from 'next-intl'
 import { useCompany } from '@/contexts/CompanyContext'
-import { SkatteverketPromoCard } from '@/components/dashboard/SkatteverketPromoCard'
 import { AgentPromo } from '@/components/dashboard/AgentPromo'
 import type { InitialSetupState } from '@/types'
 
@@ -20,7 +19,6 @@ interface DashboardContentProps {
    * full-screen onboarding takeover.
    */
   agentBuilt?: boolean
-  hasSkatteverketConnected?: boolean
   /**
    * Streamed sections (server components behind Suspense in
    * app/(dashboard)/page.tsx): the notice line, the setup checklist and the
@@ -37,15 +35,14 @@ interface DashboardContentProps {
  * Hem (concept scene 14): greeting, then the two panes side by side:
  * Att göra (obligations, lib/worklist) and Fortsätt (in-progress work,
  * lib/worklist/resume). KPI tiles, revenue/expense cards and the deadline/tax
- * widgets left the page (founder direction, dev_docs/last_session_resume.md
- * §8): the numbers live at /kpi and /reports, deadlines render as Bevaka rows.
+ * widgets left the page (founder direction): the numbers live at /kpi and
+ * /reports, deadlines render as Bevaka rows.
  */
 export default function DashboardContent({
   companyId,
   userFirstName,
   initialSetup,
   agentBuilt = true,
-  hasSkatteverketConnected = false,
   notices,
   checklist,
   panes,
@@ -99,14 +96,10 @@ export default function DashboardContent({
 
       {/* The two panes (concept hem-grid). When nothing is in progress the
           right pane renders null and Att göra takes the full width. */}
+      {/* The panes end with the Kopplingar strip (bank, Skatteverket) once the
+          checklist is closed; the old standalone Skatteverket promo sentence
+          lived here and is superseded by it. */}
       {panes}
-
-      {/* Connect-Skatteverket nudge for existing companies. Gated on
-          agentBuilt so it never stacks under the build-assistant hero:
-          one CTA surface at a time. */}
-      {agentBuilt && (
-        <SkatteverketPromoCard companyId={companyId} connected={hasSkatteverketConnected} />
-      )}
     </div>
   )
 }

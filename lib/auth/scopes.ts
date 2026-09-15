@@ -104,6 +104,9 @@ export const V1_ENDPOINT_SCOPES: Record<string, ApiKeyScope> = {
   'GET /api/v1/companies/:companyId/journal-entries': 'reports:read',
   'GET /api/v1/companies/:companyId/journal-entries/:id': 'reports:read',
   'POST /api/v1/companies/:companyId/journal-entries': 'bookkeeping:write',
+  // Cancel an uncommitted draft. Same scope as creating one: a draft holds
+  // no voucher_number, so cancelling it is not a ledger write.
+  'DELETE /api/v1/companies/:companyId/journal-entries/:id': 'bookkeeping:write',
   'POST /api/v1/companies/:companyId/journal-entries/:id/commit': 'bookkeeping:write',
   'POST /api/v1/companies/:companyId/journal-entries/:id/reverse': 'bookkeeping:write',
   'POST /api/v1/companies/:companyId/journal-entries/:id/correct': 'bookkeeping:write',
@@ -205,6 +208,7 @@ export const V1_ENDPOINT_SCOPES: Record<string, ApiKeyScope> = {
   // Imports: async via the Phase 4 PR-2 operations substrate. Multipart
   // uploads (the file is the request body).
   'POST /api/v1/companies/:companyId/imports/sie': 'bookkeeping:write',
+  'POST /api/v1/companies/:companyId/imports/sie/upload': 'bookkeeping:write',
   'POST /api/v1/companies/:companyId/imports/bank': 'transactions:write',
 
   // Phase 5 PR-1: Payroll vertical (employees + salary-runs + lifecycle verbs).
