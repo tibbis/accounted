@@ -14,6 +14,10 @@ describe('friendlyModelError', () => {
     expect(friendlyModelError(new Error('socket hang up ETIMEDOUT'))).toMatch(/anslutningen/i)
   })
 
+  it('aborted Gemini stream → same broken-connection line', () => {
+    expect(friendlyModelError(new Error('This operation was aborted'))).toMatch(/anslutningen/i)
+  })
+
   it('5xx → temporary service error', () => {
     expect(friendlyModelError({ status: 503, message: 'Service Unavailable' })).toMatch(/tillfälligt fel/i)
   })

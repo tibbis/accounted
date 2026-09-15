@@ -40,10 +40,10 @@ const EMPTY_ANSWER_MESSAGE = 'Assistenten gav inget svar. Försök igen.'
  * POST /api/agent/ask: a single-call, provider-agnostic assistant answer over a
  * bounded read-only tool loop.
  *
- * Unlike POST /api/agent/invoke (the streaming Anthropic chat runtime, which
- * is gated on `assistantAvailable` and only runs on the Anthropic family),
- * this endpoint answers through getAiService().generateText, so it runs on ANY
- * configured backend, including an OpenAI-compatible local model. It is
+ * Unlike POST /api/agent/invoke (the streaming chat runtime, gated on
+ * `assistantAvailable`), this endpoint answers through
+ * getAiService().generateText, so it runs on ANY configured backend,
+ * including an OpenAI-compatible local model. It is
  * therefore gated on `configured`, not `assistantAvailable`. The service
  * attaches the read-only MCP tools so it can fetch real figures (audit Option
  * A / rip): a page posts its context and a question, gets one answer back.

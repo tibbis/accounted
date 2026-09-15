@@ -98,7 +98,6 @@ function collectStreamingDeltas(
 }
 
 export function attachThoughtSignatures(body: string, signatures: Map<string, string>): string {
-  if (signatures.size === 0) return body
   let parsed: ChatRequestLike
   try {
     parsed = JSON.parse(body) as ChatRequestLike
@@ -113,6 +112,8 @@ export function attachThoughtSignatures(body: string, signatures: Map<string, st
     for (const tc of message.tool_calls) {
       if (thoughtSignatureOf(tc)) continue
       const id = toolCallId(tc)
+      // Cold-start resume has an empty harvest map: still attach the skip
+      // sentinel so Gemini does not 400 on echoed tool_calls from history.
       const sig =
         (id ? signatures.get(id) : undefined) ?? SKIP_THOUGHT_SIGNATURE_VALIDATOR
       tc.extra_content = {
@@ -143,13 +144,20 @@ export function collectThoughtSignaturesFromSse(text: string, signatures: Map<st
   }
 }
 
-async function harvestResponse(response: Response, signatures: Map<string, string>): Promise<void> {
-  let text: string
+function requestWantsStream(init?: RequestInit): boolean {
+  if (typeof init?.body !== 'string') return false
   try {
-    text = await response.clone().text()
+    return (JSON.parse(init.body) as { stream?: unknown }).stream === true
   } catch {
-    return
+    return false
   }
+}
+
+function responseIsSse(response: Response): boolean {
+  return (response.headers.get('content-type') ?? '').includes('text/event-stream')
+}
+
+function ingestHarvestedText(text: string, signatures: Map<string, string>): void {
   const trimmed = text.trim()
   if (trimmed.startsWith('{')) {
     try {
@@ -162,9 +170,36 @@ async function harvestResponse(response: Response, signatures: Map<string, strin
   if (trimmed.includes('data:')) collectThoughtSignaturesFromSse(text, signatures)
 }
 
+async function harvestResponse(response: Response, signatures: Map<string, string>): Promise<void> {
+  let text: string
+  try {
+    text = await response.clone().text()
+  } catch {
+    return
+  }
+  ingestHarvestedText(text, signatures)
+}
+
+async function harvestStream(
+  stream: ReadableStream<Uint8Array>,
+  signatures: Map<string, string>,
+): Promise<void> {
+  try {
+    ingestHarvestedText(await new Response(stream).text(), signatures)
+  } catch {
+    // Transport dropped or the SDK aborted; the next turn uses the skip sentinel.
+  }
+}
+
 /**
  * Wrap `fetch` so Gemini thought signatures survive the SDK's tool loop.
  * One wrapper per provider instance; signatures are keyed by tool-call id.
+ *
+ * Streaming responses must not be clone()-read before the SDK gets the body:
+ * that waits for [DONE] (or fills the tee buffer and deadlocks) so
+ * streamAgentRound never finishes. Tee instead: harvest one branch in the
+ * background, return the other immediately. The next request still awaits
+ * pendingHarvest so the signature is on the wire before the follow-up POST.
  */
 export function wrapGeminiThoughtSignatureFetch(
   baseFetch: typeof fetch = globalThis.fetch.bind(globalThis),
@@ -182,8 +217,17 @@ export function wrapGeminiThoughtSignatureFetch(
     }
 
     const response = await baseFetch(input, nextInit)
-    // Clone-and-read so the SDK still owns the original body. Await before
-    // returning so the next tool-loop request cannot race the harvest.
+    const streaming = requestWantsStream(init) || responseIsSse(response)
+    if (streaming && response.body) {
+      const [harvestBody, sdkBody] = response.body.tee()
+      pendingHarvest = harvestStream(harvestBody, signatures)
+      return new Response(sdkBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    }
+
     pendingHarvest = harvestResponse(response, signatures)
     await pendingHarvest
     return response

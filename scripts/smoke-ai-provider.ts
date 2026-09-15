@@ -92,7 +92,7 @@ async function main(): Promise<void> {
   console.log(`Models:       assistant=${status.models.assistant ?? '-'}  heavy=${status.models.heavy ?? '-'}  extraction=${status.models.extraction ?? '-'}`)
   console.log(`PDF mode:     ${status.pdfMode}${status.pdfMode === 'rasterize' ? `  pdftoppm: ${await probeRasterizer()}` : ''}`)
   console.log(`Capabilities: vision=${status.capabilities.imageInput} pdfNative=${status.capabilities.pdfNative} strictJson=${status.capabilities.strictJsonSchema}`)
-  console.log(`Assistant:    ${status.assistantAvailable ? 'available' : 'not available on this backend (extraction and single-call AI still run)'}`)
+  console.log(`Assistant:    ${status.assistantAvailable ? 'available' : 'not available (AI not configured)'}`)
   console.log()
 
   if (!status.configured) {

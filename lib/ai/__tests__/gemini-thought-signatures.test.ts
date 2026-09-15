@@ -112,9 +112,12 @@ describe('collectThoughtSignatures', () => {
 })
 
 describe('attachThoughtSignatures', () => {
-  it('leaves the body unchanged when nothing has been harvested', () => {
+  it('attaches the skip sentinel when the harvest map is empty', () => {
     const body = turn2Body('call-1')
-    expect(attachThoughtSignatures(body, new Map())).toBe(body)
+    const patched = JSON.parse(attachThoughtSignatures(body, new Map()))
+    expect(patched.messages[1].tool_calls[0].extra_content.google.thought_signature).toBe(
+      SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+    )
   })
 
   it('reattaches the harvested signature on the next assistant tool call', () => {
@@ -177,7 +180,7 @@ describe('wrapGeminiThoughtSignatureFetch', () => {
     expect(sent.messages[1].tool_calls[0].extra_content.google.thought_signature).toBe(SIG)
   })
 
-  it('does not rewrite a follow-up when the first response had no extra_content', async () => {
+  it('attaches the skip sentinel on follow-up when the first response had no extra_content', async () => {
     const inner = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(geminiToolTurn('call-1', null)))
@@ -192,7 +195,10 @@ describe('wrapGeminiThoughtSignatureFetch', () => {
     await fetch('https://example.test/v1/chat/completions', { method: 'POST', body: followUp })
 
     const secondInit = inner.mock.calls[1][1] as RequestInit
-    expect(secondInit.body).toBe(followUp)
+    const sent = JSON.parse(String(secondInit.body))
+    expect(sent.messages[1].tool_calls[0].extra_content.google.thought_signature).toBe(
+      SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+    )
   })
 
   it('harvests extra_content from SSE chunks before the next request', async () => {
@@ -236,10 +242,11 @@ describe('wrapGeminiThoughtSignatureFetch', () => {
       .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
 
     const fetch = wrapGeminiThoughtSignatureFetch(inner)
-    await fetch('https://example.test/v1/chat/completions', {
+    const first = await fetch('https://example.test/v1/chat/completions', {
       method: 'POST',
       body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'x' }] }),
     })
+    await first.text()
     await fetch('https://example.test/v1/chat/completions', {
       method: 'POST',
       body: turn2Body('call-1'),
@@ -248,5 +255,55 @@ describe('wrapGeminiThoughtSignatureFetch', () => {
     const secondInit = inner.mock.calls[1][1] as RequestInit
     const sent = JSON.parse(String(secondInit.body))
     expect(sent.messages[1].tool_calls[0].extra_content.google.thought_signature).toBe(SIG)
+  })
+
+  it('returns a streaming Response before the SSE body finishes', async () => {
+    const encoder = new TextEncoder()
+    let sendDone: (() => void) | undefined
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call-1',
+                        extra_content: { google: { thought_signature: SIG } },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+          ),
+        )
+        sendDone = () => {
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+          controller.close()
+        }
+      },
+    })
+    const inner = vi.fn().mockResolvedValueOnce(
+      new Response(stream, { headers: { 'content-type': 'text/event-stream' } }),
+    )
+    const fetch = wrapGeminiThoughtSignatureFetch(inner)
+
+    const res = await Promise.race([
+      fetch('https://example.test/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'x' }] }),
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('fetch blocked on open SSE')), 50)
+      }),
+    ])
+
+    expect(res.body).not.toBeNull()
+    sendDone?.()
+    await res.text()
   })
 })

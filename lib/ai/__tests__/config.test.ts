@@ -216,13 +216,14 @@ describe('getAiStatus', () => {
     expect(s.reason).toBe('no_model')
   })
 
-  // Extraction and single-call jobs run; the chat loop does not (yet).
-  it('is configured but not assistant-capable on an OpenAI-compatible endpoint', () => {
+  // Extraction and single-call jobs run; the chat loop now does too via
+  // streamAgentRound.
+  it('is configured and assistant-capable on an OpenAI-compatible endpoint', () => {
     byo()
     const s = getAiStatus()
     expect(s.provider).toBe('openai-compatible')
     expect(s.configured).toBe(true)
-    expect(s.assistantAvailable).toBe(false)
+    expect(s.assistantAvailable).toBe(true)
     expect(s.capabilities.pdfNative).toBe(false)
     expect(s.capabilities.imageInput).toBe(true)
     expect(s.models.extraction).toBe('google/gemma-4-31B-it')

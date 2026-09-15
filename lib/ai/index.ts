@@ -11,6 +11,8 @@ export type {
   AiToolDef,
   AiTier,
   ExtractionSkipReason,
+  StreamAgentRoundRequest,
+  StreamAgentRoundResult,
 } from './types'
 export { getAiStatus, readAiConfig } from './config'
 export { extractJsonObject } from './json'

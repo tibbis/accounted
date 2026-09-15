@@ -126,9 +126,8 @@ export async function POST(request: Request) {
   if (capBlocked) return capBlocked
 
   // Distinct from the paywall: the deployment has no AI backend the chat
-  // loop can run on (no credentials, or an OpenAI-compatible endpoint, which
-  // the loop does not speak yet). Answer up front instead of opening a
-  // stream that dies on the first model call.
+  // loop can run on (no credentials / no model). Answer up front instead of
+  // opening a stream that dies on the first model call.
   if (!getAiStatus().assistantAvailable) {
     return NextResponse.json(
       {

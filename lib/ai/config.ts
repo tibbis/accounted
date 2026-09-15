@@ -183,7 +183,8 @@ export function getAiStatus(): AiStatus {
     capabilities,
     models,
     pdfMode: cfg.pdfMode,
-    // The chat loop still speaks the Anthropic messages surface directly.
-    assistantAvailable: cfg.configured && cfg.provider !== 'openai-compatible',
+    // Chat runs on Anthropic/Bedrock (Messages stream) or openai-compatible
+    // (streamAgentRound). Extraction/ask only need `configured`.
+    assistantAvailable: cfg.configured,
   }
 }

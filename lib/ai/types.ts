@@ -8,8 +8,9 @@
 // that implements the chat-completions API (the Swedish inference providers a
 // sovereign self-host points at) through the Vercel AI SDK.
 //
-// Streaming members (the chat loop) are deliberately absent until the chat
-// runtime decision is taken: see the Sovereign plan, alignment rule R3.
+// Streaming for the in-app chat loop lives on streamAgentRound (openai-
+// compatible). The Anthropic-family path still streams via the Messages SDK
+// inside run-turn.ts so hosted Bedrock stays byte-identical.
 
 export type AiProviderKind = 'bedrock' | 'anthropic' | 'openai-compatible'
 
@@ -167,6 +168,44 @@ export type ExtractFromDocumentResult =
     }
   | { ok: false; skipped: ExtractionSkipReason }
 
+/**
+ * One model round of the streaming chat loop (OpenAI-compatible path).
+ * Tools are declared without execute: the chat loop dispatches them itself
+ * so staging, memory chips, and StreamEvents stay identical to Anthropic.
+ */
+export interface StreamAgentToolSchema {
+  name: string
+  description: string
+  jsonSchema: Record<string, unknown>
+}
+
+export interface StreamAgentToolUse {
+  id: string
+  name: string
+  input: Record<string, unknown>
+}
+
+export type StreamAgentStopReason = 'end' | 'tool_use' | 'max_tokens' | 'other'
+
+export interface StreamAgentRoundRequest {
+  tier: AiTier
+  system: string
+  /** AI SDK / OpenAI-compat messages (converted from Anthropic history). */
+  messages: unknown[]
+  tools: StreamAgentToolSchema[]
+  maxTokens: number
+  onTextDelta: (delta: string) => void
+  onReasoningDelta?: (delta: string) => void
+  onToolUseStart?: (tool: { id: string; name: string }) => void
+}
+
+export interface StreamAgentRoundResult {
+  text: string
+  toolUses: StreamAgentToolUse[]
+  stopReason: StreamAgentStopReason
+  model: string
+}
+
 export interface AiService {
   readonly provider: AiProviderKind
   readonly capabilities: AiCapabilities
@@ -175,6 +214,12 @@ export interface AiService {
   generateText(req: GenerateTextRequest): Promise<GenerateTextResult>
   generateStructured(req: GenerateStructuredRequest): Promise<GenerateStructuredResult>
   extractFromDocument(req: ExtractFromDocumentRequest): Promise<ExtractFromDocumentResult>
+  /**
+   * Stream one assistant round for the in-app chat loop. Implemented for
+   * openai-compatible; the Anthropic-family service throws (that path keeps
+   * the direct Messages stream in run-turn.ts).
+   */
+  streamAgentRound(req: StreamAgentRoundRequest): Promise<StreamAgentRoundResult>
 }
 
 export type AiPdfMode = 'native' | 'rasterize'
@@ -188,9 +233,9 @@ export interface AiStatus {
   models: Record<AiTier, string | null>
   pdfMode: AiPdfMode
   /**
-   * Whether the in-app assistant (chat loop) can run. The loop still speaks
-   * the Anthropic messages surface directly, so it needs the Anthropic family
-   * until its streaming port lands; extraction and single-call jobs do not.
+   * Whether the in-app assistant (chat loop) can run. True when the deployment
+   * has a configured backend: Anthropic/Bedrock via the Messages stream, or
+   * openai-compatible via streamAgentRound (Gemini / BYO).
    */
   assistantAvailable: boolean
 }

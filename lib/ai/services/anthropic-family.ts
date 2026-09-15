@@ -280,5 +280,12 @@ export function createAnthropicFamilyService(cfg: ResolvedAiConfig): AiService {
         ...(resp.stop_reason === 'max_tokens' ? { truncated: true } : {}),
       }
     },
+
+    async streamAgentRound() {
+      // Hosted / direct Anthropic chat streams via run-turn.ts Messages SDK.
+      throw new Error(
+        'streamAgentRound is only implemented for openai-compatible; use the Anthropic Messages path in run-turn.ts',
+      )
+    },
   }
 }

@@ -10,10 +10,29 @@ import type { AgentIntent } from '@/lib/agent/intents/types'
 import { agentToolRegistry } from '@/lib/agent/tools/registry'
 import type { AgentTool, AgentActorContext, StagedOperationResult } from '@/lib/agent/tools/types'
 import { isStagedOperation } from '@/lib/agent/tools/types'
+import { resolveAiProvider } from '@/lib/ai/provider'
 import { buildSystemPrompt } from './system-prompt'
 import { loadFiscalYearInventory } from '@/lib/agent/fiscal-years'
 import { createLogger } from '@/lib/logger'
 import { swedishToday } from '@/lib/utils'
+import { runOpenAICompatibleChatLoop } from './run-turn-openai'
+import {
+  boundToolResultText,
+  friendlyModelError,
+  isTransientStreamError,
+  wrapToolResult,
+  type StreamEvent,
+  MAX_TOOL_RESULT_CHARS,
+} from './shared'
+
+export {
+  boundToolResultText,
+  friendlyModelError,
+  isTransientStreamError,
+  wrapToolResult,
+  MAX_TOOL_RESULT_CHARS,
+  type StreamEvent,
+}
 
 const log = createLogger('agent.chat.run-turn')
 
@@ -22,77 +41,7 @@ const log = createLogger('agent.chat.run-turn')
  * Raw AWS Bedrock SDK errors (throttling, timeouts, 5xx) are English and
  * technical; the chat surface renders this verbatim, so keep it human.
  */
-export function friendlyModelError(err: unknown): string {
-  const status = (err as { status?: number } | null)?.status
-  const name = (err as { name?: string } | null)?.name ?? ''
-  const raw = err instanceof Error ? err.message : ''
-  const text = `${name} ${raw}`.toLowerCase()
-  if (
-    status === 429 ||
-    text.includes('throttl') ||
-    text.includes('too many') ||
-    text.includes('rate limit') ||
-    text.includes('rate exceeded')
-  ) {
-    return 'Anna är upptagen just nu. Vänta en liten stund och försök igen.'
-  }
-  if (
-    text.includes('timeout') ||
-    text.includes('timed out') ||
-    text.includes('etimedout') ||
-    text.includes('econnreset') ||
-    text.includes('network') ||
-    text.includes('socket')
-  ) {
-    return 'Anslutningen till assistenten bröts. Försök igen.'
-  }
-  if (typeof status === 'number' && status >= 500) {
-    return 'Assistenttjänsten har ett tillfälligt fel. Försök igen om en stund.'
-  }
-  return 'Något gick fel hos assistenten. Försök igen om en stund.'
-}
-
-/**
- * True when a Bedrock stream failure is transient: the identical request can
- * succeed on an immediate retry without any input change. Covers throttling
- * (429), server errors (5xx), transport cuts (timeout/reset/socket), and the
- * two known SDK stream-corruption signatures observed in prod on the pinned
- * 0.29.x SDK ("Unexpected event order", "request ended without sending any
- * chunks"). Auth/validation failures (4xx other than 429) are NOT transient:
- * retrying them is wasted work and they must keep surfacing immediately.
- */
-export function isTransientStreamError(err: unknown): boolean {
-  const status = (err as { status?: number } | null)?.status
-  if (status === 429) return true
-  if (typeof status === 'number' && status >= 500) return true
-  // A non-429 4xx is permanent regardless of message text.
-  if (typeof status === 'number' && status >= 400) return false
-
-  const name = (err as { name?: string } | null)?.name ?? ''
-  const raw = err instanceof Error ? err.message : ''
-  let cause = ''
-  try {
-    const c = (err as { cause?: unknown } | null)?.cause
-    cause = c instanceof Error ? `${c.name} ${c.message}` : c != null ? String(c) : ''
-  } catch {
-    cause = ''
-  }
-  const text = `${name} ${raw} ${cause}`.toLowerCase()
-  return (
-    text.includes('unexpected event order') ||
-    text.includes('request ended without sending any chunks') ||
-    text.includes('throttl') ||
-    text.includes('rate limit') ||
-    text.includes('rate exceeded') ||
-    text.includes('too many') ||
-    text.includes('timeout') ||
-    text.includes('timed out') ||
-    text.includes('etimedout') ||
-    text.includes('econnreset') ||
-    text.includes('network') ||
-    text.includes('socket')
-  )
-}
+// friendlyModelError / isTransientStreamError live in ./shared (re-exported).
 
 // One automatic retry per turn on a transient stream failure, after a short
 // backoff. Per-turn, not per-iteration: a turn that dies twice is not a blip.
@@ -104,7 +53,7 @@ const STREAM_RETRY_BACKOFF_MS = 750
 //   2. Resolve the intent's atom + tool set.
 //   3. Build system prompt with two cache_control breakpoints.
 //   4. Append message history + new user message.
-//   5. Stream from Anthropic.
+//   5. Stream from Anthropic (or openai-compatible via run-turn-openai).
 //   6. On tool_use: dispatch via agentToolRegistry → tool_result → continue.
 //   7. On staged op: stamp pending_operations.agent_metadata.
 //   8. Persist all messages to agent_messages.
@@ -112,49 +61,7 @@ const STREAM_RETRY_BACKOFF_MS = 750
 // Plan refs: §9 (chat loop), §10 (caching), §5 (BFL audit on
 // pending_operations.agent_metadata).
 
-export type StreamEvent =
-  | { kind: 'text_delta'; delta: string }
-  // Extended-thinking reasoning stream. Emitted token-by-token while the model
-  // reasons, before it answers or calls a tool. Stream-time only: not
-  // persisted, not hydrated on resume.
-  | { kind: 'reasoning_delta'; delta: string }
-  | { kind: 'tool_use'; tool_use_id: string; name: string; input: Record<string, unknown> }
-  | { kind: 'tool_result'; tool_use_id: string; result: unknown }
-  | {
-      kind: 'staged_operation'
-      tool_use_id: string
-      tool_name: string
-      // The tool-use input: a superset of what the staging tool stored as
-      // pending_operations.params (it may also carry transport fields such
-      // as idempotency_key/dry_run). Carried so chat previews that need
-      // params (e.g. attach_document's DocumentViewButton) work live;
-      // previews read only the fields they need.
-      params: Record<string, unknown>
-      staged: StagedOperationResult
-    }
-  | {
-      // The agent successfully wrote a memory mid-conversation (remember_fact
-      // or forget_fact). Stream-time only: not persisted. The chat surface
-      // renders a discreet "Sparat: …" chip so users know memory happened
-      // without having to visit /settings/agent-memory.
-      kind: 'memory_captured'
-      tool_use_id: string
-      action: 'remembered' | 'forgotten'
-      memory_id: string
-      memory_kind?: 'fact' | 'preference' | 'pattern' | 'correction'
-      content?: string
-    }
-  | {
-      // The Bedrock stream died on a transient error and the turn is being
-      // retried once. Text and eager tool chips from the dead stream were
-      // never persisted; the chat surface must reset the in-progress
-      // assistant bubble to `assistant_text` (what had accumulated BEFORE the
-      // failed attempt) and drop un-completed tool chips.
-      kind: 'stream_restart'
-      assistant_text: string
-    }
-  | { kind: 'turn_complete'; assistant_text: string }
-  | { kind: 'error'; message: string }
+// StreamEvent lives in ./shared (re-exported above).
 
 interface RunTurnArgs {
   supabase: SupabaseClient
@@ -196,40 +103,7 @@ const MAX_TOOL_ITERATIONS = 12
 // hundreds) while bounding what a thread costs to continue.
 export const MAX_HISTORY_MESSAGES = 200
 
-// Bound a tool result before it enters the model context. Read tools (above
-// all gnubok_get_document_content, which returns full OCR/PDF text) can return
-// arbitrarily large payloads. Unbounded, that payload is re-sent on every later
-// iteration of this turn's loop AND replayed on every future turn (it is
-// persisted as a 'tool' message and rehydrated by loadConversationMessages),
-// re-introducing the exact context rot we keep out of the system prompt. We cap
-// the serialized result and tell the model how to narrow if it was truncated.
-//
-// Per Anthropic's tool guidance: truncate with sensible defaults and steer the
-// agent to a narrower request; the practical ceiling cited for a single tool
-// return is ~25k tokens, so 40k chars (~10k tokens) sits well under that while
-// leaving multi-page receipts/invoices intact: only pathological dumps get cut.
-export const MAX_TOOL_RESULT_CHARS = 40_000
-
-export function boundToolResultText(raw: string): string {
-  if (raw.length <= MAX_TOOL_RESULT_CHARS) return raw
-  const head = raw.slice(0, MAX_TOOL_RESULT_CHARS)
-  return `${head}\n\n[avkortat: resultatet var ${raw.length} tecken, visar de första ${MAX_TOOL_RESULT_CHARS}. Be om en smalare sökning (limit, datumintervall, specifikt dokument-id eller fält) för att se mer.]`
-}
-
-// Wrap a bounded tool-result string in <tool_output> markers before feeding
-// it back to the model. Paired with the system-prompt rule that text inside
-// <tool_output> is third-party data, never instructions: mitigates the
-// prompt-injection surface from OCR'd documents, inbox items, and any
-// other tool that returns untrusted vendor/customer text. Closing tag uses a
-// distinct strings so a malicious payload containing the literal token can't
-// trivially escape; the contained JSON is serialized so embedded `<` chars
-// are escaped by JSON.stringify (which they are not; they survive
-// stringification): to defend, we additionally strip the literal close-tag
-// sequence from the content.
-export function wrapToolResult(toolUseId: string, raw: string): string {
-  const safe = raw.replaceAll('</tool_output>', '</tool_​output>') // ZWSP injected
-  return `<tool_output id="${toolUseId}">\n${safe}\n</tool_output>`
-}
+// boundToolResultText / wrapToolResult / MAX_TOOL_RESULT_CHARS: ./shared.
 
 // Anthropic content block types ------------------------------------------------
 // We don't import the SDK type: accept any to keep this file decoupled from
@@ -301,6 +175,32 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
     ...history,
     newUserMessage,
   ]
+
+  // openai-compatible (Gemini / BYO): same StreamEvents and persistence, but
+  // stream via getAiService().streamAgentRound instead of Anthropic Messages.
+  if (resolveAiProvider() === 'openai-compatible') {
+    await runOpenAICompatibleChatLoop({
+      supabase,
+      userId,
+      companyId,
+      intent,
+      conversationId,
+      persist,
+      systemBlocks: systemPrompt.blocks,
+      promptHash: systemPrompt.promptHash,
+      atomsLoaded: systemPrompt.atomsLoaded,
+      tools,
+      messages,
+      memoryIds: memory.map((m) => m.id),
+      emit,
+      bumpMemoryAccess: (ids) => bumpMemoryAccess(supabase, ids),
+      persistMessage: (role, content, hidden) =>
+        persistMessage(supabase, conversationId, role, content, hidden ?? false),
+      stampAgentMetadata: (operationId, meta) =>
+        stampAgentMetadata(supabase, operationId, meta),
+    })
+    return
+  }
 
   const actor: AgentActorContext = {
     type: 'agent_chat',
