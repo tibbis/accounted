@@ -196,6 +196,10 @@ export interface UserUiState {
   // top bar (founder decision 2026-09-07, dev_docs/ui_v2_build_plan.md).
   // Absent or 'v1' keeps the centered max-w-5xl panel until v2 is default.
   shell?: DashboardShell
+  // Retired Standard-layout keys. Still on stored bags and in
+  // mergeUiStatePatch so a leftover write does not 400; nothing reads them.
+  nav_collapsed?: boolean
+  nav_folds?: { register?: boolean; bokslut?: boolean }
   // Transaktioner column visibility (lib/transactions/columns-v2).
   tx_columns?: { hidden?: string[] }
 }

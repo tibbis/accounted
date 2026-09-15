@@ -43,20 +43,6 @@ export interface ASPSP {
   auth_methods?: AuthMethod[]
 }
 
-/**
- * A credential Enable Banking's hosted page asks the PSU for before the bank
- * flow starts (Handelsbanken business: `userId` = 12-digit personnummer,
- * `companyId` = 10-digit organisationsnummer). `template` is the regex the
- * page validates against; the page itself shows no format hint.
- */
-export interface AuthMethodCredential {
-  name: string
-  title?: string
-  required?: boolean
-  description?: string
-  template?: string
-}
-
 export interface AuthMethod {
   name: string
   title?: string

@@ -48,8 +48,6 @@ const BodySchema = z
       .record(z.string().uuid(), z.string().datetime())
       .optional(),
     pwa_worklist_badge: z.boolean().optional(),
-    // Dashboard shell opt-in (Inställningar → Konto → Layout).
-    shell: z.enum(['v1', 'v2']).optional(),
     // Transaktioner column visibility. Replaced whole, never merged:
     // the list IS the preference.
     tx_columns: z
