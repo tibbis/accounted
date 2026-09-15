@@ -225,6 +225,17 @@ jobs:
             'set -euo pipefail
              cd ~/accounted
              git fetch origin main
+             # Incoming paths must match origin/main so ff-only can apply.
+             # Host-only edits (Caddyfile Location rewrite, compose override)
+             # stay because they are not in the incoming set.
+             git diff --name-only HEAD origin/main | while IFS= read -r f; do
+               [ -z "$f" ] && continue
+               if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+                 git checkout -- "$f"
+               elif [ -e "$f" ]; then
+                 rm -f -- "$f"
+               fi
+             done
              git pull --ff-only origin main
              export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml:docker-compose.caddy.yml:docker-compose.override.yml
              docker compose up -d --build
