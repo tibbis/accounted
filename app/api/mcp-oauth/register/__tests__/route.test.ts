@@ -51,6 +51,16 @@ describe('POST /api/mcp-oauth/register', () => {
     expect(response.status).toBe(201)
   })
 
+  it('accepts registration with the Gemini Enterprise connector callback', async () => {
+    const response = await POST(createRequest({
+      client_name: 'Gemini',
+      redirect_uris: ['https://vertexaisearch.cloud.google.com/oauth-redirect'],
+    }))
+    expect(response.status).toBe(201)
+    const body = await response.json()
+    expect(body.redirect_uris).toEqual(['https://vertexaisearch.cloud.google.com/oauth-redirect'])
+  })
+
   it('accepts registration with the grok.com connector callback', async () => {
     const response = await POST(createRequest({
       client_name: 'Grok',

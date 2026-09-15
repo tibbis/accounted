@@ -141,13 +141,19 @@ describe('mcpServerUrl', () => {
 })
 
 describe('sideDoorServerUrl', () => {
-  it('lists chatgpt then grok', () => {
-    expect(SIDE_DOORS).toEqual(['chatgpt', 'grok'])
+  it('lists chatgpt, grok, then gemini', () => {
+    expect(SIDE_DOORS).toEqual(['chatgpt', 'grok', 'gemini'])
   })
 
   it('gives Grok the eager-auth flag: its dialog reads a 200 probe as "no auth" and never starts OAuth', () => {
     const url = new URL(sideDoorServerUrl({ origin: 'https://app.testbrand.example', door: 'grok' }))
     expect(url.searchParams.get('client')).toBe('grok')
+    expect(url.searchParams.get('auth')).toBe('required')
+  })
+
+  it('gives Gemini the eager-auth flag: Gemini Enterprise probes like Grok', () => {
+    const url = new URL(sideDoorServerUrl({ origin: 'https://app.testbrand.example', door: 'gemini' }))
+    expect(url.searchParams.get('client')).toBe('gemini')
     expect(url.searchParams.get('auth')).toBe('required')
   })
 

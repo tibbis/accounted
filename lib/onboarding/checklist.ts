@@ -108,17 +108,22 @@ export function mcpServerUrl(input: { origin: string; client: string; eagerAuth?
  * Claude step. Each value keys the i18n strings step_claude_<door>_link /
  * _steps and the telemetry step name. Order is display order.
  */
-export const SIDE_DOORS = ['chatgpt', 'grok'] as const
+export const SIDE_DOORS = ['chatgpt', 'grok', 'gemini'] as const
 export type SideDoor = (typeof SIDE_DOORS)[number]
 
 /**
  * The URL a side door copies. Grok's connector dialog behaves like
  * claude.ai's (a 200 probe means "no auth", so the OAuth flow never starts)
- * and needs the eager flag; ChatGPT's developer mode honours the lazy 401
- * on the first protected call and keeps the plain URL.
+ * and needs the eager flag. Gemini Enterprise's custom MCP setup has the
+ * same probe shape. ChatGPT's developer mode honours the lazy 401 on the
+ * first protected call and keeps the plain URL.
  */
 export function sideDoorServerUrl(input: { origin: string; door: SideDoor }): string {
-  return mcpServerUrl({ origin: input.origin, client: input.door, eagerAuth: input.door === 'grok' })
+  return mcpServerUrl({
+    origin: input.origin,
+    client: input.door,
+    eagerAuth: input.door === 'grok' || input.door === 'gemini',
+  })
 }
 
 /**

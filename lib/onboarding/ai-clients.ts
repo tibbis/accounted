@@ -5,17 +5,18 @@ import { claudeConnectorLink, sideDoorServerUrl, type SideDoor } from '@/lib/onb
 // node:crypto, which must not reach the client bundle).
 
 /**
- * The three AI clients the product connects to over MCP, in display order.
+ * The AI clients the product connects to over MCP, in display order.
  * One list for the books act's last card, the Hem worklist footer and the
  * connected-state readout, so the logos, names and connector pages can
  * never disagree between surfaces.
  */
-export type AiClient = 'claude' | 'chatgpt' | 'grok'
+export type AiClient = 'claude' | 'chatgpt' | 'grok' | 'gemini'
 
 export const AI_CLIENTS: { id: AiClient; name: string; logo: string; home: string }[] = [
   { id: 'claude', name: 'Claude', logo: '/logos/claude.webp', home: 'https://claude.ai/customize/connectors' },
   { id: 'chatgpt', name: 'ChatGPT', logo: '/logos/chatgpt.webp', home: 'https://chatgpt.com/#settings/Connectors' },
   { id: 'grok', name: 'Grok', logo: '/logos/grok.webp', home: 'https://grok.com/' },
+  { id: 'gemini', name: 'Gemini', logo: '/logos/gemini.svg', home: 'https://gemini.google.com/app' },
 ]
 
 const AI_CLIENT_IDS = new Set<string>(AI_CLIENTS.map((c) => c.id))
@@ -38,7 +39,7 @@ export function openAiConnector(url: string): void {
  * OAuth-minted keys. `client` is what the token route stored from the
  * redirect URI (migration 20260913120000); rows older than that column,
  * Cursor, localhost and registered clients carry null or another value and
- * count as none of the three. Pure so the readout can be pinned in tests.
+ * count as none of the listed clients. Pure so the readout can be pinned in tests.
  */
 export function connectedAiClients(rows: { client: string | null }[]): AiClient[] {
   const seen = new Set<AiClient>()
@@ -67,14 +68,16 @@ export function aiChatLink(client: AiClient): string {
       return 'https://chatgpt.com/'
     case 'grok':
       return 'https://grok.com/'
+    case 'gemini':
+      return 'https://gemini.google.com/app'
   }
 }
 
 /**
  * What the Anslut button for a client does. Claude has an add-connector
- * deep link that prefills everything. ChatGPT and Grok have none: the
- * server address is copied and the client's connector page opened. Pure:
- * the component owns window.open and the clipboard.
+ * deep link that prefills everything. ChatGPT, Grok and Gemini have none:
+ * the server address is copied and the client's page opened. Pure: the
+ * component owns window.open and the clipboard.
  */
 export function aiConnectAction(client: AiClient, input: { origin: string; appName: string }): { open: string; copy: string | null } {
   if (client === 'claude') {

@@ -1100,6 +1100,8 @@ function describeClient(
         return { name: 'ChatGPT (OpenAI)', tag: 'Verifierad', verified: true }
       case 'grok':
         return { name: 'Grok (xAI)', tag: 'Verifierad', verified: true }
+      case 'gemini':
+        return { name: 'Gemini (Google)', tag: 'Verifierad', verified: true }
       case 'cursor':
         return { name: 'Cursor (Anysphere)', tag: 'Verifierad', verified: true }
       case 'cursor_deeplink':

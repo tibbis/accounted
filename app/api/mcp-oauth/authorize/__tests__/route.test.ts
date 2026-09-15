@@ -41,6 +41,7 @@ import { GET, POST } from '../route'
 const CLAUDE: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'claude' }
 const CHATGPT: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'chatgpt' }
 const GROK: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'grok' }
+const GEMINI: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'gemini' }
 const CURSOR: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'cursor' }
 const CURSOR_DEEPLINK: RedirectUriResolution = { allowed: true, kind: 'built_in', provider: 'cursor_deeplink' }
 const REGISTERED: RedirectUriResolution = {
@@ -383,6 +384,25 @@ describe('client identity on the consent page', () => {
     expect(html).toContain('Grok (xAI)')
     expect(html).toContain('Verifierad')
     expect(html).toContain('grok.com')
+    expect(html).not.toContain('En extern applikation')
+  })
+
+  it('names Gemini as a verified client for the Vertex AI Search callback', async () => {
+    mocks.resolveRedirectUri.mockResolvedValue(GEMINI)
+    const html = await (
+      await GET(
+        new Request(
+          buildAuthorizeUrl({
+            ...params,
+            redirect_uri: 'https://vertexaisearch.cloud.google.com/oauth-redirect',
+          }),
+        ),
+      )
+    ).text()
+
+    expect(html).toContain('Gemini (Google)')
+    expect(html).toContain('Verifierad')
+    expect(html).toContain('vertexaisearch.cloud.google.com')
     expect(html).not.toContain('En extern applikation')
   })
 

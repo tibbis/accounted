@@ -25,10 +25,10 @@ describe('openAiConnector', () => {
 })
 
 describe('connectedAiClients', () => {
-  it('reads the three clients off live OAuth keys, in display order, once each', () => {
+  it('reads the listed clients off live OAuth keys, in display order, once each', () => {
     expect(
-      connectedAiClients([{ client: 'grok' }, { client: 'claude' }, { client: 'claude' }]),
-    ).toEqual(['claude', 'grok'])
+      connectedAiClients([{ client: 'grok' }, { client: 'gemini' }, { client: 'claude' }, { client: 'claude' }]),
+    ).toEqual(['claude', 'grok', 'gemini'])
   })
 
   it('ignores keys minted before the column, by Cursor, localhost or registered clients', () => {
@@ -43,6 +43,7 @@ describe('aiChatLink', () => {
     ['claude', 'https://claude.ai/new'],
     ['chatgpt', 'https://chatgpt.com/'],
     ['grok', 'https://grok.com/'],
+    ['gemini', 'https://gemini.google.com/app'],
   ] as const)('opens %s without putting task or company data in the URL', (client, expected) => {
     const link = aiChatLink(client)
     expect(link).toBe(expected)
@@ -76,12 +77,15 @@ describe('aiConnectAction', () => {
     expect(a.copy).toBeNull()
   })
 
-  it('ChatGPT and Grok copy the server URL and open their connector page', () => {
+  it('ChatGPT, Grok and Gemini copy the server URL and open their page', () => {
     const chatgpt = aiConnectAction('chatgpt', input)
     expect(chatgpt.open).toBe('https://chatgpt.com/#settings/Connectors')
     expect(chatgpt.copy).toContain('/api/extensions/ext/mcp-server/mcp?tool_namespace=accounted&client=chatgpt')
     const grok = aiConnectAction('grok', input)
     expect(grok.open).toBe('https://grok.com/')
     expect(grok.copy).toContain('client=grok&auth=required')
+    const gemini = aiConnectAction('gemini', input)
+    expect(gemini.open).toBe('https://gemini.google.com/app')
+    expect(gemini.copy).toContain('client=gemini&auth=required')
   })
 })

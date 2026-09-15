@@ -16,11 +16,11 @@ import { scopeKind, type ApiKeyScope } from './scope-catalog'
  * matched. Rendered on the consent page so the user can tell a real Claude /
  * ChatGPT / Grok / Cursor connector from a look-alike registration.
  */
-export type BuiltInProvider = 'claude' | 'chatgpt' | 'grok' | 'cursor' | 'cursor_deeplink' | 'local'
+export type BuiltInProvider = 'claude' | 'chatgpt' | 'grok' | 'gemini' | 'cursor' | 'cursor_deeplink' | 'local'
 
 /**
  * Built-in redirect URI patterns. These bypass the DB lookup entirely so
- * the Claude, ChatGPT, Grok and Cursor connectors keep working without seeded rows, and so
+ * the Claude, ChatGPT, Grok, Gemini and Cursor connectors keep working without seeded rows, and so
  * local development never depends on having a registration.
  *
  * ChatGPT uses a per-connector-instance callback path
@@ -36,6 +36,12 @@ export type BuiltInProvider = 'claude' | 'chatgpt' | 'grok' | 'cursor' | 'cursor
  * itself: the slash form 308s to the no-slash form on the same origin, so
  * both are accepted. Matched as an exact path, never a prefix, so a future
  * grok.com path cannot ride on this entry.
+ *
+ * Gemini Enterprise custom MCP (Google Cloud) sends a single documented
+ * callback, https://vertexaisearch.cloud.google.com/oauth-redirect
+ * (docs.cloud.google.com/gemini/enterprise/docs/connectors/custom-mcp-server).
+ * Matched as an exact path. Gemini CLI uses the localhost rule. The consumer
+ * gemini.google.com app has no published custom-connector callback yet.
  *
  * Cursor (IDE and CLI) registers through /register with three redirect URIs
  * in one request: the legacy custom-scheme deeplink
@@ -60,6 +66,7 @@ const BUILT_IN_PATTERNS: readonly { pattern: RegExp; provider: BuiltInProvider }
   { pattern: /^https:\/\/chatgpt\.com\/connector\/oauth\//, provider: 'chatgpt' },
   { pattern: /^https:\/\/chatgpt\.com\/connector_platform_oauth_redirect$/, provider: 'chatgpt' },
   { pattern: /^https:\/\/grok\.com\/connectors-oauth-exchange-code\/?$/, provider: 'grok' },
+  { pattern: /^https:\/\/vertexaisearch\.cloud\.google\.com\/oauth-redirect$/, provider: 'gemini' },
   { pattern: /^cursor:\/\/anysphere\.cursor-mcp\/oauth\/callback$/, provider: 'cursor_deeplink' },
   { pattern: /^https:\/\/www\.cursor\.com\/agents\/mcp\/oauth\/callback$/, provider: 'cursor' },
   { pattern: /^http:\/\/localhost(:\d+)?(\/|$)/, provider: 'local' },

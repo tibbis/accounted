@@ -323,6 +323,7 @@ export function ApiKeysPanel() {
   // Grok's custom-connector dialog does the same probe: on the lazy URL it
   // lists every tool and never opens the sign-in (observed 2026-09-02).
   const grokConnectorUrl = `${mcpUrl('grok')}&auth=required`
+  const geminiConnectorUrl = `${mcpUrl('gemini')}&auth=required`
 
   // claude.ai install link: opens Add-custom-connector with name and URL
   // prefilled. It only prefills the dialog, so the user still reviews and
@@ -440,6 +441,16 @@ export function ApiKeysPanel() {
                 })}
               </p>
               <CopyBlock text={grokConnectorUrl} copyAriaLabel={t('copy_aria')} />
+            </div>
+
+            <div>
+              <p className="mb-1 text-sm">Gemini</p>
+              <p className="mb-2 text-xs text-muted-foreground">
+                {t.rich('gemini_instructions', {
+                  path: (chunks) => <strong>{chunks}</strong>,
+                })}
+              </p>
+              <CopyBlock text={geminiConnectorUrl} copyAriaLabel={t('copy_aria')} />
             </div>
 
             <div>

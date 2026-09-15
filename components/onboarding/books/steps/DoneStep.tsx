@@ -61,7 +61,7 @@ export function DoneStep({ ctx, onLeave, leaving }: {
 
   // The OAuth sign-in happens in another tab. Poll the findings while this
   // step is on screen so the client's chip turns green the moment the token
-  // route has minted its key; stop once all three are connected.
+  // route has minted its key; stop once every listed client is connected.
   const allConnected = (findings?.ai.connected.length ?? 0) >= 3
   useEffect(() => {
     const refresh = () => {
