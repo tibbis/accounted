@@ -122,6 +122,30 @@
  *      The ambiguous pairs are derived from supabase/migrations; both hint
  *      forms PostgREST accepts count as disambiguated. Implementation and
  *      rationale in ambiguous-embed.mjs. No baseline: the count is 0 today.
+ *   13. ui-uniformity: the design-system rules that drifted because nothing
+ *      checked them (button heights and spinners, motion durations and easing,
+ *      Tailwind shadows, faded borders, hover tints, raw colours, native
+ *      dialogs, focus rings, off-scale text, decorative animation). A
+ *      2026-09-24 scan found the one guarded design rule (radius ladder) clean
+ *      and every unguarded one drifted. Implementation, rule list and
+ *      rationale in ui-uniformity.mjs. No baseline: the count is 0 today.
+ *   14. table-without-grant: a migration that creates a public table, view or
+ *      sequence without granting it to service_role and authenticated (or a
+ *      reasoned `-- no-grant:` waiver), a serial column without a sequence
+ *      grant, or a bulk grant to the API roles. Since 20260929220000 (and on
+ *      every Supabase project from 2026-10-30) a new table gets no grants by
+ *      default, so it answers 42501 to every supabase-js client. The
+ *      migrations written before that relied on the old default and are
+ *      grandfathered as a file set that never grows. Implementation and
+ *      rationale in table-without-grant.mjs.
+ *   15. uninitialized-event-route: an app/api route whose runtime import
+ *      closure reaches `eventBus.emit` but that never calls
+ *      ensureInitialized() at module scope (in the route file or a module it
+ *      imports), so every event it emits is dropped by the bus (no handler
+ *      registered). withRouteContext does not wire the bus, by design: it
+ *      keeps lib/init out of the cold start of routes that never emit.
+ *      Implementation and rationale in event-route-init.mjs. Allowlisted
+ *      file-set, may only shrink.
  *
  * Usage:
  *   node scripts/checks/no-new-antipatterns.mjs            # check (CI)
@@ -142,14 +166,22 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { findSekLabelledFxAmounts } from './format-currency-sek-label.mjs'
 import { findRawReferenceFetches } from './raw-reference-fetch.mjs'
+import { findLiteralLegalForms } from './literal-legal-form.mjs'
 import { findClientNodeBuiltins } from './client-node-builtin.mjs'
 import { findAmbiguousEmbeds } from './ambiguous-embed.mjs'
+import { findUiUniformityFindings, UI_UNIFORMITY_HINTS } from './ui-uniformity.mjs'
+import { findTablesWithoutGrant, grandfatheredFiles, grantHint } from './table-without-grant.mjs'
 import {
   findExtensionRouteFindings,
   UNGATED_EXTENSION_ROUTES,
 } from './extension-route-guards.mjs'
+import {
+  findUninitializedEmittingRoutes,
+  UNINITIALIZED_EMITTING_ROUTES,
+} from './event-route-init.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const SOURCE_ROOT = path.join(ROOT, 'src')
 const BASELINE_PATH = path.join(ROOT, 'scripts', 'checks', 'antipatterns-baseline.json')
 
 const IGNORE_DIRS = new Set(['node_modules', '.next', '.git', 'dist', 'build', 'coverage'])
@@ -206,7 +238,7 @@ function walk(dir, exts, out = []) {
   return out
 }
 
-const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/')
+const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/').replace(/^src\//, '')
 
 /** True when any handler segment calls getUser() without an MFA-enforcing guard. */
 function handRollsRouteAuth(src) {
@@ -217,7 +249,7 @@ function handRollsRouteAuth(src) {
 
 /** Route files that hand-roll auth instead of the MFA-enforcing guard. */
 function findRawRouteAuth() {
-  const apiDir = path.join(ROOT, 'app', 'api')
+  const apiDir = path.join(SOURCE_ROOT, 'app', 'api')
   return walk(apiDir, ['route.ts'])
     .filter((f) => handRollsRouteAuth(fs.readFileSync(f, 'utf8')))
     .map(rel)
@@ -240,9 +272,9 @@ const JEL_INSERT_CHAIN_RE = /\.from\(\s*['"]journal_entry_lines['"]\s*\)\s*\.\s*
 /** Files that insert into journal_entry_lines outside the sanctioned writers. */
 function findDirectJelInserts() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   return files
     .filter((f) => {
@@ -264,9 +296,9 @@ const INVOICE_PAYMENT_INSERT_CHAIN_RE =
 /** Files that insert into invoice_payments outside the sanctioned writer. */
 function findDirectInvoicePaymentInserts() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   return files
     .filter((f) => {
@@ -309,9 +341,9 @@ const SUPABASE_JS_NAMESPACE_RE =
  */
 function findLeakySupabaseClients() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   return files
     .filter((f) => {
@@ -356,6 +388,11 @@ const LEDGER_SCAN_SANCTIONED = new Set([
   // carries an explicit year-end exclusion of its own.
   'lib/reports/dimension-pnl.ts',
   'lib/reports/monthly-breakdown.ts',
+  // Tax balances/expenses come from generateTrialBalance; only mixed 2510
+  // counterpart evidence needs vouchers, which account totals cannot retain.
+  // Mirrors exclude-all-year-end (including reversal/correction chains and
+  // linked opening entry); kassaflodesanalys-tax.test.ts pins those filters.
+  'lib/reports/cash-flow-tax.ts',
   // Reconciliation and diagnostics: they compare against the ledger as posted.
   'lib/reports/ar-reconciliation.ts',
   'lib/reports/supplier-reconciliation.ts',
@@ -389,8 +426,8 @@ const LEDGER_SCAN_RE =
  */
 function findLedgerScanningReports() {
   const files = [
-    ...walk(path.join(ROOT, 'lib', 'reports'), ['.ts']),
-    ...walk(path.join(ROOT, 'lib', 'bokslut'), ['.ts']),
+    ...walk(path.join(SOURCE_ROOT, 'lib', 'reports'), ['.ts']),
+    ...walk(path.join(SOURCE_ROOT, 'lib', 'bokslut'), ['.ts']),
   ]
   return files
     .filter((f) => {
@@ -406,10 +443,10 @@ function findLedgerScanningReports() {
 /** Count of naive Math.round(x*100)/100 occurrences (lines) across source. */
 function countNaiveRound() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'components'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   let count = 0
   for (const f of files) {
@@ -436,9 +473,9 @@ const PROVIDER_HOST_RE =
 
 function findProviderHostFiles() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   const found = []
   for (const f of files) {
@@ -456,10 +493,10 @@ function findProviderHostFiles() {
  */
 function countHandRolledInvariants() {
   const files = [
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'components'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   let count = 0
   for (const f of files) {
@@ -508,8 +545,8 @@ function lineHasBareRoundedClass(line) {
 /** Off-ladder border-radius classes in UI code. */
 function findOffLadderRadii() {
   const files = [
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'components'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.ts', '.tsx']),
   ]
   const findings = []
   for (const f of files) {
@@ -567,11 +604,11 @@ function isPublicEnvRead(node) {
 /** Public env flags compared in place, which the Docker build folds away. */
 function findFoldedPublicFlags() {
   const files = [
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'components'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'lib'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'contexts'), ['.ts', '.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'lib'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'contexts'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.ts', '.tsx']),
   ]
   const findings = []
   for (const file of files) {
@@ -623,7 +660,6 @@ const DIRECT_AI_CLIENT_ALLOWED = new Set([
   'lib/agent/composer/narrative.ts',
   'lib/agent/composer/prewarm.ts',
   'lib/receipt-hunt/adjudicate.ts',
-  'lib/receipt-hunt/mail-intelligence.ts',
   'extensions/general/whatsapp-inbox/lib/interpret-answer.ts',
   'scripts/smoke-ai.ts',
   // Out-of-tree CI reviewer with its own pinned SDK install (see the
@@ -639,7 +675,7 @@ const DIRECT_AI_CLIENT_RES = [
 function findDirectAiClients() {
   const out = []
   for (const dir of ['lib', 'app', 'extensions', 'components', 'scripts']) {
-    for (const file of walk(path.join(ROOT, dir), ['.ts', '.tsx', '.mjs'])) {
+    for (const file of walk(path.join(dir === 'scripts' ? ROOT : SOURCE_ROOT, dir), ['.ts', '.tsx', '.mjs'])) {
       const r = rel(file)
       if (r.startsWith('lib/ai/')) continue
       if (r.includes('/__tests__/') || r.endsWith('.test.ts') || r.endsWith('.test.tsx')) continue
@@ -671,9 +707,9 @@ const OVERLAY_Z_RE = /\bz-(?:40|50|\[\d+\])/
  */
 function findDialogOverflowRisks() {
   const files = [
-    ...walk(path.join(ROOT, 'app'), ['.tsx']),
-    ...walk(path.join(ROOT, 'components'), ['.tsx']),
-    ...walk(path.join(ROOT, 'extensions'), ['.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'extensions'), ['.tsx']),
   ]
   const findings = []
   for (const f of files) {
@@ -758,18 +794,21 @@ const PINNED_DEPS = [
   },
   {
     name: 'nodemailer',
-    version: '9.1.1',
+    version: '10.0.13',
     reason:
-      'SMTP mailer for self-hosts (extensions/general/email/lib/smtp-service.ts). Zero-dependency MIT-0 ' +
-      'package on the outbound-mail path; bumps are deliberate, reviewed PRs (audit surface), never silent.',
+      'SMTP mailer for self-hosts (extensions/general/email/lib/smtp-service.ts), and the addressparser ' +
+      'mailparser uses on inbound mail. Zero-dependency MIT-0 package; 10.x requires Node >= 20. Bumps are ' +
+      'deliberate, reviewed PRs (audit surface), never silent (#3298).',
   },
   {
     name: 'mailparser',
-    version: '3.9.20',
+    version: '3.9.32',
     reason:
-      'Inbound-mail parser (extensions/general/invoice-inbox). 3.9.20 is the last release that depends on ' +
-      'nodemailer 9.x; 3.9.21+ pull nodemailer 10 as a second nested copy, which this guard cannot see ' +
-      '(it checks the top-level nodemailer only). Bump both pins together, on purpose (#2490).',
+      'Inbound-mail parser (extensions/general/invoice-inbox). Each mailparser release depends on an EXACT ' +
+      'nodemailer version; 3.9.32 depends on exactly nodemailer 10.0.13, so its nested copy dedupes with the ' +
+      'top-level pin. This guard checks the top-level nodemailer only, so a future mailparser bump must move ' +
+      'the nodemailer pin in the same PR, or a second nested copy appears. Bump both pins together, on ' +
+      'purpose (#2490, #3298).',
   },
 ]
 
@@ -1033,9 +1072,9 @@ function isClientErrorSetter(call) {
  */
 function findRawUserErrors() {
   const files = [
-    ...walk(path.join(ROOT, 'app', 'api'), ['route.ts']),
-    ...walk(path.join(ROOT, 'app'), ['.ts', '.tsx']).filter((f) => !rel(f).startsWith('app/api/')),
-    ...walk(path.join(ROOT, 'components'), ['.ts', '.tsx']),
+    ...walk(path.join(SOURCE_ROOT, 'app', 'api'), ['route.ts']),
+    ...walk(path.join(SOURCE_ROOT, 'app'), ['.ts', '.tsx']).filter((f) => !rel(f).startsWith('app/api/')),
+    ...walk(path.join(SOURCE_ROOT, 'components'), ['.ts', '.tsx']),
   ]
   const findings = []
 
@@ -1099,28 +1138,41 @@ const current = {
   leakySupabaseClients: findLeakySupabaseClients(),
   pinnedDepViolations: findPinnedDepViolations(),
   rawUserErrors: findRawUserErrors(),
-  sekLabelledAmounts: findSekLabelledFxAmounts(ROOT),
-  extensionRoutes: findExtensionRouteFindings(ROOT),
+  sekLabelledAmounts: findSekLabelledFxAmounts(SOURCE_ROOT),
+  extensionRoutes: findExtensionRouteFindings(SOURCE_ROOT),
+  eventRouteInit: findUninitializedEmittingRoutes(SOURCE_ROOT),
   offLadderRadii: findOffLadderRadii(),
   foldedPublicFlags: findFoldedPublicFlags(),
   dialogOverflowRisk: findDialogOverflowRisks(),
   directAiClients: findDirectAiClients(),
-  rawReferenceFetch: findRawReferenceFetches(ROOT),
-  clientNodeBuiltins: findClientNodeBuiltins(ROOT),
-  ambiguousEmbeds: findAmbiguousEmbeds(ROOT),
+  rawReferenceFetch: findRawReferenceFetches(SOURCE_ROOT),
+  clientNodeBuiltins: findClientNodeBuiltins(SOURCE_ROOT),
+  ambiguousEmbeds: findAmbiguousEmbeds(ROOT, SOURCE_ROOT),
+  literalLegalForm: findLiteralLegalForms(SOURCE_ROOT),
+  uiUniformity: findUiUniformityFindings(SOURCE_ROOT),
+  tableWithoutGrant: findTablesWithoutGrant(ROOT),
 }
 
 const dialogOverflowFiles = [...new Set(current.dialogOverflowRisk.map((f) => f.file))].sort()
+const tableWithoutGrantFiles = [...new Set(current.tableWithoutGrant.map((f) => f.file))].sort()
 
 const isUpdate = process.argv.includes('--update')
 
 if (isUpdate) {
+  // table-without-grant is a frozen set, not a ratchet: --update is run to lock
+  // in some other count going down, and must never grandfather a migration
+  // added since (see grandfatheredFiles).
+  const frozenGrantFiles = fs.existsSync(BASELINE_PATH)
+    ? JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8')).tableWithoutGrant?.files
+    : undefined
+  const grandfatheredGrantFiles = grandfatheredFiles(frozenGrantFiles, tableWithoutGrantFiles)
   const baseline = {
     _comment:
       'Ratchet baseline for scripts/checks/no-new-antipatterns.mjs. These counts may only decrease. Re-run with --update after a migration lowers them. Goal: both reach 0 (A1 route-auth campaign, D1 rounding codemod).',
     rawRouteAuth: { count: current.rawRouteAuth.length, files: current.rawRouteAuth },
     naiveOreRound: { count: current.naiveOreRound },
     handRolledInvariants: { count: current.handRolledInvariants },
+    literalLegalForm: { count: current.literalLegalForm.length },
     ledgerScanningReports: {
       count: current.ledgerScanningReports.length,
       files: current.ledgerScanningReports,
@@ -1136,6 +1188,10 @@ if (isUpdate) {
     providerHosts: {
       count: current.providerHosts.length,
       files: current.providerHosts,
+    },
+    tableWithoutGrant: {
+      count: grandfatheredGrantFiles.length,
+      files: grandfatheredGrantFiles,
     },
   }
   fs.writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + '\n')
@@ -1319,6 +1375,22 @@ if (current.offLadderRadii.length) {
   )
 }
 
+// 1e1a. ui-uniformity: no baseline, the 2026-09 sweep brought every rule to
+// 0 and any new finding is a hard failure.
+if (current.uiUniformity.length) {
+  failed = true
+  console.error(
+    `\n✗ ui-uniformity: ${current.uiUniformity.length} design-system violation(s) (.claude/rules/design.md):`,
+  )
+  const rules = [...new Set(current.uiUniformity.map((f) => f.rule))]
+  for (const rule of rules) {
+    console.error(`  ${rule}: ${UI_UNIFORMITY_HINTS[rule]}`)
+    current.uiUniformity
+      .filter((f) => f.rule === rule)
+      .forEach((f) => console.error(`    ${f.where}  ${f.detail}`))
+  }
+}
+
 // 1e1b. folded-public-flag: no baseline, the count is 0 and any new in-place
 // comparison is a hard failure. This one is invisible in dev and in the Vercel
 // build (both have real env values); it only misfires in the Docker image, and
@@ -1407,6 +1479,29 @@ if (newUngatedRoutes.length) {
   console.error(
     "  → call loadExtensions() and refuse (503 EXTENSION_DISABLED) when extensionRegistry.get('<id>')\n" +
       '    is undefined, like app/api/extensions/push-notifications/cron/route.ts.',
+  )
+}
+
+// 1h. uninitialized-event-route: allowlist lives in event-route-init.mjs
+// (UNINITIALIZED_EMITTING_ROUTES) and may only shrink. The bus drops an event
+// that has no handler, so a route that can emit must have run
+// ensureInitialized() at module scope; withRouteContext does not do it.
+const newUninitializedRoutes = current.eventRouteInit.uninitialized.filter(
+  (f) => !UNINITIALIZED_EMITTING_ROUTES.has(f),
+)
+const initializedSinceBaseline = [...UNINITIALIZED_EMITTING_ROUTES].filter(
+  (f) => !current.eventRouteInit.uninitialized.includes(f),
+)
+if (newUninitializedRoutes.length) {
+  failed = true
+  console.error(
+    `\n✗ uninitialized-event-route: ${newUninitializedRoutes.length} route(s) can emit events but never ` +
+      'wire the event bus, so those events are silently dropped:',
+  )
+  newUninitializedRoutes.forEach((f) => console.error(`    ${f}`))
+  console.error(
+    "  → import { ensureInitialized } from '@/lib/init' and call ensureInitialized() at module\n" +
+      '    scope in the route file (withRouteContext does not wire the bus).',
   )
 }
 
@@ -1503,6 +1598,62 @@ if (newDialogOverflow.length) {
   )
 }
 
+// 1e4. table-without-grant: the migrations written against Supabase's old
+// grant-everything default are grandfathered as a file set. Migration files
+// are immutable, so the set never shrinks; any other file with a finding is
+// NEW and fails, whatever its timestamp.
+const tableWithoutGrantBaseline = new Set(baseline.tableWithoutGrant?.files ?? [])
+const newTableWithoutGrant = current.tableWithoutGrant.filter(
+  (f) => !tableWithoutGrantBaseline.has(f.file),
+)
+if (newTableWithoutGrant.length) {
+  failed = true
+  console.error(
+    `\n✗ table-without-grant: ${newTableWithoutGrant.length} relation(s) or grant(s) in new migrations ` +
+      'leave the Data API roles without an explicit, named grant:',
+  )
+  for (const f of newTableWithoutGrant) {
+    const what =
+      f.kind === 'bulk-grant'
+        ? f.detail
+        : f.kind === 'serial-without-grant'
+          ? `public.${f.relation} has a serial column (${f.sequence}; no grant to ${f.roles.join(', ')})`
+          : `public.${f.relation} (${f.relationKind}; no grant to ${f.roles.join(', ')})`
+    console.error(`    ${f.file}:${f.line}  ${what}`)
+    grantHint(f).forEach((l) => console.error(`        ${l}`))
+  }
+  console.error(
+    '  → new public tables get NO grants by default (migration 20260929220000_own_default_privileges;\n' +
+      '    every Supabase project from 2026-10-30), so without the lines above the table answers 42501\n' +
+      '    to every supabase-js client, the service-role one included. Put them in the same migration,\n' +
+      '    after the CREATE. anon gets a grant only when the table is meant to be public. Template:\n' +
+      '    .claude/skills/supabase-migration/SKILL.md.',
+  )
+}
+
+// 1e. literal-legal-form: count may not increase. A legal form named as a
+// string at a call site (see literal-legal-form.mjs) sends every later form
+// down the branch it was not written for; docs/LEGAL-FORMS.md has the
+// profile reads that replace each shape.
+const literalLegalFormBaseline = baseline.literalLegalForm?.count ?? Infinity
+if (current.literalLegalForm.length > literalLegalFormBaseline) {
+  failed = true
+  console.error(
+    `\n✗ literal-legal-form: ${current.literalLegalForm.length} site(s) compare, default or tag a legal form ` +
+      `as a string literal (baseline ${literalLegalFormBaseline}, +${current.literalLegalForm.length - literalLegalFormBaseline}). ` +
+      'Sites in files changed most recently are the likely additions:',
+  )
+  const byFile = new Map()
+  for (const f of current.literalLegalForm) byFile.set(f.file, (byFile.get(f.file) ?? 0) + 1)
+  for (const [file, n] of [...byFile.entries()].sort((a, b) => a[0].localeCompare(b[0])))
+    console.error(`    ${file} (${n})`)
+  console.error(
+    '  → read a capability from lib/company/entity-type.ts instead (filesIncomeReturn, hasOwners,\n' +
+      '    resultClosingAccounts, preparesArsredovisning, ...), tag data with an array of forms, and\n' +
+      '    never default a missing form: resolveCompanyEntityType() throws instead. docs/LEGAL-FORMS.md.',
+  )
+}
+
 // 2. naive-ore-round: count may not increase.
 if (current.naiveOreRound > baseline.naiveOreRound.count) {
   failed = true
@@ -1520,9 +1671,14 @@ if (
   fixedDialogOverflow.length ||
   fixedRawRefs.length ||
   fixedProviderHosts.length ||
-  current.naiveOreRound < baseline.naiveOreRound.count
+  current.naiveOreRound < baseline.naiveOreRound.count ||
+  current.literalLegalForm.length < literalLegalFormBaseline
 ) {
   console.log('\n✓ Progress since baseline:')
+  if (current.literalLegalForm.length < literalLegalFormBaseline)
+    console.log(
+      `    literal-legal-form: -${literalLegalFormBaseline - current.literalLegalForm.length} site(s)`,
+    )
   if (fixedAuthFiles.length) console.log(`    raw-route-auth: -${fixedAuthFiles.length} file(s)`)
   if (fixedLedgerScans.length)
     console.log(`    ledger-scanning-report: -${fixedLedgerScans.length} file(s)`)
@@ -1551,10 +1707,18 @@ if (gatedSinceBaseline.length) {
   gatedSinceBaseline.forEach((f) => console.log(`    ${f}`))
 }
 
+if (initializedSinceBaseline.length) {
+  console.log(
+    `\n✓ uninitialized-event-route progress: ${initializedSinceBaseline.length} allowlisted route(s) now wire the bus or no longer emit.` +
+      ' Remove them from UNINITIALIZED_EMITTING_ROUTES in scripts/checks/event-route-init.mjs to lock it in:',
+  )
+  initializedSinceBaseline.forEach((f) => console.log(`    ${f}`))
+}
+
 if (failed) {
   console.error('\nAntipattern guard failed: see above.')
   process.exit(1)
 }
 console.log(
-  `\n✓ Antipattern guard passed (raw-route-auth: ${current.rawRouteAuth.length}, naive-ore-round: ${current.naiveOreRound}, hand-rolled-invariant: ${current.handRolledInvariants}, ledger-scanning-report: ${current.ledgerScanningReports.length}, direct-jel-insert: 0, direct-invoice-payment-insert: 0, leaky-supabase-client: 0, pinned-dep: 0, raw-user-error: 0, sek-labelled-amount: 0, off-ladder-radius: 0, folded-public-flag: 0, cross-extension-import: 0, ungated-extension-route: ${current.extensionRoutes.ungated.length}/${UNGATED_EXTENSION_ROUTES.size} allowlisted, dialog-overflow-risk: ${dialogOverflowFiles.length} file(s), raw-reference-fetch: ${current.rawReferenceFetch.length} file(s), client-node-builtin: ${current.clientNodeBuiltins.length}, ambiguous-embed: ${current.ambiguousEmbeds.length}, provider-host: ${current.providerHosts.length} file(s), direct-ai-client: ${current.directAiClients.length}/${DIRECT_AI_CLIENT_ALLOWED.size} allowlisted).`,
+  `\n✓ Antipattern guard passed (raw-route-auth: ${current.rawRouteAuth.length}, naive-ore-round: ${current.naiveOreRound}, hand-rolled-invariant: ${current.handRolledInvariants}, literal-legal-form: ${current.literalLegalForm.length}, ledger-scanning-report: ${current.ledgerScanningReports.length}, direct-jel-insert: 0, direct-invoice-payment-insert: 0, leaky-supabase-client: 0, pinned-dep: 0, raw-user-error: 0, sek-labelled-amount: 0, off-ladder-radius: 0, ui-uniformity: 0, folded-public-flag: 0, cross-extension-import: 0, ungated-extension-route: ${current.extensionRoutes.ungated.length}/${UNGATED_EXTENSION_ROUTES.size} allowlisted, uninitialized-event-route: ${current.eventRouteInit.uninitialized.length}/${UNINITIALIZED_EMITTING_ROUTES.size} allowlisted, dialog-overflow-risk: ${dialogOverflowFiles.length} file(s), raw-reference-fetch: ${current.rawReferenceFetch.length} file(s), client-node-builtin: ${current.clientNodeBuiltins.length}, ambiguous-embed: ${current.ambiguousEmbeds.length}, provider-host: ${current.providerHosts.length} file(s), table-without-grant: ${tableWithoutGrantFiles.length}/${tableWithoutGrantBaseline.size} grandfathered file(s), direct-ai-client: ${current.directAiClients.length}/${DIRECT_AI_CLIENT_ALLOWED.size} allowlisted).`,
 )

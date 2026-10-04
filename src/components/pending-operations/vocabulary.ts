@@ -1,0 +1,302 @@
+// Shared vocabulary for pending_operations rendering: labels, warnings and
+// rejection categories used by every surface that shows a staged operation
+// (/pending, the chat approval card, future flow-run views). Moved here from
+// app/(dashboard)/pending/page.tsx so the vocabulary has exactly one owner.
+
+import type { PendingOperationRejectionCategory } from '@/types'
+
+// Short human label (i18n key in the "pending" namespace) for each staged
+// operation_type. Keep in sync with OPERATION_RISK_TIERS in
+// lib/pending-operations/risk-tiers.ts: every operation an agent can stage
+// needs a label here, otherwise the Granskning list falls back to the raw
+// snake_case tool name (e.g. "create_supplier_invoice_from_inbox"), which is
+// long and pushes the meta row to wrap awkwardly on mobile.
+export const OPERATION_LABEL_KEYS: Record<string, string> = {
+  categorize_transaction: 'type_categorize_transaction',
+  create_customer: 'type_create_customer',
+  create_invoice: 'type_create_invoice',
+  create_transaction: 'type_create_transaction',
+  create_voucher: 'type_create_voucher',
+  correct_entry: 'type_correct_entry',
+  reverse_entry: 'type_reverse_entry',
+  mark_invoice_paid: 'type_mark_invoice_paid',
+  send_invoice: 'type_send_invoice',
+  mark_invoice_sent: 'type_mark_invoice_sent',
+  match_transaction_invoice: 'type_match_transaction_invoice',
+  // Master data
+  create_supplier: 'type_create_supplier',
+  create_article: 'type_create_article',
+  update_article: 'type_update_article',
+  create_account: 'type_create_account',
+  update_account: 'type_update_account',
+  create_dimension_value: 'type_create_dimension_value',
+  create_dimension: 'type_create_dimension',
+  update_dimension: 'type_update_dimension',
+  delete_dimension: 'type_delete_dimension',
+  create_dimension_rule: 'type_create_dimension_rule',
+  update_dimension_rule: 'type_update_dimension_rule',
+  delete_dimension_rule: 'type_delete_dimension_rule',
+  send_invoice_peppol: 'type_send_invoice_peppol',
+  register_peppol_participant: 'type_register_peppol_participant',
+  request_peppol_access: 'type_request_peppol_access',
+  update_arsredovisning_narrative: 'type_update_arsredovisning_narrative',
+  update_arsredovisning_compliance: 'type_update_arsredovisning_compliance',
+  create_arsredovisning_version: 'type_create_arsredovisning_version',
+  add_arsredovisning_signature: 'type_add_arsredovisning_signature',
+  set_opening_balances_manual: 'type_set_opening_balances_manual',
+  correct_opening_balances: 'type_correct_opening_balances',
+  split_opening_balances_per_project: 'type_split_opening_balances_per_project',
+  delete_supplier_invoice: 'type_delete_supplier_invoice',
+  uncredit_supplier_invoice: 'type_uncredit_supplier_invoice',
+  update_supplier_invoice_item_account: 'type_update_supplier_invoice_item_account',
+  delete_document: 'type_delete_document',
+  delete_inbox_item: 'type_delete_inbox_item',
+  detach_document_from_transaction: 'type_detach_document_from_transaction',
+  unmatch_inbox_item_transaction: 'type_unmatch_inbox_item_transaction',
+  undo_bank_import: 'type_undo_bank_import',
+  correct_entry_metadata: 'type_correct_entry_metadata',
+  correct_entry_lines_inline: 'type_correct_entry_lines_inline',
+  redate_entry: 'type_redate_entry',
+  mark_no_document_required: 'type_mark_no_document_required',
+  book_vat_settlement: 'type_book_vat_settlement',
+  mark_vat_period_filed: 'type_mark_vat_period_filed',
+  unmark_vat_period_filed: 'type_unmark_vat_period_filed',
+  send_payslips: 'type_send_payslips',
+  revert_salary_run: 'type_revert_salary_run',
+  unapprove_salary_run: 'type_unapprove_salary_run',
+  attach_salary_expense_claims: 'type_attach_salary_expense_claims',
+  add_salary_run_employee: 'type_add_salary_run_employee',
+  remove_salary_run_employee: 'type_remove_salary_run_employee',
+  add_payslip_line: 'type_add_payslip_line',
+  delete_payslip_line: 'type_delete_payslip_line',
+  mark_salary_run_paid: 'type_mark_salary_run_paid',
+  correct_salary_run: 'type_correct_salary_run',
+  set_worked_days: 'type_set_worked_days',
+  delete_worked_days: 'type_delete_worked_days',
+  add_employee_benefit: 'type_add_employee_benefit',
+  update_employee_benefit: 'type_update_employee_benefit',
+  delete_employee_benefit: 'type_delete_employee_benefit',
+  add_employee_recurring_line: 'type_add_employee_recurring_line',
+  update_employee_recurring_line: 'type_update_employee_recurring_line',
+  delete_employee_recurring_line: 'type_delete_employee_recurring_line',
+  delete_employee: 'type_delete_employee',
+  create_supplier_payment_batch: 'type_create_supplier_payment_batch',
+  cancel_supplier_payment_batch: 'type_cancel_supplier_payment_batch',
+  book_invoice: 'type_book_invoice',
+  bulk_book_invoices: 'type_bulk_book_invoices',
+  book_supplier_invoice: 'type_book_supplier_invoice',
+  create_expense_claim: 'type_create_expense_claim',
+  delete_expense_claim: 'type_delete_expense_claim',
+  record_expense_payout: 'type_record_expense_payout',
+  match_expense_payout: 'type_match_expense_payout',
+  create_cash_account: 'type_create_cash_account',
+  update_cash_account: 'type_update_cash_account',
+  set_primary_cash_account: 'type_set_primary_cash_account',
+  set_invoice_payee_default: 'type_set_invoice_payee_default',
+  create_fiscal_period: 'type_create_fiscal_period',
+  update_fiscal_period: 'type_update_fiscal_period',
+  close_fiscal_period_external: 'type_close_fiscal_period_external',
+  reopen_fiscal_period_external: 'type_reopen_fiscal_period_external',
+  delete_account: 'type_delete_account',
+  activate_accounts: 'type_activate_accounts',
+  deactivate_accounts: 'type_deactivate_accounts',
+  update_company_settings: 'type_update_company_settings',
+  update_company_tax_profile: 'type_update_company_tax_profile',
+  update_bookkeeping_lock: 'type_update_bookkeeping_lock',
+  // Supplier invoices
+  create_supplier_invoice_from_inbox: 'type_create_supplier_invoice_from_inbox',
+  create_self_billed_supplier_invoice: 'type_create_self_billed_supplier_invoice',
+  approve_supplier_invoice: 'type_approve_supplier_invoice',
+  credit_supplier_invoice: 'type_credit_supplier_invoice',
+  // Invoices
+  credit_invoice: 'type_credit_invoice',
+  convert_invoice: 'type_convert_invoice',
+  delete_draft_invoice: 'type_delete_draft_invoice',
+  // Documents & links
+  attach_document_to_transaction: 'type_attach_document_to_transaction',
+  link_document_to_voucher: 'type_link_document_to_voucher',
+  link_documents_to_vouchers: 'type_link_documents_to_vouchers',
+  link_invoice_voucher: 'type_link_invoice_voucher',
+  link_supplier_invoice_voucher: 'type_link_supplier_invoice_voucher',
+  link_transaction_journal_entry: 'type_link_transaction_journal_entry',
+  uncategorize_transaction: 'type_uncategorize_transaction',
+  ignore_transaction: 'type_ignore_transaction',
+  retag_line_dimensions: 'type_retag_line_dimensions',
+  set_voucher_note: 'type_set_voucher_note',
+  // Bulk booking / allocation
+  match_batch_allocate: 'type_match_batch_allocate',
+  bulk_book_transactions: 'type_bulk_book_transactions',
+  bulk_book_inbox_items: 'type_bulk_book_inbox_items',
+  // Skattekonto row booking
+  book_skattekonto_row: 'type_book_skattekonto_row',
+  book_skattekonto_rows: 'type_book_skattekonto_rows',
+  // Periods, year-end, depreciation
+  close_period: 'type_close_period',
+  lock_period: 'type_lock_period',
+  unlock_period: 'type_unlock_period',
+  set_opening_balances: 'type_set_opening_balances',
+  run_year_end: 'type_run_year_end',
+  run_currency_revaluation: 'type_run_currency_revaluation',
+  post_annual_depreciation: 'type_post_annual_depreciation',
+  create_asset: 'type_create_asset',
+  update_asset: 'type_update_asset',
+  dispose_asset: 'type_dispose_asset',
+  explain_voucher_gap: 'type_explain_voucher_gap',
+  // SIE
+  import_sie: 'type_import_sie',
+  undo_sie_import: 'type_undo_sie_import',
+  // Payroll & Skatteverket filings
+  create_salary_run: 'type_create_salary_run',
+  book_salary_run: 'type_book_salary_run',
+  generate_agi: 'type_generate_agi',
+  update_payslip_line: 'type_update_payslip_line',
+  set_run_salary: 'type_set_run_salary',
+  register_absence: 'type_register_absence',
+  delete_absence: 'type_delete_absence',
+  create_employee: 'type_create_employee',
+  update_employee: 'type_update_employee',
+  set_employee_opening_balances: 'type_set_employee_opening_balances',
+  vacation_year_close: 'type_vacation_year_close',
+  submit_vat_declaration: 'type_submit_vat_declaration',
+  submit_agi: 'type_submit_agi',
+}
+
+// Fallback for an operation_type with no entry above (e.g. a newly added op
+// not yet given a label): turn "create_supplier_invoice_from_inbox" into
+// "Create supplier invoice from inbox" so it never surfaces as raw snake_case.
+export function humanizeOperationType(operationType: string): string {
+  const spaced = operationType.replace(/_/g, ' ')
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+}
+
+export function operationLabel(operationType: string, t: (key: string) => string): string {
+  const labelKey = OPERATION_LABEL_KEYS[operationType]
+  return labelKey ? t(labelKey) : humanizeOperationType(operationType)
+}
+
+// Full-sentence warning for the single-op confirmation dialog AND the inline
+// list-view warning when risk is medium/high. The list-view truncates beyond
+// one line; the dialog shows it in full. Order roughly low → high risk so
+// reviewers scanning the source see the destructive paths grouped together.
+export const singleActionWarnings: Record<string, string> = {
+  // Low/medium risk: light verifikation work
+  create_transaction: 'Genom att klicka godkänn så skapar du en transaktion.',
+  create_customer: 'Genom att klicka godkänn så skapar du en kund.',
+  update_cash_account: 'Genom att klicka godkänn så ändras bankkontot. Ändrade betaluppgifter skrivs ut på nya fakturor.',
+  set_primary_cash_account: 'Genom att klicka godkänn så blir kontot företagets primära bankkonto. Endast bokningar efter ändringen följer det nya kontot.',
+  set_invoice_payee_default: 'Genom att klicka godkänn så betalar kunder nya fakturor i valutan till det valda bankkontot.',
+  create_fiscal_period: 'Genom att klicka godkänn så skapas räkenskapsåret och kopplas in i kedjan av räkenskapsår. Det kan inte tas bort, bara ändras så länge inget är bokfört i det.',
+  update_fiscal_period: 'Genom att klicka godkänn så ändras räkenskapsårets namn eller datum. Datumen går bara att ändra så länge inga verifikationer är bokförda i året.',
+  close_fiscal_period_external: 'Genom att klicka godkänn så stängs och låses räkenskapsåret som avslutat i tidigare program, utan bokslutsverifikat i Accounted. Använd bara för importerade år vars bokslut gjordes i det gamla programmet.',
+  reopen_fiscal_period_external: 'Genom att klicka godkänn så öppnas och låses räkenskapsåret upp igen, så att dess innehåll kan ändras. Klarmarkera eller lås det igen när rättelsen är klar.',
+  delete_account: 'Genom att klicka godkänn så tas kontot bort ur kontoplanen. Det går bara för ett konto utan bokförda rader; ett standardkonto kan läggas till igen från BAS.',
+  update_company_settings: 'Genom att klicka godkänn så ändras företagsinställningarna. Betalningsuppgifterna styr vart kunderna betalar kommande fakturor.',
+  update_company_tax_profile: 'Genom att klicka godkänn så ändras företagets skatte- och momsuppgifter och skattedeadlines skapas om. Ändra bara det som redan gäller hos Skatteverket.',
+  update_bookkeeping_lock: 'Genom att klicka godkänn så ändras låsdatumet för bokföringen. Flyttas det bakåt kan redan låsta datum ändras igen.',
+  send_payslips: 'Genom att klicka godkänn så får varje anställd i lönekörningen ett e-postmeddelande med en säker länk till sitt lönebesked, och länkar som skickats tidigare slutar fungera.',
+  unapprove_salary_run: 'Genom att klicka godkänn så återkallas godkännandet och lönekörningen går tillbaka till granskning. En genererad men inte inskickad AGI tas bort och en redan skapad betalfil räknas inte längre som aktuell.',
+  attach_salary_expense_claims: 'Genom att klicka godkänn så läggs den anställdas öppna utlägg på lönebeskedet som skattefria rader och betalas ut med lönen.',
+  add_salary_run_employee: 'Genom att klicka godkänn så läggs den anställda till i lönekörningen och får lön i den när lönekörningen räknas om.',
+  remove_salary_run_employee: 'Genom att klicka godkänn så tas den anställda bort ur lönekörningen tillsammans med sina lönerader och får ingen lön i den.',
+  add_payslip_line: 'Genom att klicka godkänn så läggs raden till på lönebeskedet i utkastet. Skatt, avgifter och nettolön ändras när lönekörningen räknas om.',
+  delete_payslip_line: 'Genom att klicka godkänn så tas raden bort från lönebeskedet i utkastet. Skatt, avgifter och nettolön ändras när lönekörningen räknas om.',
+  mark_salary_run_paid: 'Genom att klicka godkänn så markeras lönekörningen som utbetald med dagens datum. Godkänn bara när lönerna faktiskt har betalats ut.',
+  correct_salary_run: 'Genom att klicka godkänn så stornas lönekörningens verifikationer och den markeras som rättad, lönebesked som redan skickats visas som ersatta, och ett nytt utkast för samma period skapas med samma anställda och rader. Arbetsgivardeklarationen för perioden behöver lämnas in på nytt när rättelsen är bokförd.',
+  set_worked_days: 'Genom att klicka godkänn så registreras de arbetade timmarna. De styr timlönen i lönekörningar för perioden när de räknas om.',
+  delete_worked_days: 'Genom att klicka godkänn så tas de arbetade timmarna bort, och timlönen för perioden ändras när lönekörningen räknas om.',
+  add_employee_benefit: 'Genom att klicka godkänn så läggs förmånen till hos den anställda och räknas med i kommande lönekörningar.',
+  update_employee_benefit: 'Genom att klicka godkänn så ändras förmånen, och det nya värdet räknas med i kommande lönekörningar.',
+  delete_employee_benefit: 'Genom att klicka godkänn så tas förmånen bort från den anställda. Har en lönekörning redan räknat fram en lönerad från den behålls förmånen i stället som inaktiv, så att kopplingen till verifikationen finns kvar.',
+  add_employee_recurring_line: 'Genom att klicka godkänn så läggs raden till på den anställdas lönebesked i kommande lönekörningar.',
+  update_employee_recurring_line: 'Genom att klicka godkänn så ändras den återkommande raden i kommande lönekörningar.',
+  delete_employee_recurring_line: 'Genom att klicka godkänn så tas den återkommande raden bort från kommande lönekörningar.',
+  delete_employee: 'Genom att klicka godkänn så inaktiveras den anställda och tas inte med i nya lönekörningar. Lönehistoriken finns kvar, men det går inte att återaktivera den anställda via API:et.',
+  create_supplier_payment_batch: 'Genom att klicka godkänn så skapas en betalfil (pain.001) för de valda leverantörsfakturorna. Inget bokförs, men när filen laddas upp och signeras i banken betalas beloppen ut till leverantörernas konton.',
+  cancel_supplier_payment_batch: 'Genom att klicka godkänn så makuleras betalfilen och den kan inte laddas ner igen. En fil som redan laddats upp i banken återkallas inte: stoppa betalningen i banken.',
+  book_invoice: 'Genom att klicka godkänn så bokförs kundfakturan med ett verifikat på fakturadatumet. Verifikatet kan inte ändras i efterhand, bara rättas med storno.',
+  bulk_book_invoices: 'Genom att klicka godkänn så bokförs de valda kundfakturorna var för sig, och utkast utfärdas med fakturanummer och markeras som skickade (utan e-post) innan de bokförs. Fakturor som inte kan bokföras hoppas över och redovisas i resultatet.',
+  book_supplier_invoice: 'Genom att klicka godkänn så bokförs leverantörsfakturan med ett verifikat på fakturadatumet. Verifikatet kan inte ändras i efterhand, bara rättas med storno.',
+  create_expense_claim: 'Genom att klicka godkänn så registreras utlägget och en verifikation bokförs mot personens skuldkonto.',
+  delete_expense_claim: 'Genom att klicka godkänn så tas utlägget bort och dess verifikation vänds med en storno-verifikation.',
+  record_expense_payout: 'Genom att klicka godkänn så bokförs utbetalningen av utläggen och de markeras som betalda.',
+  match_expense_payout: 'Genom att klicka godkänn så bokförs transaktionen som återbetalning av utläggen och kopplas till verifikationen.',
+  delete_document: 'Genom att klicka godkänn så raderas underlaget och filen permanent. Det går inte att ångra.',
+  delete_inbox_item: 'Genom att klicka godkänn så tas posten bort ur inkorgen permanent; själva dokumentet finns kvar i arkivet.',
+  undo_bank_import: 'Genom att klicka godkänn så raderas alla obokförda transaktioner som bankfilsimporten skapade, även ignorerade, och importen markeras som ångrad. Bokförda transaktioner och deras verifikationer lämnas orörda.',
+  correct_entry_metadata: 'Genom att klicka godkänn så rättas verifikationens text och/eller datum i samma verifikat. Gamla och nya värden loggas med vem och när (BFL 5 kap 5 §).',
+  correct_entry_lines_inline: 'Genom att klicka godkänn så stryks de valda raderna och ersätts med de nya i samma verifikat. De strukna raderna sparas i rättelseloggen med vem och när (BFL 5 kap 5 §).',
+  redate_entry: 'Genom att klicka godkänn så stornas verifikationen på sitt ursprungliga datum och en likadan verifikation bokförs på det nya datumet. Båda får nya verifikationsnummer.',
+  mark_no_document_required: 'Genom att klicka godkänn så markeras verifikaten som att inget underlag krävs och försvinner från listan över saknade underlag. Verifikaten ändras inte.',
+  book_vat_settlement: 'Genom att klicka godkänn så bokförs momsredovisningen för perioden: momskontona nollställs mot 2650 (eller 1650) med exakt de rader förslaget visade. Verifikatet kan inte ändras i efterhand, bara rättas med storno.',
+  send_invoice_peppol: 'Genom att klicka godkänn så skickas fakturan som e-faktura via Peppol till kunden och kan inte återkallas. Ett utkast får fakturanummer, markeras som skickat och bokförs.',
+  register_peppol_participant: 'Genom att klicka godkänn så publiceras bolagets Peppol-id (organisationsnumret) i den öppna Peppol-katalogen och bolaget kan ta emot e-fakturor.',
+  request_peppol_access: 'Genom att klicka godkänn så skickas en begäran om Peppol-åtkomst till supporten.',
+  update_arsredovisning_narrative: 'Genom att klicka godkänn så sparas de nya texterna i årsredovisningens förvaltningsberättelse och noter, och bekräftelsen av texterna tas bort tills du bekräftar dem igen.',
+  update_arsredovisning_compliance: 'Genom att klicka godkänn så sparas svaren och bekräftelserna i årsredovisningens kontrollfrågor, vilket styr vilka regler och upplysningar som gäller för årsredovisningen.',
+  create_arsredovisning_version: 'Genom att klicka godkänn så låses årsredovisningen i en oföränderlig version med exakt det innehåll som förhandsgranskningen visar, och vid färdigställande blir den versionen den som skrivs under och lämnas in.',
+  add_arsredovisning_signature: 'Genom att klicka godkänn så läggs personen till som undertecknare av årsredovisningen och bekräftelsen av undertecknarlistan tas bort tills du bekräftar den igen.',
+  set_opening_balances_manual: 'Genom att klicka godkänn så bokförs en verifikation med ingående balanser på räkenskapsårets första dag och kopplas till året. Den kan därefter bara rättas med storno.',
+  correct_opening_balances: 'Genom att klicka godkänn så makuleras den nuvarande ingående balansen med en storno och en ny verifikation med de rättade ingående balanserna bokförs och kopplas till räkenskapsåret.',
+  split_opening_balances_per_project: 'Genom att klicka godkänn så delas ingående balanserna upp per projekt i samma verifikat, exakt som förhandsgranskningen visar. Kontonas saldon ändras inte, och de strukna raderna sparas i rättelseloggen med vem och när (BFL 5 kap 5 §).',
+  delete_supplier_invoice: 'Genom att klicka godkänn så tas den obokförda leverantörsfakturan och dess rader bort permanent. Fakturan har ingen verifikation, så bokföringen påverkas inte.',
+  uncredit_supplier_invoice: 'Genom att klicka godkänn så bokförs en rättelsepost (storno) som makulerar kreditfakturans verifikation, kreditfakturan markeras som återförd och originalfakturan återställs.',
+  update_supplier_invoice_item_account: 'Genom att klicka godkänn så flyttas fakturaraden till det nya kontot och registreringsverifikationen rättas i samma verifikation, med loggning av vem och när.',
+  delete_dimension: 'Genom att klicka godkänn så tas dimensionen och dess värden bort. Det går bara om inget har bokförts på den.',
+  create_invoice: 'Genom att klicka godkänn så skapas ett fakturautkast (det skickas inte).',
+  categorize_transaction: 'Genom att klicka godkänn så kategoriseras transaktionen och en verifikation skapas.',
+  match_transaction_invoice: 'Genom att klicka godkänn så matchas transaktionen mot fakturan.',
+  attach_document_to_transaction: 'Genom att klicka godkänn så bifogas dokumentet till transaktionen.',
+  uncategorize_transaction: 'Genom att klicka godkänn så tas kategoriseringen bort.',
+  send_invoice: 'Genom att klicka godkänn så skickas fakturan till kunden.',
+  mark_invoice_paid: 'Genom att klicka godkänn så bokförs en betalning på fakturan.',
+  mark_invoice_sent: 'Genom att klicka godkänn så märks fakturan som skickad och en verifikation skapas.',
+  // High risk: period/year-end/voucher edits. These are the ones the reviewer
+  // really needs the warning for, so we keep them concrete: name the
+  // irreversibility or compliance consequence, not the generic risk-level.
+  lock_period: 'Genom att klicka godkänn så låses perioden: inga nya verifikationer kan bokföras tills den låses upp.',
+  unlock_period: 'Genom att klicka godkänn så låses perioden upp. Använd endast för rättelser; lås igen efter.',
+  close_period: 'Genom att klicka godkänn så stängs perioden permanent (BFL). Stängningen kan inte ångras.',
+  run_year_end: 'Genom att klicka godkänn så körs bokslut: resultatkonton nollställs, perioden låses, nästa period skapas.',
+  set_opening_balances: 'Genom att klicka godkänn så bokförs ingående balans i nästa period.',
+  run_currency_revaluation: 'Genom att klicka godkänn så bokförs valutaomvärdering (3960/7960).',
+  create_voucher: 'Genom att klicka godkänn så bokförs verifikationen med ett nytt löpnummer.',
+  correct_entry: 'Genom att klicka godkänn så stornas originalverifikationen och en rättelse bokförs (BFL 5 kap 5§).',
+  reverse_entry: 'Genom att klicka godkänn så stornas verifikationen: originalet behålls synligt (BFL 5 kap).',
+  credit_invoice: 'Genom att klicka godkänn så skapas en kreditfaktura och originalverifikationen stornas.',
+  delete_draft_invoice: 'Genom att klicka godkänn så tas utkastet bort: onumrerade utkast raderas permanent, numrerade makuleras med bevarat fakturanummer.',
+  credit_supplier_invoice: 'Genom att klicka godkänn så krediteras leverantörsfakturan och registreringsverifikationen stornas.',
+  approve_supplier_invoice: 'Genom att klicka godkänn så attesteras leverantörsfakturan och blir betalningsbar.',
+  convert_invoice: 'Genom att klicka godkänn så konverteras proforman eller offerten till en riktig faktura med F-nummer.',
+  import_sie: 'Genom att klicka godkänn så importeras SIE-filen: räkenskapsperiod, ingående balans och verifikationer skapas.',
+  explain_voucher_gap: 'Genom att klicka godkänn så dokumenteras förklaringen för verifikationsluckan (BFNAR 2013:2).',
+  post_annual_depreciation: 'Genom att klicka godkänn så bokförs planenlig avskrivning: en verifikation per tillgång.',
+  create_asset: 'Genom att klicka godkänn så läggs tillgången till i anläggningsregistret. Ingen verifikation bokförs.',
+  update_asset: 'Genom att klicka godkänn så uppdateras tillgången i anläggningsregistret. Ingen verifikation bokförs.',
+  dispose_asset: 'Genom att klicka godkänn så bokförs avyttringen: tillgången lämnar registret och en verifikation med vinst eller förlust skapas.',
+}
+
+/**
+ * The consequence sentence the approver consents to. Keyed on the operation
+ * type; the one type whose outcome depends on its params (convert_invoice
+ * with target 'order' creates a draft kundorder, no F-number, nothing
+ * booked) reads the params so the dialog never promises a faktura that the
+ * approval will not create.
+ */
+export function singleActionWarning(operationType: string, params?: Record<string, unknown> | null): string {
+  if (operationType === 'convert_invoice' && params?.target === 'order') {
+    return 'Genom att klicka godkänn så skapas en kundorder (utkast, OR-nummer) från proforman eller offerten. Ingen faktura skapas och inget bokförs; fakturan skapas senare från kundordern.'
+  }
+  return singleActionWarnings[operationType] ?? ''
+}
+
+// Structured rejection categories. One canonical list: /pending's reject
+// dialog and the chat approval card's reject form render the same options
+// and store the same values (surfaced back to the agent via
+// gnubok_get_recent_rejections).
+export const REJECTION_CATEGORY_LABELS: Record<PendingOperationRejectionCategory, string> = {
+  wrong_category: 'Fel kategori / konto',
+  wrong_amount: 'Fel belopp',
+  duplicate: 'Dubblett',
+  wrong_period: 'Fel period',
+  other: 'Annat',
+}

@@ -1,0 +1,133 @@
+/**
+ * The ROT/RUT deduction box on the invoice PDF prints the buyer's
+ * personnummer as YYYYMMDD-XXXX (birth date visible, last four hidden): the
+ * same convention as the payroll roster and the invoice detail page. The
+ * template derives it from the stored ciphertext, or takes an already-masked
+ * value from the caller (the preview route has only plaintext), and drops the
+ * row when neither yields anything rather than failing the render.
+ */
+import { describe, expect, it, vi } from 'vitest'
+import { InvoicePDF, type InvoicePdfInvoice } from '@/lib/invoices/pdf-template'
+import { encryptPersonnummer } from '@/lib/salary/personnummer'
+import { makeCompanySettings, makeCustomer, makeInvoice } from '@/tests/helpers'
+import type { InvoiceItem } from '@/types'
+import { treeText } from './pdf-tree'
+
+function renderText(invoice: InvoicePdfInvoice, language?: 'sv' | 'en'): string {
+  const items: InvoiceItem[] = [
+    {
+      id: 'item-1',
+      invoice_id: invoice.id,
+      sort_order: 0,
+      line_type: 'product',
+      description: 'Städning',
+      quantity: 4,
+      unit: 'tim',
+      unit_price: 500,
+      line_total: 2000,
+      vat_rate: 25,
+      vat_amount: 500,
+      deduction_type: 'rut',
+      deduction_amount: 1250,
+      labor_hours: 4,
+      work_type: 'STAD',
+      created_at: '2026-01-15T00:00:00Z',
+    },
+  ]
+  const tree = InvoicePDF({
+    invoice,
+    customer: makeCustomer(),
+    items,
+    company: makeCompanySettings(),
+    language,
+  })
+  return treeText(tree)
+}
+
+const rutInvoice = (overrides: Partial<InvoicePdfInvoice>): InvoicePdfInvoice => ({
+  ...makeInvoice({ status: 'sent', invoice_number: '2026-0001', total: 2500 }),
+  deduction_total: 1250,
+  ...overrides,
+})
+
+describe('invoice PDF deduction box personnummer', () => {
+  it('derives YYYYMMDD-XXXX from the stored ciphertext', () => {
+    const text = renderText(
+      rutInvoice({
+        deduction_personnummer_encrypted: encryptPersonnummer('199001012385'),
+        deduction_personnummer_last4: '2385',
+      }),
+    )
+
+    expect(text).toContain('Underlag för skattereduktion')
+    expect(text).toContain('19900101-XXXX')
+    expect(text).not.toContain('XXXXXXXX-2385')
+    expect(text).not.toContain('2385')
+  })
+
+  it('prints an already-masked value passed by the caller (preview has no ciphertext)', () => {
+    const text = renderText(rutInvoice({ deduction_personnummer_masked: '19850716-XXXX' }))
+
+    expect(text).toContain('19850716-XXXX')
+  })
+
+  it('omits the personnummer row, and still renders the box, when the ciphertext cannot be read', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const text = renderText(
+        rutInvoice({
+          deduction_personnummer_encrypted: 'deadbeef'.repeat(10),
+          deduction_personnummer_last4: '2385',
+        }),
+      )
+
+      expect(text).toContain('Underlag för skattereduktion')
+      expect(text).not.toContain('Personnummer')
+      expect(text).not.toContain('2385')
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('never falls back to the last four digits alone', () => {
+    const text = renderText(rutInvoice({ deduction_personnummer_last4: '2385' }))
+
+    expect(text).not.toContain('Personnummer')
+    expect(text).not.toContain('2385')
+  })
+})
+
+// #3385: under fakturamodellen the company (seller) requests the payout from
+// Skatteverket once the buyer has paid their share; the buyer never applies
+// (swedish-invoice-compliance, invoice-rules.md section 8). The invoice also
+// states the total incl. moms next to the reduction.
+describe('invoice PDF deduction box: fakturamodellen', () => {
+  it('says the seller requests the payout, never the buyer', () => {
+    const text = renderText(rutInvoice({}))
+
+    expect(text).toContain('Säljaren begär utbetalningen från Skatteverket när köparen har betalat sin del (fakturamodellen).')
+    expect(text).not.toContain('Köparen ansöker')
+  })
+
+  it('says the same on an English invoice', () => {
+    const text = renderText(rutInvoice({}), 'en')
+
+    expect(text).toContain('The seller requests the payout from Skatteverket once the customer has paid their share (fakturamodellen).')
+    expect(text).not.toContain('The customer claims the deduction')
+  })
+
+  it('prints the total incl. moms before the reduction and the amount to pay', () => {
+    // The fixed layout prints totals labels without a trailing colon and the
+    // row amounts without the currency (it follows the grand total).
+    const lines = renderText(rutInvoice({})).split('\n')
+    const total = lines.indexOf('Totalt inkl. moms')
+    const reduction = lines.indexOf('Skattereduktion ROT/RUT')
+    const toPay = lines.indexOf('Att betala')
+
+    expect(total).toBeGreaterThan(-1)
+    expect(lines[total + 1]).toMatch(/2\s500,00/)
+    expect(reduction).toBeGreaterThan(total)
+    expect(toPay).toBeGreaterThan(reduction)
+    expect(renderText(rutInvoice({}), 'en')).toContain('Total incl. VAT')
+  })
+})

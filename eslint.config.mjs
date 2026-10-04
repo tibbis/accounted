@@ -34,10 +34,10 @@ const eslintConfig = defineConfig([
   // app/api/log/route.ts are the two intentional exemptions because they ARE
   // the logger plumbing.
   {
-    files: ["lib/**/*.ts", "lib/**/*.tsx", "app/api/**/*.ts", "app/api/**/*.tsx"],
+    files: ["src/lib/**/*.ts", "src/lib/**/*.tsx", "src/app/api/**/*.ts", "src/app/api/**/*.tsx"],
     ignores: [
-      "lib/logger.ts",
-      "app/api/log/route.ts",
+      "src/lib/logger.ts",
+      "src/app/api/log/route.ts",
       // Test files have legitimate console use for assertions / debugging.
       "**/__tests__/**",
       "**/*.test.ts",
@@ -48,6 +48,16 @@ const eslintConfig = defineConfig([
       // warn (not error) until the remaining ~20 routes/lib files migrate.
       // Flip to "error" once the count drops to zero so the floor is enforced.
       "no-console": "warn",
+    },
+  },
+  // The Skatteverket extension handles redovisare and arbetsgivare ids, which
+  // for an enskild firma are the owner's personnummer, plus declaration
+  // payloads. Raw console.* skips the redacting logger, so here it is an error.
+  {
+    files: ["src/extensions/general/skatteverket/**/*.ts", "src/extensions/general/skatteverket/**/*.tsx"],
+    ignores: ["**/__tests__/**", "**/*.test.ts", "**/*.pg.test.ts"],
+    rules: {
+      "no-console": "error",
     },
   },
   globalIgnores([

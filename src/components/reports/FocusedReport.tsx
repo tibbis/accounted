@@ -1,0 +1,294 @@
+'use client'
+
+import { Suspense, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { useTranslations } from 'next-intl'
+import { PageHeader } from '@/components/ui/page-header'
+import { EmptyState } from '@/components/ui/empty-state'
+import { ReportBodyLoading, ReportPageLoading } from '@/components/reports/ReportLoading'
+import { REPORT_TOOLBAR_SLOT_ID } from '@/components/reports/ReportExportMenu'
+import { useCompany } from '@/contexts/CompanyContext'
+import { FyPicker } from '@/components/common/FyPicker'
+import { ReportDateRange, type DateRangeValue } from '@/components/common/ReportDateRange'
+import { DimensionFilter, type DimensionFilterValue } from '@/components/reports/DimensionFilter'
+import { DATE_RANGE_SLUGS, DIMENSION_FILTER_SLUGS, getReport } from '@/lib/reports/catalog'
+import { huvudbokDrilldownHref, parseDrilldownParams } from '@/lib/reports/report-drilldown'
+import type { FiscalPeriod } from '@/types'
+
+import { isEntityType, usesInk2 } from '@/lib/company/entity-type'
+const TrialBalanceView = dynamic(() => import('./lazy-views/TrialBalanceView'), { loading: ReportBodyLoading })
+const IncomeStatementView = dynamic(() => import('./lazy-views/IncomeStatementView'), { loading: ReportBodyLoading })
+const BalanceSheetView = dynamic(() => import('./lazy-views/BalanceSheetView'), { loading: ReportBodyLoading })
+const ResultatrapportView = dynamic(() => import('./lazy-views/ResultatrapportView'), { loading: ReportBodyLoading })
+const BalansrapportView = dynamic(() => import('./lazy-views/BalansrapportView'), { loading: ReportBodyLoading })
+// Standalone: the view owns its title bar, so the import stage shows one too.
+const VatDeclarationView = dynamic(() => import('./lazy-views/VatDeclarationView'), { loading: ReportPageLoading })
+const SupplierLedgerView = dynamic(() => import('./lazy-views/SupplierLedgerView'), { loading: ReportBodyLoading })
+const GeneralLedgerView = dynamic(() => import('./lazy-views/GeneralLedgerView'), { loading: ReportBodyLoading })
+const JournalRegisterView = dynamic(() => import('./lazy-views/JournalRegisterView'), { loading: ReportBodyLoading })
+const ARLedgerView = dynamic(() => import('./lazy-views/ARLedgerView'), { loading: ReportBodyLoading })
+const DimensionPnlView = dynamic(() => import('./lazy-views/DimensionPnlView'), { loading: ReportBodyLoading })
+const NEDeclarationView = dynamic(() =>
+  import('./NEDeclarationView').then((module) => ({ default: module.NEDeclarationView })),
+  { loading: ReportBodyLoading },
+)
+const PeriodiskSammanstallningView = dynamic(() =>
+  import('./PeriodiskSammanstallningView').then((module) => ({ default: module.PeriodiskSammanstallningView })),
+  { loading: ReportBodyLoading },
+)
+const INK2DeclarationView = dynamic(() =>
+  import('./INK2DeclarationView').then((module) => ({ default: module.INK2DeclarationView })),
+  { loading: ReportBodyLoading },
+)
+const BehandlingshistorikView = dynamic(() =>
+  import('./BehandlingshistorikView').then((module) => ({ default: module.BehandlingshistorikView })),
+  { loading: ReportBodyLoading },
+)
+const BokslutsbilagorView = dynamic(() =>
+  import('./BokslutsbilagorView').then((module) => ({ default: module.BokslutsbilagorView })),
+  { loading: ReportBodyLoading },
+)
+const SystemdokumentationView = dynamic(() =>
+  import('./SystemdokumentationView').then((module) => ({ default: module.SystemdokumentationView })),
+  { loading: ReportBodyLoading },
+)
+const SemesterskuldView = dynamic(() =>
+  import('./SemesterskuldView').then((module) => ({ default: module.SemesterskuldView })),
+  { loading: ReportBodyLoading },
+)
+const LonejournalView = dynamic(() =>
+  import('./LonejournalView').then((module) => ({ default: module.LonejournalView })),
+  { loading: ReportBodyLoading },
+)
+
+/**
+ * The focused single-report experience at /reports/[slug]. Carries one report:
+ * a back link to the library, the shared fiscal-year selector (restored from
+ * localStorage so it matches the year picked on the landing), the report's
+ * optional date-range control, and the report body. Drilling into an account
+ * navigates to /reports/huvudbok?account=… with the report's window and
+ * dimension filter: drill state lives in the URL, and the huvudbok opens on
+ * it.
+ */
+function FocusedReportInner({
+  slug,
+  initialPeriods,
+  initialCompanyId,
+}: {
+  slug: string
+  initialPeriods: FiscalPeriod[]
+  initialCompanyId: string | null
+}) {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const { company } = useCompany()
+  const t = useTranslations('reports')
+
+  const [selectedPeriod, setSelectedPeriod] = useState('')
+  const [selectedPeriodBounds, setSelectedPeriodBounds] = useState<{ start: string; end: string } | null>(null)
+  const [dateRange, setDateRange] = useState<DateRangeValue>({})
+  // A drill-down arrives with the clicked report's window and dimension
+  // filter in the URL (lib/reports/report-drilldown.ts). Read once: after
+  // that the page's own controls own the state.
+  const [drilldown] = useState(() => parseDrilldownParams(searchParams))
+  const [dimensionFilter, setDimensionFilter] = useState<DimensionFilterValue | null>(() =>
+    DIMENSION_FILTER_SLUGS.has(slug) ? drilldown.dimension : null,
+  )
+  const [isReady, setIsReady] = useState(false)
+
+  const report = getReport(slug)
+  // The nav names Rapporter, so no back link over the title, and the period
+  // presets and the dimension picker share one row.
+  const showRange = DATE_RANGE_SLUGS.has(slug) && !!selectedPeriodBounds
+  const showDim = DIMENSION_FILTER_SLUGS.has(slug) && !!selectedPeriod
+  // Calendar (VAT family) and param-less reports don't need a fiscal period.
+  const isPeriodless = report?.params === 'calendar' || report?.params === 'none'
+  // Nav-promoted pages (Momsdeklaration) drop the library chrome: no back
+  // link, no shell fiscal-year selector — the view owns its period controls.
+  const isStandalone = !!report?.standalone
+  const reportName = report ? t(report.labelKey) : slug
+  const accountFilter = searchParams.get('account')
+
+  const isEnskildFirma = company?.entity_type === 'enskild_firma'
+  const filesInk2 = isEntityType(company?.entity_type) && usesInk2(company.entity_type)
+
+  // Drilling from a report into the general ledger is a route change, so the
+  // account lands in the URL and the browser back button returns to the report.
+  // The window and the dimension filter ride along: they are what the clicked
+  // amount covers. The window is sent with both bounds even for the whole
+  // year, so the ledger does not fall back to its own remembered preset.
+  const navigateToAccount = (accountNumber: string) => {
+    router.push(
+      huvudbokDrilldownHref(accountNumber, {
+        fromDate: dateRange.fromDate ?? selectedPeriodBounds?.start,
+        toDate: dateRange.toDate ?? selectedPeriodBounds?.end,
+        dimension: showDim ? dimensionFilter : null,
+      }),
+    )
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* Standalone pages (Momsdeklaration) render their own PageHeader so
+          the primary action can live on the title row; the view receives the
+          title via pageTitle instead. */}
+      {!isStandalone && (
+        <PageHeader
+          title={reportName}
+          // Page help behind a "?" (UI-migration convention 7): the report
+          // bodies carry no instructional copy in the page flow.
+          help={
+            undefined
+          }
+          action={
+            <FyPicker
+              value={selectedPeriod || null}
+              onChange={(id, period) => {
+                setSelectedPeriod(id || '')
+                setSelectedPeriodBounds(
+                  period ? { start: period.period_start, end: period.period_end } : null,
+                )
+                setDateRange({})
+              }}
+              includeAllOption={false}
+              hideFuturePeriods
+              onReady={() => setIsReady(true)}
+              initialPeriods={initialPeriods}
+              initialCompanyId={initialCompanyId}
+            />
+          }
+        />
+      )}
+
+      {/* One toolbar row per report: the pickers on the left and the
+          report's Exportera on the right (ReportExportMenu portals into the
+          slot), so no report spends a row on one button. A standalone page
+          with no filter renders no row, which would still take the stack's
+          gap. */}
+      {(showRange || showDim || !isStandalone) && (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          {showRange && selectedPeriodBounds && (
+            <ReportDateRange
+              periodStart={selectedPeriodBounds.start}
+              periodEnd={selectedPeriodBounds.end}
+              value={dateRange}
+              onChange={setDateRange}
+              initialValue={drilldown.range}
+            />
+          )}
+          {showDim && <DimensionFilter value={dimensionFilter} onChange={setDimensionFilter} />}
+          {!isStandalone && <div id={REPORT_TOOLBAR_SLOT_ID} className="ml-auto flex items-center gap-2" />}
+        </div>
+      )}
+
+      {!isReady && !isPeriodless ? (
+        <ReportBodyLoading />
+      ) : isPeriodless || selectedPeriod ? (
+        <FocusedView
+          slug={slug}
+          reportName={reportName}
+          periodId={selectedPeriod}
+          dateRange={dateRange}
+          dimensionFilter={dimensionFilter}
+          accountFilter={accountFilter}
+          isEnskildFirma={isEnskildFirma}
+          filesInk2={filesInk2}
+          onNavigateToAccount={navigateToAccount}
+        />
+      ) : (
+        <EmptyState
+          title="Inget räkenskapsår valt"
+          description="Skapa ett räkenskapsår för att kunna se rapporter."
+          actionLabel="Gå till inställningar"
+          actionHref="/settings"
+        />
+      )}
+    </div>
+  )
+}
+
+function FocusedView({
+  slug,
+  reportName,
+  periodId,
+  dateRange,
+  dimensionFilter,
+  accountFilter,
+  isEnskildFirma,
+  filesInk2,
+  onNavigateToAccount,
+}: {
+  slug: string
+  reportName: string
+  periodId: string
+  dateRange: DateRangeValue
+  dimensionFilter: DimensionFilterValue | null
+  accountFilter: string | null
+  isEnskildFirma: boolean
+  filesInk2: boolean
+  onNavigateToAccount: (account: string) => void
+}) {
+  switch (slug) {
+    case 'resultatrapport':
+      return <ResultatrapportView periodId={periodId} dateRange={dateRange} dimensionFilter={dimensionFilter} onNavigateToAccount={onNavigateToAccount} />
+    case 'dimension-pnl':
+      return <DimensionPnlView periodId={periodId} dateRange={dateRange} />
+    case 'balansrapport':
+      return <BalansrapportView periodId={periodId} dateRange={dateRange} onNavigateToAccount={onNavigateToAccount} />
+    case 'trial-balance':
+      return <TrialBalanceView periodId={periodId} onNavigateToAccount={onNavigateToAccount} />
+    case 'income-statement':
+      return <IncomeStatementView periodId={periodId} dateRange={dateRange} dimensionFilter={dimensionFilter} onNavigateToAccount={onNavigateToAccount} />
+    case 'balance-sheet':
+      return <BalanceSheetView periodId={periodId} dateRange={dateRange} onNavigateToAccount={onNavigateToAccount} />
+    case 'vat-declaration':
+      return <VatDeclarationView pageTitle={reportName} />
+    case 'periodisk-sammanstallning':
+      return <PeriodiskSammanstallningView />
+    case 'ne-declaration':
+      return isEnskildFirma ? <NEDeclarationView periodId={periodId} /> : null
+    case 'ink2-declaration':
+      return filesInk2 ? <INK2DeclarationView periodId={periodId} /> : null
+    case 'huvudbok':
+      return <GeneralLedgerView periodId={periodId} initialAccountFilter={accountFilter} dimensionFilter={dimensionFilter} dateRange={dateRange} />
+    case 'grundbok':
+      return <JournalRegisterView periodId={periodId} />
+    case 'kundreskontra':
+      return <ARLedgerView periodId={periodId} />
+    case 'supplier-ledger':
+      return <SupplierLedgerView periodId={periodId} />
+    case 'behandlingshistorik':
+      return <BehandlingshistorikView periodId={periodId} dateRange={dateRange} />
+    case 'bokslutsbilagor':
+      return <BokslutsbilagorView key={periodId} periodId={periodId} />
+    case 'systemdokumentation':
+      return <SystemdokumentationView key={periodId} periodId={periodId} />
+    case 'semesterskuld':
+      return <SemesterskuldView key={periodId} periodId={periodId} />
+    case 'lonejournal':
+      return <LonejournalView />
+    default:
+      return null
+  }
+}
+
+export function FocusedReport({
+  slug,
+  initialPeriods,
+  initialCompanyId,
+}: {
+  slug: string
+  initialPeriods: FiscalPeriod[]
+  initialCompanyId: string | null
+}) {
+  return (
+    <Suspense fallback={<div className="space-y-8" />}>
+      <FocusedReportInner
+        slug={slug}
+        initialPeriods={initialPeriods}
+        initialCompanyId={initialCompanyId}
+      />
+    </Suspense>
+  )
+}

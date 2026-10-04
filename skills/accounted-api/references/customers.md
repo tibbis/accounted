@@ -12,7 +12,7 @@ are in SKILL.md and are not repeated per endpoint.
 **List the article register (artikelregister).**
 `scope:invoices:read · risk:low · idempotent`
 
-Returns the company's articles ordered by name. Pass ?include_inactive=true to include soft-deactivated articles. Use the returned id as items[].article_id when creating invoices; housework_type carries the ROT/RUT arbetstypskod for service articles, and revenue_account the optional BAS class-3 override.
+Returns the company's articles ordered by name. Pass ?include_inactive=true to include soft-deactivated articles. Use the returned id as items[].article_id when creating invoices; housework_type carries the ROT/RUT arbetstypskod for service articles, or a grön teknik installation type (INSTALLATION_SOLCELLER, INSTALLATION_LAGRING, INSTALLATION_LADDPUNKT, also on goods), and revenue_account the optional BAS class-3 override.
 
 **Use when:** You need the article catalog before composing invoice lines: to resolve an article_id, read its price/VAT defaults, or find ROT/RUT-tagged service articles (housework_type set).
 **Do not use for:** Creating or editing articles (dashboard-only for now). Invoice line creation itself (POST …/invoices with items[].article_id).
@@ -21,7 +21,7 @@ Returns the company's articles ordered by name. Pass ?include_inactive=true to i
 - Linking article_id does NOT auto-fill the invoice line: send description, unit_price, vat_rate etc. explicitly on the item (copy them from this response).
 - price_excl_vat always excludes VAT.
 - price_excl_vat is denominated in the article's own currency, which is NOT always SEK. Check currency before copying the price onto an invoice line: the invoice carries a single currency for all its lines and there is no FX conversion here.
-- housework_type is an arbetstypskod hint (e.g. BYGG, STAD); the invoice line still needs deduction_type + labor_hours + work_type set explicitly for ROT/RUT.
+- housework_type is an arbetstypskod hint (e.g. BYGG, STAD, INSTALLATION_SOLCELLER); the invoice line still needs deduction_type + labor_hours + work_type set explicitly for ROT/RUT and grön teknik.
 - Inactive articles (active=false) are hidden by default but remain linkable for historical reads.
 
 | Parameter | In | Type | Required | Notes |
@@ -40,6 +40,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }
@@ -113,6 +114,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }
@@ -238,6 +240,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }
@@ -324,6 +327,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }
@@ -447,6 +451,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }
@@ -555,6 +560,7 @@ Response `200`:
     api_version: string,
     next_cursor?: string | null,
     audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
     partial_expansions?: string[],
     coverage?: Record<string, unknown>
   }

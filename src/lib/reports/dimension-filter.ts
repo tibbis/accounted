@@ -1,0 +1,118 @@
+import { DimensionsBagSchema } from '@/lib/bookkeeping/dimension-resolver'
+import { slugifyCompanyName } from './xlsx-export'
+
+/**
+ * Parse the report-route dimension filter pair (?dim_no=6&dim_code=P001)
+ * into the `dimensions` option the report generators accept.
+ *
+ * Absent params are fine (unfiltered report). A half-provided pair or a
+ * value that fails DimensionsBagSchema (SIE framing charset, length) is a
+ * 400: never silently ignored, or the user would read an unfiltered report
+ * as a filtered one.
+ *
+ * IMPORTANT: only the P&L-safe report routes may import this helper
+ * (resultatrapport, income-statement, general-ledger, kpi, dimension-pnl,
+ * monthly-breakdown). Statutory outputs (balance sheet, balansrapport,
+ * kassaflöde, årsredovisning, INK2, NE-bilaga, VAT declaration, SIE export)
+ * must never accept a dimension filter: a filtered filing is a wrong
+ * filing. The whitelist is pinned by lib/reports/__tests__/
+ * dimension-statutory-guard.test.ts, which fails if this import shows up in
+ * a statutory route.
+ */
+export function parseDimensionFilterParams(searchParams: URLSearchParams):
+  | { ok: true; dimensions?: Record<string, string> }
+  | { ok: false; error: string } {
+  const dimNo = searchParams.get('dim_no')
+  const dimCode = searchParams.get('dim_code')
+
+  if (dimNo === null && dimCode === null) {
+    return { ok: true }
+  }
+  if (!dimNo || !dimCode) {
+    return { ok: false, error: 'dim_no and dim_code must be provided together' }
+  }
+
+  const parsed = DimensionsBagSchema.safeParse({ [dimNo]: dimCode })
+  if (!parsed.success) {
+    return { ok: false, error: 'Invalid dimension filter' }
+  }
+  return { ok: true, dimensions: parsed.data }
+}
+
+/**
+ * Filename suffix for a dimension-filtered export ('' when unfiltered).
+ * A filtered file must not share its name with the authoritative report,
+ * BFL 5 kap / BFNAR 2013:2: what a report covers must be identifiable.
+ * Example: { "6": "P001" } → "-dim6-p001".
+ */
+export function dimensionFilterFileSuffix(dimensions?: Record<string, string>): string {
+  if (!dimensions || Object.keys(dimensions).length === 0) return ''
+  return Object.entries(dimensions)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([dimNo, code]) => {
+      const slug = slugifyCompanyName(code)
+      return slug === 'foretag' ? `-dim${dimNo}` : `-dim${dimNo}-${slug}`
+    })
+    .join('')
+}
+
+/**
+ * Human-readable partial-view disclosure for inside exported files, or null
+ * when unfiltered. Swedish only, report surface.
+ */
+export function dimensionFilterDisclosure(dimensions?: Record<string, string>): string | null {
+  if (!dimensions || Object.keys(dimensions).length === 0) return null
+  const parts = Object.entries(dimensions)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([dimNo, code]) => `dimension ${dimNo}: ${code}`)
+  return `Filtrerad (${parts.join(', ')}), ej fullständig rapport`
+}
+
+export interface DimensionFilterPartialView {
+  /** Always false: the figures cover the tagged lines only. */
+  complete: false
+  /** The text the filtered exports print (dimensionFilterDisclosure). */
+  disclosure: string
+  /**
+   * On reports that carry opening balances: the IB is scoped to the filter
+   * as well, i.e. the IB lines tagged with the object (issue #3313). The
+   * year-end close and the SIE import put a project's opening balance on its
+   * own tagged IB line (a year without an IB entry derives it from the
+   * object's prior tagged history); a dimension that resets annually
+   * (kostnadsställe) and the VAT accounts (26xx) open at 0.
+   */
+  opening_balances?: 'dimension_scoped'
+  /**
+   * The pre-#3313 flag (was `false`: IB left out under a filter), kept next
+   * to `opening_balances` so a reader that tests it does not conclude the IB
+   * is still excluded. Always true where `opening_balances` is set.
+   */
+  opening_balances_included?: true
+  /** On reports with a debit = credit check: it says nothing under a filter. */
+  is_balanced_meaningful?: false
+}
+
+/**
+ * Partial-view disclosure for a dimension-filtered report answered as JSON
+ * (v1 REST, MCP). The dashboard marks a filtered report with its chip and the
+ * exports print dimensionFilterDisclosure(); a machine reader has neither,
+ * so the body must say that the figures are not the complete report.
+ * `scopedOpeningBalances`: the report carries IB, scoped to the filter (the
+ * object's tagged IB lines, see DimensionFilterPartialView.opening_balances).
+ * `balanceCheck`: the report's is_balanced is meaningless under a filter,
+ * because tagged lines need not balance (a project's costs carry the tag,
+ * the bank line that paid them does not).
+ */
+export function dimensionFilterPartialView(
+  dimensions: Record<string, string>,
+  options: { scopedOpeningBalances?: boolean; balanceCheck?: boolean } = {},
+): DimensionFilterPartialView {
+  return {
+    complete: false,
+    disclosure: dimensionFilterDisclosure(dimensions) ?? '',
+    ...(options.scopedOpeningBalances
+      ? { opening_balances: 'dimension_scoped' as const, opening_balances_included: true as const }
+      : {}),
+    ...(options.balanceCheck ? { is_balanced_meaningful: false as const } : {}),
+  }
+}
