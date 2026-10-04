@@ -255,7 +255,7 @@ jobs:
                fi
              done
              git pull --ff-only origin main
-             export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml:docker-compose.caddy.yml:docker-compose.override.yml
+             export COMPOSE_FILE=docker-compose.yml:docker/compose.build.yml:docker/compose.caddy.yml:docker-compose.override.yml
              docker compose up -d --build
              docker compose exec -T app wget -qO- http://127.0.0.1:3000/api/health
              echo
