@@ -7,7 +7,7 @@ import { COMPANY_PICKED_COOKIE } from '@/lib/company/context'
 import { hasSkatteverketOmbudReadAccess } from '@/lib/skatteverket/ombud-access'
 import { isCockpitLandingRole } from '@/lib/company/home-domain'
 import { decideHemGate } from '@/lib/onboarding/hem-gate'
-import { readAiConnection } from '@/lib/onboarding/ai-clients.server'
+import { loadAiConnection } from '@/lib/onboarding/ai-clients.server'
 import { createServiceClient } from '@/lib/supabase/server'
 import {
   getDashboardAuthContext,
@@ -108,9 +108,11 @@ export default async function DashboardPage() {
       // kopplingar chip), and which of Claude / ChatGPT / Grok it is when
       // known (the Att göra row's AI action): one read, one answer for every
       // surface. Keyed on the user, not the company: the connection follows
-      // the person. Throws on a failed read: guessing "not connected" would
-      // re-open the connect step for a connected user.
-      readAiConnection(serviceClient, user.id),
+      // the person. Lenient on purpose: a failed read (missing column on a
+      // self-host whose schema lagged the app, a transient PostgREST error)
+      // must not replace Hem with "Något gick fel". loadAiConnection logs
+      // and answers none; the onboarding poller still uses the strict read.
+      loadAiConnection(serviceClient, user.id),
       // Accounted as ombud counts as connected too (lib/skatteverket/ombud-access.ts).
       hasSkatteverketOmbudReadAccess(companyId),
     ])
