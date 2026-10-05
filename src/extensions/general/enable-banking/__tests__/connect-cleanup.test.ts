@@ -167,6 +167,9 @@ describe('POST /connect credential prefill', () => {
     )
     expect(started?.[1]).toMatchObject({ credentials_prefilled: ['companyId'] })
     expect(JSON.stringify(started?.[1])).not.toContain('5568098239')
+    expect(((await response.json()) as { company_id_clipboard: string | null }).company_id_clipboard).toBe(
+      '5568098239',
+    )
   })
 
   it('prefills every AB organisationsnummer comma-separated when SEB asks for a list', async () => {
@@ -188,6 +191,9 @@ describe('POST /connect credential prefill', () => {
     ])
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
     expect(response.status).toBe(200)
+    expect(((await response.json()) as { company_id_clipboard: string | null }).company_id_clipboard).toBe(
+      '5594951609,5593757171',
+    )
     expect(mockStartAuthorization.mock.calls[0][7]).toEqual({ companyId: '5594951609,5593757171' })
     const started = (ctx.log.info as ReturnType<typeof vi.fn>).mock.calls.find(
       (c) => String(c[0]).includes('Starting bank connection'),
@@ -205,17 +211,19 @@ describe('POST /connect credential prefill', () => {
     const ctx = ctxWithCompany('198501011234', 'enskild_firma')
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
     expect(response.status).toBe(200)
+    expect(((await response.json()) as { company_id_clipboard: string | null }).company_id_clipboard).toBeNull()
     expect(mockStartAuthorization.mock.calls[0][7]).toBeUndefined()
   })
 
-  it('sends no credentials, and never reads the company, when the method declares none', async () => {
+  it('returns company_id_clipboard even when the method declares no credentials to prefill', async () => {
     mockGetPreferredAuthMethod.mockResolvedValue({ name: 'BANKID', approach: 'DECOUPLED', hidden_method: true })
     const ctx = ctxWithCompany('556809-8239')
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
     expect(response.status).toBe(200)
     expect(mockStartAuthorization.mock.calls[0][7]).toBeUndefined()
-    const tables = (ctx.supabase.from as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])
-    expect(tables).not.toContain('companies')
+    expect(((await response.json()) as { company_id_clipboard: string | null }).company_id_clipboard).toBe(
+      '5568098239',
+    )
   })
 })
 
@@ -438,6 +446,9 @@ describe('POST /connect auth-method pinning wired into startAuthorization', () =
       if (table === 'companies') {
         return makeChain({ data: { org_number: '5560125790' } })
       }
+      if (table === 'company_members') {
+        return makeChain({ data: [] })
+      }
       bankStep += 1
       if (bankStep === 1) {
         // The existing connection loaded up front: reconnect derives the bank
@@ -535,13 +546,11 @@ describe('POST /connect existing-connection guard', () => {
 
   it('answers PENDING_SELECTION (resume, not renew) when the blocking row only waits for account selection', async () => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         chain = makeChain({ data: [] })
       } else {
         // Guard: the bank is already authorized; the user never saved the
@@ -558,7 +567,7 @@ describe('POST /connect existing-connection guard', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 
@@ -603,15 +612,13 @@ describe('POST /connect existing-connection guard', () => {
     ['its consent has lapsed as well', claimedOnly, yesterday],
   ])('removes a waiting connection with nothing to pick and starts a new login when %s', async (_label, accounts, consentExpires) => {
     const chains: RecordedChain[] = []
-    let call = 0
-    const ctx = makeContext(() => {
-      call++
+    const ctx = makeContext(connectFrom((step) => {
       let chain: RecordedChain
-      if (call === 1) {
+      if (step === 1) {
         chain = makeChain({ data: null })
-      } else if (call === 2) {
+      } else if (step === 2) {
         chain = makeChain({ data: [] })
-      } else if (call === 3) {
+      } else if (step === 3) {
         chain = makeChain({
           data: {
             id: 'nothing-to-pick',
@@ -620,7 +627,7 @@ describe('POST /connect existing-connection guard', () => {
             accounts_data: accounts,
           },
         })
-      } else if (call === 4) {
+      } else if (step === 4) {
         // Guard asked again after the removal: nothing established remains.
         chain = makeChain({ data: null })
       } else {
@@ -628,7 +635,7 @@ describe('POST /connect existing-connection guard', () => {
       }
       chains.push(chain)
       return chain
-    })
+    }))
 
     const response = await connectRoute().handler(makeConnectRequest(), ctx)
 

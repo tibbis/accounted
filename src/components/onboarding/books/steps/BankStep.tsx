@@ -23,6 +23,8 @@ import { OptRow, OptRows, Sentence } from '../ui/Sentence'
 import { VerdictList, Wait, type Verdict } from '../ui/Verdicts'
 import type { BooksCtx } from '../context'
 import { Button } from '@/components/ui/button'
+import { useCompany } from '@/contexts/CompanyContext'
+import { companyIdClipboardValue, writeCompanyIdClipboard } from '@/lib/company/org-number-clipboard'
 
 const EB = '/api/extensions/ext/enable-banking'
 const POPULAR = ['Swedbank', 'SEB', 'Nordea', 'Handelsbanken', 'Danske Bank', 'Länsförsäkringar', 'Skandiabanken', 'ICA Banken']
@@ -57,6 +59,7 @@ function isoToday(): string {
 export function BankStep({ ctx }: { ctx: BooksCtx }) {
   const t = useTranslations('books')
   const { locale, formatDateLong } = useFormat()
+  const { company, companies } = useCompany()
   const { state, dispatch, flags, findings, loadingFindings, loadFindings, landedError } = ctx
   const phase = state.bankPhase
   const isMig = state.path === 'migration' || (findings?.books.entries ?? 0) > 0
@@ -179,6 +182,17 @@ export function BankStep({ ctx }: { ctx: BooksCtx }) {
     const popup = window.open('', 'enable-banking', `width=${w},height=${h},left=${left},top=${top}`)
     popupRef.current = popup
     outcomeRef.current = false
+    await writeCompanyIdClipboard(
+      companyIdClipboardValue(
+        { org_number: company?.org_number ?? null, entity_type: company?.entity_type ?? null },
+        companies
+          .filter((m) => !m.company.archived_at)
+          .map((m) => ({
+            org_number: m.company.org_number,
+            entity_type: m.company.entity_type,
+          })),
+      ),
+    )
     const body = { aspsp_name: b.name, aspsp_country: b.country, psu_type: psuType }
     try {
       let res = await fetch(`${EB}/connect`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -198,8 +212,15 @@ export function BankStep({ ctx }: { ctx: BooksCtx }) {
         // A dead earlier row for the same bank: start fresh rather than stop here.
         res = await fetch(`${EB}/connect`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, force_new: true }) })
       }
-      const json = (await res.json().catch(() => ({}))) as { authorization_url?: string; error?: unknown }
+      const json = (await res.json().catch(() => ({}))) as {
+        authorization_url?: string
+        company_id_clipboard?: string | null
+        error?: unknown
+      }
       if (!res.ok || !json.authorization_url) throw new Error(getErrorMessage(json, { locale: locale as 'sv' | 'en' }))
+      await writeCompanyIdClipboard(
+        typeof json.company_id_clipboard === 'string' ? json.company_id_clipboard : null,
+      )
       // A deliberately closed popup cancels this attempt; only a blocked
       // popup should fall back to navigating the entire onboarding page.
       if (popup?.closed) {

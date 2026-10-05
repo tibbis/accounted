@@ -19,6 +19,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { createClient } from '@/lib/supabase/client'
 import { notifyBankSyncUpdated } from '@/lib/transactions/bank-sync-signal'
 import { useCompany, useCapability } from '@/contexts/CompanyContext'
+import { companyIdClipboardValue, writeCompanyIdClipboard } from '@/lib/company/org-number-clipboard'
 import { CAPABILITY } from '@/lib/entitlements/keys'
 import { UpgradeNote } from '@/components/billing/UpgradeNote'
 import {
@@ -400,6 +401,18 @@ export default function BankingSettingsPanel() {
     // indefinitely, and a second click in that window would otherwise sail
     // past the guard above and start a concurrent connect flow.
     connectingRef.current = true
+    // Copy before any await so the click still counts as user activation.
+    await writeCompanyIdClipboard(
+      companyIdClipboardValue(
+        { org_number: company?.org_number ?? null, entity_type: company?.entity_type ?? null },
+        companies
+          .filter((m) => !m.company.archived_at)
+          .map((m) => ({
+            org_number: m.company.org_number,
+            entity_type: m.company.entity_type,
+          })),
+      ),
+    )
     if (!(await confirmSameBankConnections(bank.name, false))) {
       connectingRef.current = false
       return
@@ -458,6 +471,9 @@ export default function BankingSettingsPanel() {
         connectionId: data.connection_id,
         hasAuthUrl: !!data.authorization_url,
       })
+      await writeCompanyIdClipboard(
+        typeof data.company_id_clipboard === 'string' ? data.company_id_clipboard : null,
+      )
       window.location.href = data.authorization_url
     } catch (error) {
       console.error('[enable-banking] Connect flow failed', {
@@ -486,6 +502,17 @@ export default function BankingSettingsPanel() {
     if (connectingRef.current) return
     // Lock before the confirm await, same reason as handleConnectBank.
     connectingRef.current = true
+    await writeCompanyIdClipboard(
+      companyIdClipboardValue(
+        { org_number: company?.org_number ?? null, entity_type: company?.entity_type ?? null },
+        companies
+          .filter((m) => !m.company.archived_at)
+          .map((m) => ({
+            org_number: m.company.org_number,
+            entity_type: m.company.entity_type,
+          })),
+      ),
+    )
     if (!(await confirmSameBankConnections(connection.bank_name, true, connection.session_id))) {
       connectingRef.current = false
       return
@@ -514,6 +541,9 @@ export default function BankingSettingsPanel() {
         throw new Error(data.error)
       }
 
+      await writeCompanyIdClipboard(
+        typeof data.company_id_clipboard === 'string' ? data.company_id_clipboard : null,
+      )
       window.location.href = data.authorization_url
     } catch (error) {
       console.error('[enable-banking] Reconnect flow failed', {

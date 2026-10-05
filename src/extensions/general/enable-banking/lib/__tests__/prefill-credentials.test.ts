@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   allowsCommaSeparatedCompanyIds,
   buildPrefilledCredentials,
+  companyIdClipboardValue,
   companyIdDigits,
   companyIdPrefillList,
 } from '../prefill-credentials'
@@ -141,6 +142,20 @@ describe('companyIdPrefillList', () => {
         ],
       ),
     ).toEqual(['5594951609', '5593757171'])
+  })
+})
+
+describe('companyIdClipboardValue', () => {
+  it('joins the same list the SEB field needs, and is null for a sole trader', () => {
+    expect(
+      companyIdClipboardValue(
+        { org_number: '559495-1609', entity_type: 'aktiebolag' },
+        [{ org_number: '5593757171', entity_type: 'aktiebolag' }],
+      ),
+    ).toBe('5594951609,5593757171')
+    expect(
+      companyIdClipboardValue({ org_number: '198501011234', entity_type: 'enskild_firma' }),
+    ).toBeNull()
   })
 })
 

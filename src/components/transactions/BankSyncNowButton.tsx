@@ -29,6 +29,7 @@ import {
   type BankConn,
 } from '@/lib/transactions/bank-sync-store'
 import { useCompany, useCapability } from '@/contexts/CompanyContext'
+import { companyIdClipboardValue, writeCompanyIdClipboard } from '@/lib/company/org-number-clipboard'
 import { CAPABILITY } from '@/lib/entitlements/keys'
 import { isSelfHosted } from '@/lib/env/public-flags'
 import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
@@ -50,7 +51,7 @@ export function useBankSync() {
   const t = useTranslations('transactions')
   const { toast } = useToast()
   const router = useRouter()
-  const { company } = useCompany()
+  const { company, companies } = useCompany()
   const hasBankSync = useCapability(CAPABILITY.bank_sync)
   // Busy state and the connection list live in a module-level store so every
   // useBankSync() instance (header split button, footer button) sees the same
@@ -92,6 +93,17 @@ export function useBankSync() {
   async function reconnect(conn: BankConn) {
     setBusyConnection(conn.id)
     try {
+      await writeCompanyIdClipboard(
+        companyIdClipboardValue(
+          { org_number: company?.org_number ?? null, entity_type: company?.entity_type ?? null },
+          companies
+            .filter((m) => !m.company.archived_at)
+            .map((m) => ({
+              org_number: m.company.org_number,
+              entity_type: m.company.entity_type,
+            })),
+        ),
+      )
       const country = conn.provider?.split('-').pop()?.toUpperCase() || 'SE'
       const res = await fetch('/api/extensions/ext/enable-banking/connect', {
         method: 'POST',
@@ -104,6 +116,9 @@ export function useBankSync() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Reconnect failed')
+      await writeCompanyIdClipboard(
+        typeof data.company_id_clipboard === 'string' ? data.company_id_clipboard : null,
+      )
       window.location.href = data.authorization_url
     } catch (error) {
       toast({

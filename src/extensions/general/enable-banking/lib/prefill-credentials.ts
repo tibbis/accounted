@@ -1,4 +1,12 @@
 import type { AuthMethod, AuthMethodCredential } from './api-client'
+import { companyIdPrefillList, type OrgNumberCompany } from '@/lib/company/org-number-clipboard'
+
+export type { OrgNumberCompany as PrefillCompany }
+export {
+  companyIdClipboardValue,
+  companyIdDigits,
+  companyIdPrefillList,
+} from '@/lib/company/org-number-clipboard'
 
 /**
  * Credentials we can fill in for the PSU before Enable Banking's hosted page
@@ -32,20 +40,6 @@ import type { AuthMethod, AuthMethodCredential } from './api-client'
 /** The credential name Enable Banking uses for the company identifier. */
 const COMPANY_ID_CREDENTIAL = 'companyId'
 
-export interface PrefillCompany {
-  org_number: string | null
-  entity_type: string | null
-}
-
-/**
- * The 10-digit organisationsnummer Swedish banks call företags-ID. Null when
- * the stored number is not 10 digits.
- */
-export function companyIdDigits(company: PrefillCompany): string | null {
-  const digits = (company.org_number ?? '').replace(/\D/g, '')
-  return digits.length === 10 ? digits : null
-}
-
 /** Whether the method asks the PSU for a company identifier at all. */
 export function wantsCompanyId(method: AuthMethod | undefined): boolean {
   return !!method?.credentials?.some((c) => c.name === COMPANY_ID_CREDENTIAL)
@@ -73,35 +67,14 @@ export function allowsCommaSeparatedCompanyIds(credential: AuthMethodCredential)
 }
 
 /**
- * Unique 10-digit AB identifiers, connecting company first, then siblings.
- * Enskild firma is skipped: that number is a personnummer, never a companyId list.
- */
-export function companyIdPrefillList(
-  company: PrefillCompany,
-  siblings: readonly PrefillCompany[] = [],
-): string[] {
-  if (company.entity_type === 'enskild_firma') return []
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const row of [company, ...siblings]) {
-    if (row.entity_type === 'enskild_firma') continue
-    const digits = companyIdDigits(row)
-    if (!digits || seen.has(digits)) continue
-    seen.add(digits)
-    out.push(digits)
-  }
-  return out
-}
-
-/**
  * The credentials to send on POST /auth, or undefined when there is nothing
  * to prefill (no method metadata, no companyId credential, a sole trader,
  * or no usable number).
  */
 export function buildPrefilledCredentials(
   method: AuthMethod | undefined,
-  company: PrefillCompany,
-  siblings: readonly PrefillCompany[] = [],
+  company: OrgNumberCompany,
+  siblings: readonly OrgNumberCompany[] = [],
 ): Record<string, string> | undefined {
   const credential = method?.credentials?.find((c) => c.name === COMPANY_ID_CREDENTIAL)
   if (!credential) return undefined
