@@ -405,13 +405,37 @@ export const enableBankingExtension: Extension = {
           // Prefill what the ledger already knows (the organisationsnummer
           // as företags-ID) so the person is not asked to type it in a
           // format Enable Banking's page never explains. Value stays out of
-          // the log; only whether one was sent.
-          const credentials = wantsCompanyId(preferredMethod)
-            ? buildPrefilledCredentials(preferredMethod, {
-                org_number: (await loadCompany())?.org_number ?? null,
-                entity_type: (await loadCompany())?.entity_type ?? null,
-              })
-            : undefined
+          // the log; only whether one was sent. At banks whose field takes a
+          // comma-separated list (SEB), every AB the user belongs to is
+          // included: one AIS session covers them all.
+          let credentials: Record<string, string> | undefined
+          if (wantsCompanyId(preferredMethod)) {
+            const connecting = await loadCompany()
+            let siblings: Array<{ org_number: string | null; entity_type: string | null }> = []
+            const { data: memberships } = await supabase
+              .from('company_members')
+              .select('companies:company_id(org_number, entity_type, archived_at)')
+              .eq('user_id', user.id)
+            siblings = ((memberships ?? []) as Array<{
+              companies:
+                | { org_number: string | null; entity_type: string | null; archived_at: string | null }
+                | { org_number: string | null; entity_type: string | null; archived_at: string | null }[]
+                | null
+            }>).flatMap((row) => {
+              const raw = row.companies
+              const company = Array.isArray(raw) ? raw[0] : raw
+              if (!company || company.archived_at) return []
+              return [{ org_number: company.org_number, entity_type: company.entity_type }]
+            })
+            credentials = buildPrefilledCredentials(
+              preferredMethod,
+              {
+                org_number: connecting?.org_number ?? null,
+                entity_type: connecting?.entity_type ?? null,
+              },
+              siblings,
+            )
+          }
 
           log.info('[enable-banking] Starting bank connection', {
             user_id: user.id,

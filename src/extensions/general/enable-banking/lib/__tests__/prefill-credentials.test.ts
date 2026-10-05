@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildPrefilledCredentials, companyIdDigits } from '../prefill-credentials'
+import {
+  allowsCommaSeparatedCompanyIds,
+  buildPrefilledCredentials,
+  companyIdDigits,
+  companyIdPrefillList,
+} from '../prefill-credentials'
 import type { AuthMethod } from '../api-client'
 
 // Verbatim shape from GET /aspsps?country=SE&psu_type=business (2026-09-14).
@@ -86,5 +91,69 @@ describe('buildPrefilledCredentials', () => {
     expect(buildPrefilledCredentials(method, { org_number: '5568098239', entity_type: 'aktiebolag' })).toEqual({
       companyId: '5568098239',
     })
+  })
+
+  it('joins every AB organisationsnummer with commas when the page asks for a list (SEB)', () => {
+    const seb: AuthMethod = {
+      name: 'SEB',
+      credentials: [
+        {
+          name: 'companyId',
+          title: 'Company ID',
+          description:
+            'Either one or more 14 digit SEB identifiers for the companies or 10 digit organization numbers, separated by comma',
+          template: '^\\d{10}$',
+        },
+      ],
+    }
+    expect(
+      buildPrefilledCredentials(
+        seb,
+        { org_number: '559495-1609', entity_type: 'aktiebolag' },
+        [
+          { org_number: '5593757171', entity_type: 'aktiebolag' },
+          { org_number: '5594951609', entity_type: 'aktiebolag' },
+          { org_number: '850101-1234', entity_type: 'enskild_firma' },
+        ],
+      ),
+    ).toEqual({ companyId: '5594951609,5593757171' })
+  })
+
+  it('keeps a single number at banks whose template only accepts one (Handelsbanken)', () => {
+    expect(
+      buildPrefilledCredentials(
+        HANDELSBANKEN_BANKID,
+        { org_number: '556809-8239', entity_type: 'aktiebolag' },
+        [{ org_number: '5593757171', entity_type: 'aktiebolag' }],
+      ),
+    ).toEqual({ companyId: '5568098239' })
+  })
+})
+
+describe('companyIdPrefillList', () => {
+  it('puts the connecting company first and drops duplicates and sole traders', () => {
+    expect(
+      companyIdPrefillList(
+        { org_number: '559495-1609', entity_type: 'aktiebolag' },
+        [
+          { org_number: '5593757171', entity_type: 'aktiebolag' },
+          { org_number: '5594951609', entity_type: 'aktiebolag' },
+        ],
+      ),
+    ).toEqual(['5594951609', '5593757171'])
+  })
+})
+
+describe('allowsCommaSeparatedCompanyIds', () => {
+  it('detects the SEB hosted-page wording and a comma in the template', () => {
+    expect(
+      allowsCommaSeparatedCompanyIds({
+        name: 'companyId',
+        description:
+          'Either one or more 14 digit SEB identifiers for the companies or 10 digit organization numbers, separated by comma',
+      }),
+    ).toBe(true)
+    expect(allowsCommaSeparatedCompanyIds({ name: 'companyId', template: '^\\d{10}(,\\d{10})*$' })).toBe(true)
+    expect(allowsCommaSeparatedCompanyIds({ name: 'companyId', template: '^\\d{10}$' })).toBe(false)
   })
 })

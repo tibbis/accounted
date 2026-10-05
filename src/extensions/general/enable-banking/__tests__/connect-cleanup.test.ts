@@ -113,6 +113,9 @@ function connectFrom(
     if (table === 'companies') {
       return makeChain({ data: companyData })
     }
+    if (table === 'company_members') {
+      return makeChain({ data: [] })
+    }
     bankStep += 1
     return onBankConnection(bankStep)
   }
@@ -125,10 +128,15 @@ describe('POST /connect credential prefill', () => {
     mockStartAuthorization.mockResolvedValue({ url: 'https://bank.example/auth', authorization_id: 'auth-1' })
   })
 
-  function ctxWithCompany(orgNumber: string | null, entityType = 'aktiebolag') {
+  function ctxWithCompany(
+    orgNumber: string | null,
+    entityType = 'aktiebolag',
+    memberships: unknown[] = [],
+  ) {
     let call = 0
     return makeContext((table: string) => {
       if (table === 'companies') return makeChain({ data: { entity_type: entityType, org_number: orgNumber } })
+      if (table === 'company_members') return makeChain({ data: memberships })
       call++
       if (call === 1) return makeChain({ data: null }) // no recent pending
       if (call === 2) return makeChain({ data: [] }) // sweep
@@ -159,6 +167,32 @@ describe('POST /connect credential prefill', () => {
     )
     expect(started?.[1]).toMatchObject({ credentials_prefilled: ['companyId'] })
     expect(JSON.stringify(started?.[1])).not.toContain('5568098239')
+  })
+
+  it('prefills every AB organisationsnummer comma-separated when SEB asks for a list', async () => {
+    mockGetPreferredAuthMethod.mockResolvedValue({
+      name: 'SEB',
+      credentials: [
+        {
+          name: 'companyId',
+          required: true,
+          template: '^\\d{10}$',
+          description:
+            'Either one or more 14 digit SEB identifiers for the companies or 10 digit organization numbers, separated by comma',
+        },
+      ],
+    })
+    const ctx = ctxWithCompany('559495-1609', 'aktiebolag', [
+      { companies: { org_number: '5593757171', entity_type: 'aktiebolag', archived_at: null } },
+      { companies: { org_number: '5594951609', entity_type: 'aktiebolag', archived_at: null } },
+    ])
+    const response = await connectRoute().handler(makeConnectRequest(), ctx)
+    expect(response.status).toBe(200)
+    expect(mockStartAuthorization.mock.calls[0][7]).toEqual({ companyId: '5594951609,5593757171' })
+    const started = (ctx.log.info as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => String(c[0]).includes('Starting bank connection'),
+    )
+    expect(JSON.stringify(started?.[1])).not.toContain('5594951609')
   })
 
   it('sends no companyId for a sole trader: the person types it on the bank page (Nordea business)', async () => {
