@@ -95,6 +95,11 @@ RUN apk add --no-cache poppler-utils
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+# Runtime heap, not the builder's 6144. V8 sizes old-space from the cgroup: a
+# 1g mem_limit left ~512 MB of JS heap, which Next 16 now exhausts on the
+# first page after boot (accounting.helle.cc 2026-10-05, white screen / 502).
+# 1536 fits under docker-compose.yml's 2g cap with native headroom.
+ENV NODE_OPTIONS=--max-old-space-size=1536
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 -G nodejs nextjs

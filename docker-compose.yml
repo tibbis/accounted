@@ -41,7 +41,10 @@ services:
       - /app/public:uid=1001,gid=1001,mode=750,size=200m
     # CPU limits are intentionally left to host tooling or a local override.
     # Some Compose builds bundled with NAS platforms reject the `cpus` key.
-    mem_limit: 1g
+    # 2g: Next 16's runtime heap exhausted the previous 1g cgroup (~512 MB V8
+    # default) on the first page after boot. NODE_OPTIONS in the runner image
+    # is 1536, which needs headroom under this cap for native allocations.
+    mem_limit: 2g
     pids_limit: 200
     restart: unless-stopped
     healthcheck:
