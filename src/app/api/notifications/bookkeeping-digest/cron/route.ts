@@ -8,6 +8,7 @@ ensureInitialized()
 
 /**
  * GET /api/notifications/bookkeeping-digest/cron, daily 05:45 UTC.
+ * Weekly opt-ins only send on Mondays (Europe/Stockholm).
  *
  * Emails opted-in users a "nytt att bokföra" summary: bank transactions and
  * inbox documents that arrived in the last 24 hours. Runs after the 05:00

@@ -1,22 +1,25 @@
 /**
- * Daily "nytt att bokföra" email digest.
+ * "Nytt att bokföra" email digest.
  *
  * Users asked for an email when there is new work to book: bank transactions
  * that synced overnight and documents that landed in the inbox. The digest is
  * strictly opt-in (notification_settings.email_digest_enabled, default false)
- * and runs daily after the 05:00 bank sync so the night's imports are counted
- * the same morning.
+ * and runs after the 05:00 bank sync so the night's imports are counted.
  *
- * One email per user per company per day: dedup goes through notification_log
- * under type 'bookkeeping_digest', guarded by a partial unique index on
- * (user_id, reference_id) (migration 20260831100000). reference_id is a
- * deterministic uuid derived from (company, digest date), so overlapping cron
- * invocations race on the insert and exactly one wins. The claim is
- * recoverable: it is inserted as delivery_status 'pending', flipped to 'sent'
- * only after the provider accepted the mail, and a 'pending' claim older than
- * STALE_CLAIM_MS (a run that died before sending, or a send that failed) can
- * be atomically taken over by a later run, so an interruption never silently
- * swallows that day's digest.
+ * Cadence is per user (notification_settings.email_digest_frequency):
+ *   - daily: every cron run, counts the last 24h
+ *   - weekly: Mondays only (Europe/Stockholm), counts the last 7 days
+ * The cron itself stays daily so weekly users share the same overnight sync
+ * window; non-Monday runs simply skip the weekly cohort.
+ *
+ * One email per user per company per period: dedup goes through
+ * notification_log under type 'bookkeeping_digest', guarded by a partial
+ * unique index on (user_id, reference_id) (migration 20260831100000).
+ * reference_id is a deterministic uuid derived from (company, period key),
+ * so overlapping cron invocations race on the insert and exactly one wins.
+ * The claim is recoverable: it is inserted as delivery_status 'pending',
+ * flipped to 'sent' only after the provider accepted the mail, and a
+ * 'pending' claim older than STALE_CLAIM_MS can be atomically taken over.
  *
  * The body carries counts only, never amounts or counterparties: the mere
  * existence of company mail is sensitive financial signal, so the details
@@ -31,15 +34,22 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { getEmailService } from '@/lib/email/service'
 import { getSenderForBrand, getBaseUrlForBrand } from '@/lib/email/brand-sender'
 import { resolveBrandForCompany } from '@/lib/branding/resolve'
+import { todayIsoStockholm } from '@/lib/dates/iso'
 import { createLogger } from '@/lib/logger'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { chunk } from '@/lib/utils'
 import { escapeHtml } from '@/lib/email/user-text'
+import { DIGEST_INBOX_PWA_TYPES, wasPushSuccessfullySent } from '@/lib/notifications/push-delivery'
+import type { EmailDigestFrequency } from '@/types'
 
 const log = createLogger('bookkeeping-digest')
 
-/** The digest counts changes in the last 24h: one cron cadence back. */
-const WINDOW_MS = 24 * 60 * 60 * 1000
+export type DigestFrequency = EmailDigestFrequency
+
+const WINDOW_MS: Record<DigestFrequency, number> = {
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+}
 
 /**
  * A 'pending' claim older than this is considered abandoned (the run that
@@ -66,7 +76,16 @@ export interface DigestRunSummary {
   sent: number
   skippedEmpty: number
   skippedDuplicate: number
+  /** Inbox-only digest skipped because a PWA already accepted the same arrival. */
+  skippedPushDelivered: number
+  /** Weekly opt-ins skipped because today is not Monday in Europe/Stockholm. */
+  skippedNotScheduled: number
   failed: number
+}
+
+interface OptedInRow {
+  user_id: string
+  email_digest_frequency: DigestFrequency | null
 }
 
 /**
@@ -126,6 +145,8 @@ export async function runBookkeepingDigest(
     sent: 0,
     skippedEmpty: 0,
     skippedDuplicate: 0,
+    skippedPushDelivered: 0,
+    skippedNotScheduled: 0,
     failed: 0,
   }
 
@@ -135,16 +156,21 @@ export async function runBookkeepingDigest(
     return summary
   }
 
-  const optedIn = await fetchAllRows<{ user_id: string }>(({ from, to }) =>
+  const optedIn = await fetchAllRows<OptedInRow>(({ from, to }) =>
     supabase
       .from('notification_settings')
-      .select('user_id')
+      .select('user_id, email_digest_frequency')
       .eq('email_digest_enabled', true)
       .order('user_id', { ascending: true })
       .range(from, to)
   )
   summary.optedInUsers = optedIn.length
   if (optedIn.length === 0) return summary
+
+  const frequencyByUser = new Map<string, DigestFrequency>()
+  for (const row of optedIn) {
+    frequencyByUser.set(row.user_id, normalizeFrequency(row.email_digest_frequency))
+  }
 
   const userIds = optedIn.map((r) => r.user_id)
   const memberships: Array<{ user_id: string; company_id: string }> = []
@@ -163,40 +189,59 @@ export async function runBookkeepingDigest(
     memberships.push(...page)
   }
 
-  const usersByCompany = new Map<string, string[]>()
+  const cohortsByCompany = new Map<string, { daily: string[]; weekly: string[] }>()
   for (const m of memberships) {
     if (!m.user_id || !m.company_id) continue
-    const list = usersByCompany.get(m.company_id) ?? []
-    list.push(m.user_id)
-    usersByCompany.set(m.company_id, list)
+    const cohort = cohortsByCompany.get(m.company_id) ?? { daily: [], weekly: [] }
+    const frequency = frequencyByUser.get(m.user_id) ?? 'daily'
+    cohort[frequency].push(m.user_id)
+    cohortsByCompany.set(m.company_id, cohort)
   }
-  summary.companiesConsidered = usersByCompany.size
+  summary.companiesConsidered = cohortsByCompany.size
 
-  const sinceIso = new Date(now.getTime() - WINDOW_MS).toISOString()
-  const digestDate = now.toISOString().slice(0, 10)
+  const monday = isMondayStockholm(now)
+  const stockholmDate = todayIsoStockholm(now)
+  const weekPeriodKey = stockholmIsoWeekPeriodKey(now)
 
-  for (const [companyId, companyUserIds] of usersByCompany) {
-    try {
-      const counts = await countNewToBook(supabase, companyId, sinceIso)
-      if (counts.newTransactions === 0 && counts.newInboxItems === 0) {
-        summary.skippedEmpty += companyUserIds.length
+  for (const [companyId, cohorts] of cohortsByCompany) {
+    for (const frequency of ['daily', 'weekly'] as const) {
+      const companyUserIds = cohorts[frequency]
+      if (companyUserIds.length === 0) continue
+      if (frequency === 'weekly' && !monday) {
+        summary.skippedNotScheduled += companyUserIds.length
         continue
       }
-      const result = await sendDigestForCompany(supabase, {
-        companyId,
-        userIds: companyUserIds,
-        counts,
-        digestDate,
-      })
-      summary.sent += result.sent
-      summary.skippedDuplicate += result.skippedDuplicate
-      summary.failed += result.failed
-    } catch (err) {
-      summary.failed += companyUserIds.length
-      log.warn('bookkeeping digest failed for company', {
-        companyId,
-        error: err instanceof Error ? err.message : String(err),
-      })
+      try {
+        const sinceIso = new Date(now.getTime() - WINDOW_MS[frequency]).toISOString()
+        const counts = await countNewToBook(supabase, companyId, sinceIso)
+        if (counts.newTransactions === 0 && counts.newInboxItems === 0) {
+          summary.skippedEmpty += companyUserIds.length
+          continue
+        }
+        const periodKey =
+          frequency === 'weekly'
+            ? `week:${weekPeriodKey}`
+            : stockholmDate
+        const result = await sendDigestForCompany(supabase, {
+          companyId,
+          userIds: companyUserIds,
+          counts,
+          periodKey,
+          sinceIso,
+          frequency,
+        })
+        summary.sent += result.sent
+        summary.skippedDuplicate += result.skippedDuplicate
+        summary.skippedPushDelivered += result.skippedPushDelivered
+        summary.failed += result.failed
+      } catch (err) {
+        summary.failed += companyUserIds.length
+        log.warn('bookkeeping digest failed for company', {
+          companyId,
+          frequency,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
   }
 
@@ -207,14 +252,16 @@ interface CompanyDigestInput {
   companyId: string
   userIds: string[]
   counts: DigestCounts
-  digestDate: string
+  periodKey: string
+  sinceIso: string
+  frequency: DigestFrequency
 }
 
 async function sendDigestForCompany(
   supabase: SupabaseClient,
   input: CompanyDigestInput
-): Promise<{ sent: number; skippedDuplicate: number; failed: number }> {
-  const out = { sent: 0, skippedDuplicate: 0, failed: 0 }
+): Promise<{ sent: number; skippedDuplicate: number; skippedPushDelivered: number; failed: number }> {
+  const out = { sent: 0, skippedDuplicate: 0, skippedPushDelivered: 0, failed: 0 }
   const email = getEmailService()
 
   const { data: company } = await supabase
@@ -238,12 +285,31 @@ async function sendDigestForCompany(
   const memberEmails = await resolveCompanyMemberEmails(supabase, input.companyId, input.userIds)
 
   const referenceUuid = toReferenceUuid(
-    `bookkeeping_digest:${input.companyId}:${input.digestDate}`
+    `bookkeeping_digest:${input.companyId}:${input.periodKey}`
   )
 
   for (const userId of input.userIds) {
     const recipient = memberEmails.get(userId)
     if (!recipient) continue
+
+    // Bank txs have no PWA twin, so a digest that includes them still mails.
+    // Inbox-only mail repeats receipt_extracted / receipt_matched PWA.
+    // Daily only: a weekly summary must not vanish because one push landed
+    // mid-week for a different underlag.
+    if (
+      input.frequency === 'daily' &&
+      input.counts.newTransactions === 0 &&
+      input.counts.newInboxItems > 0 &&
+      (await wasPushSuccessfullySent(supabase, {
+        userId,
+        types: DIGEST_INBOX_PWA_TYPES,
+        sinceIso: input.sinceIso,
+        companyId: input.companyId,
+      }))
+    ) {
+      out.skippedPushDelivered++
+      continue
+    }
 
     const claim = await acquireClaim(supabase, userId, input.companyId, referenceUuid)
     if (claim === 'duplicate') {
@@ -251,7 +317,7 @@ async function sendDigestForCompany(
       continue
     }
     if (claim === 'error') {
-      // Without a claim we cannot guarantee once-per-day: fail closed.
+      // Without a claim we cannot guarantee once-per-period: fail closed.
       out.failed++
       continue
     }
@@ -261,6 +327,7 @@ async function sendDigestForCompany(
       counts: input.counts,
       baseUrl,
       appName: brand?.appName ?? 'Accounted',
+      frequency: input.frequency,
     })
 
     let sendResult: Awaited<ReturnType<typeof email.sendEmail>>
@@ -301,7 +368,7 @@ async function sendDigestForCompany(
 type ClaimOutcome = 'acquired' | 'duplicate' | 'error'
 
 /**
- * Acquire the once-per-day send claim. The insert (delivery_status
+ * Acquire the once-per-period send claim. The insert (delivery_status
  * 'pending') is made atomic by the partial unique index on
  * (user_id, reference_id) for this notification_type; the loser of two
  * overlapping runs gets 23505. A 'pending' claim whose sent_at lease is
@@ -387,7 +454,9 @@ export function buildDigestEmail(input: {
   counts: DigestCounts
   baseUrl: string
   appName: string
+  frequency?: DigestFrequency
 }): DigestEmailContent {
+  const frequency = input.frequency ?? 'daily'
   const inCompany = input.companyName ? ` i ${input.companyName}` : ''
   const subject = `Nytt att bokföra${inCompany}`
 
@@ -407,7 +476,11 @@ export function buildDigestEmail(input: {
     )
   }
 
-  const intro = `Sedan igår har det kommit in nytt${inCompany ? ` till ${input.companyName}` : ''}:`
+  const intro =
+    frequency === 'weekly'
+      ? `Sedan förra veckan har det kommit in nytt${input.companyName ? ` till ${input.companyName}` : ''}:`
+      : `Sedan igår har det kommit in nytt${input.companyName ? ` till ${input.companyName}` : ''}:`
+  const cadenceLabel = frequency === 'weekly' ? 'veckovis sammanfattning' : 'daglig sammanfattning'
   const text = [
     intro,
     '',
@@ -415,14 +488,14 @@ export function buildDigestEmail(input: {
     '',
     `Logga in för att bokföra: ${input.baseUrl}`,
     '',
-    `Du får det här mejlet för att du har slagit på daglig sammanfattning i ${input.appName}. Stäng av under Inställningar > Aviseringar.`,
+    `Du får det här mejlet för att du har slagit på ${cadenceLabel} i ${input.appName}. Stäng av under Inställningar > Aviseringar.`,
   ].join('\n')
 
   const html = [
     `<p>${escapeHtml(intro)}</p>`,
     `<ul>${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`,
     `<p><a href="${escapeHtml(input.baseUrl)}">Logga in för att bokföra</a></p>`,
-    `<p style="color:#6b7280;font-size:12px">Du får det här mejlet för att du har slagit på daglig sammanfattning i ${escapeHtml(input.appName)}. Stäng av under Inställningar &gt; Aviseringar.</p>`,
+    `<p style="color:#6b7280;font-size:12px">Du får det här mejlet för att du har slagit på ${escapeHtml(cadenceLabel)} i ${escapeHtml(input.appName)}. Stäng av under Inställningar &gt; Aviseringar.</p>`,
   ].join('')
 
   return { subject, text, html }
@@ -476,7 +549,7 @@ async function resolveCompanyMemberEmails(
 
 /**
  * notification_log.reference_id is a uuid column, but the digest's natural
- * key is (company, date). Same deterministic SHA-256-to-uuid mapping as the
+ * key is (company, period). Same deterministic SHA-256-to-uuid mapping as the
  * kvittens notification.
  */
 function toReferenceUuid(referenceKey: string): string {
@@ -494,3 +567,31 @@ function sanitizeHeaderText(input: string): string {
   return input.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+function normalizeFrequency(raw: string | null | undefined): DigestFrequency {
+  return raw === 'weekly' ? 'weekly' : 'daily'
+}
+
+/** Exported for tests. Monday in Europe/Stockholm. */
+export function isMondayStockholm(now: Date): boolean {
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Stockholm',
+    weekday: 'short',
+  }).format(now)
+  return weekday === 'Mon'
+}
+
+/**
+ * ISO week key (YYYY-Www) for the Stockholm calendar date of `now`.
+ * Exported for tests.
+ */
+export function stockholmIsoWeekPeriodKey(now: Date): string {
+  const ymd = todayIsoStockholm(now)
+  const [year, month, day] = ymd.split('-').map(Number)
+  const utc = new Date(Date.UTC(year, month - 1, day))
+  const dayNum = utc.getUTCDay() || 7
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum)
+  const weekYear = utc.getUTCFullYear()
+  const yearStart = new Date(Date.UTC(weekYear, 0, 1))
+  const weekNo = Math.ceil((((utc.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${weekYear}-W${String(weekNo).padStart(2, '0')}`
+}

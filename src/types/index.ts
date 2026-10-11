@@ -3047,6 +3047,9 @@ export interface Deadline {
 // Push Notification Types
 // ============================================================
 
+/** Cadence for the opted-in bookkeeping digest email. */
+export type EmailDigestFrequency = 'daily' | 'weekly'
+
 // Notification settings per user
 export interface NotificationSettings {
   id: string
@@ -3064,6 +3067,8 @@ export interface NotificationSettings {
   receipt_matched_enabled: boolean
   missing_underlag_enabled: boolean
   email_digest_enabled: boolean
+  /** Cadence when email_digest_enabled: daily (24h) or weekly (Mondays, 7d). */
+  email_digest_frequency: EmailDigestFrequency
   created_at: string
   updated_at: string
 }

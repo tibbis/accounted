@@ -105,7 +105,7 @@ export async function readNotificationSettings(
  * 3. Check duplicate via notification_log
  * 4. Get user's push subscriptions
  * 5. Send via web-push
- * 6. Log to notification_log
+ * 6. Log to notification_log only when at least one endpoint accepted
  * 7. Disable gone subscriptions (410)
  *
  * Returns { sent: boolean, reason?: string }
@@ -156,8 +156,19 @@ export async function sendNotificationToUser(
     // 5. Send
     const result = await sendPushToMultiple(subscriptions, payload)
 
-    // 6. Log
-    await logNotification(supabase, userId, notificationType, referenceId, daysBefore)
+    // 6. Log only a real web-push accept. A failed send used to insert
+    // delivery_status 'sent' anyway, so email fallbacks could not tell
+    // "PWA landed" from "we tried".
+    if (result.successful > 0) {
+      await logNotification(
+        supabase,
+        userId,
+        notificationType,
+        referenceId,
+        daysBefore,
+        payload.data?.companyId ?? null
+      )
+    }
 
     // 7. Cleanup gone subscriptions
     if (result.goneSubscriptions.length > 0) {
@@ -334,7 +345,8 @@ async function logNotification(
   userId: string,
   notificationType: NotificationType,
   referenceId: string,
-  daysBefore: number
+  daysBefore: number,
+  companyId: string | null
 ): Promise<void> {
   await supabase.from('notification_log').insert({
     user_id: userId,
@@ -342,6 +354,7 @@ async function logNotification(
     reference_id: referenceId,
     days_before: daysBefore,
     delivery_status: 'sent',
+    ...(companyId ? { company_id: companyId } : {}),
   })
 }
 

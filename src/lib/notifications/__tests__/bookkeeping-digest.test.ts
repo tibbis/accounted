@@ -19,10 +19,15 @@ vi.mock('@/lib/branding/service', () => ({
   getBranding: () => ({ appUrl: 'https://app.testbrand.example' }),
 }))
 
-import { runBookkeepingDigest, buildDigestEmail } from '../bookkeeping-digest'
+import {
+  runBookkeepingDigest,
+  buildDigestEmail,
+  isMondayStockholm,
+  stockholmIsoWeekPeriodKey,
+} from '../bookkeeping-digest'
 
 interface TableFixture {
-  optedIn?: Array<{ user_id: string }>
+  optedIn?: Array<{ user_id: string; email_digest_frequency?: 'daily' | 'weekly' }>
   members?: Array<{ user_id: string; company_id: string }>
   txCount?: number
   inboxCount?: number
@@ -30,6 +35,8 @@ interface TableFixture {
   claimError?: { code?: string; message: string } | null
   /** Row returned when acquireClaim inspects an existing claim after 23505. */
   existingClaim?: { id: string; delivery_status: string; sent_at: string | null } | null
+  /** Successful PWA row for the inbox-overlap skip. */
+  pushDelivered?: boolean
   /** Whether the stale-takeover lease UPDATE wins (returns the row). */
   leaseWon?: boolean
 }
@@ -62,7 +69,15 @@ function makeSupabase(fx: TableFixture) {
   const from = (table: string) => {
     const builder: Record<string, unknown> = {}
     const finish = () => {
-      if (table === 'notification_settings') return { data: fx.optedIn ?? [], error: null }
+      if (table === 'notification_settings') {
+        return {
+          data: (fx.optedIn ?? []).map((row) => ({
+            user_id: row.user_id,
+            email_digest_frequency: row.email_digest_frequency ?? 'daily',
+          })),
+          error: null,
+        }
+      }
       if (table === 'company_members') return { data: fx.members ?? [], error: null }
       if (table === 'profiles') {
         const ids = new Set((fx.members ?? []).map((m) => m.user_id))
@@ -108,11 +123,13 @@ function makeSupabase(fx: TableFixture) {
       is: () => builder,
       order: () => builder,
       range: () => builder,
+      limit: () => builder,
       maybeSingle: async () => {
         if (table === 'companies') {
           return { data: { name: fx.companyName ?? 'Testbolaget AB' }, error: null }
         }
         if (table === 'notification_log') {
+          if (fx.pushDelivered) return { data: { id: 'pwa-1' }, error: null }
           return { data: fx.existingClaim ?? null, error: null }
         }
         return { data: null, error: null }
@@ -291,6 +308,35 @@ describe('runBookkeepingDigest', () => {
     ).toBe(false)
   })
 
+  it('skips an inbox-only digest when PWA already accepted the same arrival', async () => {
+    const { supabase } = makeSupabase({
+      ...oneUserOneCompany,
+      txCount: 0,
+      inboxCount: 2,
+      pushDelivered: true,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, NOW)
+
+    expect(summary.skippedPushDelivered).toBe(1)
+    expect(summary.sent).toBe(0)
+    expect(mockSendEmail).not.toHaveBeenCalled()
+  })
+
+  it('still mails when new bank txs arrived even if an inbox PWA landed', async () => {
+    const { supabase } = makeSupabase({
+      ...oneUserOneCompany,
+      txCount: 2,
+      inboxCount: 1,
+      pushDelivered: true,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, NOW)
+
+    expect(summary.sent).toBe(1)
+    expect(mockSendEmail).toHaveBeenCalledTimes(1)
+  })
+
   it('sends to every opted-in member of the same company', async () => {
     const { supabase } = makeSupabase({
       optedIn: [{ user_id: 'u1' }, { user_id: 'u2' }],
@@ -321,6 +367,81 @@ describe('runBookkeepingDigest', () => {
     expect(mail.subject).not.toMatch(/[\r\n]/)
     expect(mail.subject).toBe('Nytt att bokföra i Evil AB Bcc: attacker@testbrand.example')
   })
+
+  it('skips weekly opt-ins on non-Mondays', async () => {
+    const tuesday = new Date('2026-09-01T05:45:00Z')
+    expect(isMondayStockholm(tuesday)).toBe(false)
+    const { supabase } = makeSupabase({
+      optedIn: [{ user_id: 'u1', email_digest_frequency: 'weekly' }],
+      members: [{ user_id: 'u1', company_id: 'c1' }],
+      txCount: 5,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, tuesday)
+
+    expect(summary.skippedNotScheduled).toBe(1)
+    expect(summary.sent).toBe(0)
+    expect(mockSendEmail).not.toHaveBeenCalled()
+  })
+
+  it('sends weekly digests on Mondays with the weekly copy', async () => {
+    expect(isMondayStockholm(NOW)).toBe(true)
+    const { supabase } = makeSupabase({
+      optedIn: [{ user_id: 'u1', email_digest_frequency: 'weekly' }],
+      members: [{ user_id: 'u1', company_id: 'c1' }],
+      txCount: 3,
+      inboxCount: 0,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, NOW)
+
+    expect(summary.sent).toBe(1)
+    const mail = mockSendEmail.mock.calls[0][0]
+    expect(mail.text).toContain('Sedan förra veckan')
+    expect(mail.text).toContain('veckovis sammanfattning')
+  })
+
+  it('still sends daily digests on non-Mondays when a weekly peer is skipped', async () => {
+    const tuesday = new Date('2026-09-01T05:45:00Z')
+    const { supabase } = makeSupabase({
+      optedIn: [
+        { user_id: 'u1', email_digest_frequency: 'daily' },
+        { user_id: 'u2', email_digest_frequency: 'weekly' },
+      ],
+      members: [
+        { user_id: 'u1', company_id: 'c1' },
+        { user_id: 'u2', company_id: 'c1' },
+      ],
+      txCount: 2,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, tuesday)
+
+    expect(summary.sent).toBe(1)
+    expect(summary.skippedNotScheduled).toBe(1)
+    expect(mockSendEmail.mock.calls.map((c) => c[0].to)).toEqual(['u1@testbrand.example'])
+  })
+
+  it('does not suppress a weekly inbox-only digest after a mid-week PWA', async () => {
+    const { supabase } = makeSupabase({
+      optedIn: [{ user_id: 'u1', email_digest_frequency: 'weekly' }],
+      members: [{ user_id: 'u1', company_id: 'c1' }],
+      txCount: 0,
+      inboxCount: 2,
+      pushDelivered: true,
+    })
+
+    const summary = await runBookkeepingDigest(supabase, NOW)
+
+    expect(summary.sent).toBe(1)
+    expect(summary.skippedPushDelivered).toBe(0)
+  })
+})
+
+describe('stockholmIsoWeekPeriodKey', () => {
+  it('returns a stable ISO week key for Stockholm Mondays', () => {
+    expect(stockholmIsoWeekPeriodKey(NOW)).toBe('2026-W36')
+  })
 })
 
 describe('buildDigestEmail', () => {
@@ -344,6 +465,19 @@ describe('buildDigestEmail', () => {
     expect(many.subject).toBe('Nytt att bokföra')
     expect(many.text).toContain('4 nya banktransaktioner att bokföra')
     expect(many.text).toContain('2 nya underlag i inkorgen')
+  })
+
+  it('uses weekly wording when frequency is weekly', () => {
+    const mail = buildDigestEmail({
+      companyName: 'Testbolaget AB',
+      counts: { newTransactions: 2, newInboxItems: 0 },
+      baseUrl: 'https://app.testbrand.example',
+      appName: 'Accounted',
+      frequency: 'weekly',
+    })
+    expect(mail.text).toContain('Sedan förra veckan')
+    expect(mail.text).toContain('veckovis sammanfattning')
+    expect(mail.text).not.toContain('Sedan igår')
   })
 
   it('omits the zero category', () => {
