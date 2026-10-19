@@ -162,7 +162,7 @@ export const companyCurrentResource: McpResource = {
         .limit(5),
 
       // The forwarding address: a document mailed here walks the same pipe as an upload.
-      supabase.from('company_inboxes').select('local_part').eq('company_id', companyId).eq('status', 'active').maybeSingle(),
+      supabase.from('company_inboxes').select('local_part').eq('company_id', companyId).eq('status', 'active').order('created_at', { ascending: false }).limit(1).maybeSingle(),
 
       // Arkiv phase 9e: the meter, read in the same batch; shown only inside the rollout.
       supabase.from('arkiv_usage_daily').select('activity, units').eq('company_id', companyId).gte('day', usageSince(USAGE_WINDOW_DAYS)),

@@ -237,6 +237,8 @@ async function fetchInboxAddress(supabase: SupabaseClient, companyId: string): P
     .select('local_part')
     .eq('company_id', companyId)
     .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(1)
     .maybeSingle()
   if (error || !data) return null
   return `${(data as { local_part: string }).local_part}@${domain}`

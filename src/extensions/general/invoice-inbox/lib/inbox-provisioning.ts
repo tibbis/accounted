@@ -9,11 +9,17 @@ export async function getActiveInbox(
   supabase: SupabaseClient,
   companyId: string
 ): Promise<CompanyInbox | null> {
+  // One company can have more than one active address (a renamed inbox
+  // kept beside the new one). maybeSingle errors on two rows and the
+  // Underlag page then cannot tell whether an address exists. The newest
+  // address is the one shown; inbound mail still resolves every local_part.
   const { data, error } = await supabase
     .from('company_inboxes')
     .select('*')
     .eq('company_id', companyId)
     .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(1)
     .maybeSingle()
 
   if (error) throw new Error(`Failed to load inbox: ${error.message}`)

@@ -33,7 +33,7 @@ export const arkivMissingResource: McpResource = {
         .eq('status', 'open')
         .order('first_seen_at', { ascending: true })
         .limit(50),
-      supabase.from('company_inboxes').select('local_part').eq('company_id', companyId).eq('status', 'active').maybeSingle(),
+      supabase.from('company_inboxes').select('local_part').eq('company_id', companyId).eq('status', 'active').order('created_at', { ascending: false }).limit(1).maybeSingle(),
     ])
     if (findings.error) throw new Error(`findings fetch failed: ${findings.error.message}`)
     const domain = process.env.RESEND_INBOUND_DOMAIN

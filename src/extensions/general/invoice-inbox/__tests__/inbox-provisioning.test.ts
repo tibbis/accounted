@@ -14,7 +14,7 @@ describe('composeInboxAddress', () => {
 
 describe('getActiveInbox', () => {
   it('returns the active inbox row', async () => {
-    const { supabase, enqueue } = createQueuedMockSupabase()
+    const { supabase, enqueue, findCall } = createQueuedMockSupabase()
     const row = {
       id: 'inbox-1',
       company_id: 'company-1',
@@ -29,6 +29,8 @@ describe('getActiveInbox', () => {
 
     const result = await getActiveInbox(supabase as never, 'company-1')
     expect(result).toEqual(row)
+    expect(findCall('company_inboxes', 'order')).toEqual(['created_at', { ascending: false }])
+    expect(findCall('company_inboxes', 'limit')).toEqual([1])
   })
 
   it('returns null when no active inbox exists', async () => {
