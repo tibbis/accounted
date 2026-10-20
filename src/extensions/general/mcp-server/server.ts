@@ -10477,8 +10477,11 @@ export const tools: McpTool[] = [
       const customer = invoice.customer as Customer
       if (!customer.email) throw new Error('Customer has no email address. Update customer details first.')
 
+      // Drafts have no F-number until send assigns one; never put the string
+      // "null" in the pending-queue title.
+      const invoiceLabel = invoice.invoice_number ?? 'utkast'
       return stagePendingOperation(supabase, companyId, userId, 'send_invoice',
-        `Skicka: ${invoice.invoice_number} till ${customer.email}`,
+        `Skicka: ${invoiceLabel} till ${customer.email}`,
         { invoice_id: invoiceId },
         {
           invoice_number: invoice.invoice_number,

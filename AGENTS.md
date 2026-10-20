@@ -24,6 +24,51 @@ These apply to Codex sessions run by Emil (Mattsson) and were added 2026-07-21; 
 - **Never write directly to the `main` branch without Emil's explicit approval.** Do not commit, push, merge, or otherwise update `main`; use a feature branch unless Emil clearly approves the specific main-branch write.
 - **Never open, start, or run Docker locally.** Do not run Docker commands or commands that start Docker-managed services.
 
+The Emil / `erp-base` rules above do **not** apply to a separate self-hosted fork database (for example an Oracle or Docker Supabase stack that is not the hosted `erp-base` project). For those, follow [Fork / self-host: migrations sync](#fork--self-host-migrations-sync) when the operator asks to sync or when schema drift is blocking the live app.
+
+## Fork / self-host: migrations sync
+
+A git merge of `erp-mafia/accounted` into a fork, and a typical self-host app deploy (`docker compose up --build`, image pull, `git pull` of the app), update **application code only**. They do **not** run `supabase/migrations/`. Schema drift is therefore the default failure mode after a fork sync: PostgREST answers with "Could not find the column/function/table in the schema cache", MCP tools fail, and booking/invoice paths break while the UI still looks current.
+
+`docs/SELF-HOSTING.md` covers a clean first install (bootstrap, then every file in order). This section is the **catch-up** path for a long-lived fork DB that already has data and may have no reliable `supabase_migrations.schema_migrations` history (or only a partial one).
+
+### When to run it
+
+- After merging upstream `main` into the fork, or after deploying a newer app image, when the operator asks to sync migrations / fix schema errors.
+- When live errors name missing columns, RPCs, or tables that exist in `supabase/migrations/` on the deployed revision.
+
+### Hard rules (same as `CLAUDE.md`)
+
+- Never edit an existing file under `supabase/migrations/`.
+- Never invent DDL that is not already in a committed migration: apply the repo SQL (or the remainder of a file after an already-applied `ADD COLUMN`).
+- Do not backfill a fake contiguous `schema_migrations` history from a half-applied DB: that lies to future `supabase db push` / branching. Prefer an operator log on the host (for example `~/accounted/ops/applied-migrations.log` with one `OK <filename>` line per successful file).
+- Keep local WIP out of the sync commit; stash before merge if needed.
+- Do not mass-apply every missing file blindly when the DB is not a clean prefix of the migration list: probe first, apply in dependency order, continue past independent failures, stop and investigate when a failure is mid-chain (SIE job backbone, bank booking locks, assets).
+
+### Procedure
+
+1. **Code sync first.** On the fork checkout: `git fetch upstream main` (and `origin`), merge or rebase per the fork's practice, push the fork remote if the operator asked to ship. Confirm the self-host checkout is on the same app revision the container runs (`git rev-parse HEAD` on the host vs deploy).
+2. **Inventory drift.** Against the live Postgres (usually `docker exec … psql` into `supabase-db`), probe for objects that migrations in the deployed tree create: tables (`to_regclass`), functions (`to_regprocedure` / `pg_proc`), and columns (`information_schema.columns`). A practical window is "migrations newer than the oldest missing sentinel" (recently: roughly `20260911` onward when SIE/inbox/invoice columns were absent while later columns like `email_digest_frequency` already existed).
+3. **Apply missing files in filename order**, from the host checkout that matches the running app:
+
+   ```bash
+   # Example shape; keep a durable OK/FAIL log on the host.
+   for f in supabase/migrations/<needed>.sql; do
+     docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 <"$f" \
+       && echo "OK $(basename "$f")" >> ops/applied-migrations.log \
+       || echo "FAIL $(basename "$f")" >> ops/applied-migrations.log
+     docker exec supabase-db psql -U postgres -d postgres -c "NOTIFY pgrst, 'reload schema';"
+   done
+   ```
+
+4. **Partial files.** If an earlier hand-fix already added some columns (`ADD COLUMN` without `IF NOT EXISTS`), apply the rest of that migration (functions, indexes, grants) rather than re-running the whole file and aborting. Prefer `CREATE OR REPLACE` only where the migration itself uses it or the object already exists and the file uses bare `CREATE FUNCTION`.
+5. **Verify.** Reload PostgREST (`NOTIFY pgrst, 'reload schema'`). Re-hit the failing path: MCP `accounted_get_agent_briefing`, a report that uses `acquire_sie_period_read`, create/send invoice, categorize. Confirm `is_balanced` / HTTP 200 rather than schema-cache errors.
+6. **Record.** Append a one-line note to `DECISIONS.md` only when the catch-up path itself changed (new host log location, new probe script). Per-file apply noise stays in the host log, not in git.
+
+### What "done" means for a fork sync
+
+Git is merged **and** the live DB has the migrations the new code needs for the workflows in use. Shipping an app image without the SQL catch-up is an incomplete sync. Remaining failures that need an older dependency (for example a column added in an earlier unapplied file) are listed to the operator with the blocking migration name; do not leave the session claiming the fork is synced while schema-cache errors remain on the reported paths.
+
 ## Path-specific guidance (`.claude/rules/`)
 
 The files below are the shared source of truth for path-specific guidance. Claude Code loads them through their `paths` frontmatter. Codex does not interpret that frontmatter, so before reading, editing, reviewing, or otherwise working with a matching path, read and follow the listed rule. Do not duplicate the rule bodies here.
