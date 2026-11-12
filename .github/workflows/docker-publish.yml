@@ -213,9 +213,10 @@ jobs:
   # tibbis fork: accounting.helle.cc now runs on Vercel Hobby + Supabase Free
   # (OCI Ampere was out of capacity). Push to main builds on the runner
   # (Hobby OOMs on Vercel's build machine) and deploys --prebuilt. Secrets:
-  # VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID. Crons and maxDuration>300
-  # are Hobby-illegal, so this job strips them before upload. Extensions are
-  # slimmed to the live set so the 7GB runner can finish the Next 16 build.
+  # VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID, VERCEL_ENV_PRODUCTION.
+  # Crons and maxDuration>300 are Hobby-illegal, so this job strips them
+  # before upload. Extensions are slimmed to the live set so the 7GB runner
+  # can finish the Next 16 build.
   deploy-vercel:
     name: Deploy Vercel
     if: github.repository == 'tibbis/accounted' && github.ref == 'refs/heads/main'
@@ -275,8 +276,23 @@ jobs:
           Path('vercel.json').write_text(json.dumps(vercel, indent=2) + '\n')
           PY
 
-      - name: Pull production env
-        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      # vercel pull redacts Secret values as "[SENSITIVE]", which is truthy and
+      # breaks import-time validators (web-push VAPID). Pull only for
+      # .vercel/project.json, then overwrite env from VERCEL_ENV_PRODUCTION
+      # (full production dotenv mirrored from a working local pull).
+      - name: Link project + restore production env
+        env:
+          VERCEL_ENV_PRODUCTION: ${{ secrets.VERCEL_ENV_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          test -n "${VERCEL_ENV_PRODUCTION:-}"
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          printf '%s\n' "$VERCEL_ENV_PRODUCTION" > .vercel/.env.production.local
+          # Guard: never build with redacted placeholders.
+          if grep -q '\[SENSITIVE\]' .vercel/.env.production.local; then
+            echo 'VERCEL_ENV_PRODUCTION still contains [SENSITIVE] placeholders' >&2
+            exit 1
+          fi
 
       - name: Build (prebuilt)
         run: NODE_OPTIONS=--max-old-space-size=6144 vercel build --prod --token="$VERCEL_TOKEN"
