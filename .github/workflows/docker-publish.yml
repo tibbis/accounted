@@ -253,6 +253,7 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           import json
+          import shutil
           from pathlib import Path
           # Live helle extensions (full set OOMs the 7GB runner).
           Path('extensions.config.json').write_text(
@@ -274,6 +275,15 @@ jobs:
           vercel['crons'] = []
           vercel['buildCommand'] = 'NODE_OPTIONS=--max-old-space-size=6144 npm run build'
           Path('vercel.json').write_text(json.dumps(vercel, indent=2) + '\n')
+          # Hobby caps Serverless Functions at 12. Prefer a static robots.txt
+          # over app/robots.ts (saves a .func) and drop unused community cron
+          # so Linux CI stays under the same budget as a local Mac build.
+          Path('src/app/robots.ts').unlink(missing_ok=True)
+          Path('public').mkdir(exist_ok=True)
+          Path('public/robots.txt').write_text('User-Agent: *\nDisallow: /\n')
+          community = Path('src/app/api/community')
+          if community.exists():
+            shutil.rmtree(community)
           PY
 
       # vercel pull redacts Secret values as "[SENSITIVE]", which is truthy and
@@ -297,11 +307,12 @@ jobs:
       - name: Build (prebuilt)
         run: NODE_OPTIONS=--max-old-space-size=6144 vercel build --prod --token="$VERCEL_TOKEN"
 
-      - name: Cap function maxDuration for Hobby (<=300)
+      - name: Cap function maxDuration + enforce Hobby function budget
         run: |
           set -euo pipefail
           python3 <<'PY'
           import json
+          import shutil
           from pathlib import Path
           root = Path('.vercel/output/functions')
           if not root.exists():
@@ -315,6 +326,59 @@ jobs:
               p.write_text(json.dumps(data))
               capped += 1
           print(f'capped_maxDuration_files={capped}')
+
+          # Unique serverless targets only (symlinks share a target and do not
+          # count toward Hobby's 12-function cap the same way).
+          real_funcs = sorted(
+            p for p in root.rglob('*.func')
+            if p.is_dir() and not p.is_symlink()
+          )
+          print('real_funcs_before=', len(real_funcs))
+          for p in real_funcs:
+            print(' ', p.relative_to(root))
+
+          # Prefer dropping these if Linux CI still emits extras vs Mac.
+          expendable = [
+            'robots.txt.rsc.func',
+            'api/community/sync/cron.func',
+            'api/arkiv/facts/derive.func',
+            'api/invoices/[id]/peppol/send.func',
+          ]
+          HOBBY_MAX = 12
+          while len(real_funcs) > HOBBY_MAX and expendable:
+            rel = expendable.pop(0)
+            target = root.joinpath(*rel.split('/'))
+            if target.exists():
+              shutil.rmtree(target)
+              print(f'removed_expendable={rel}')
+            real_funcs = sorted(
+              p for p in root.rglob('*.func')
+              if p.is_dir() and not p.is_symlink()
+            )
+
+          # Drop any dangling symlinks that pointed at removed funcs.
+          for p in root.rglob('*.func'):
+            if p.is_symlink() and not p.resolve().exists():
+              p.unlink()
+              print(f'removed_dangling_symlink={p.relative_to(root)}')
+
+          real_funcs = sorted(
+            p for p in root.rglob('*.func')
+            if p.is_dir() and not p.is_symlink()
+          )
+          print('real_funcs_after=', len(real_funcs))
+          for p in real_funcs:
+            print(' ', p.relative_to(root))
+          if len(real_funcs) > HOBBY_MAX:
+            raise SystemExit(
+              f'Hobby allows {HOBBY_MAX} serverless functions; have {len(real_funcs)}'
+            )
+
+          # Deploy-time cron validation also reads output config.
+          cfg_path = Path('.vercel/output/config.json')
+          cfg = json.loads(cfg_path.read_text())
+          cfg['crons'] = []
+          cfg_path.write_text(json.dumps(cfg))
           PY
 
       - name: Deploy prebuilt to production
