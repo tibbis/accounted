@@ -210,56 +210,108 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # tibbis fork: do not push to ghcr.io/erp-mafia/gnubok. Rebuild the live
-  # Ampere box from origin/main instead (same compose overlay as a manual
-  # deploy). Host key is pinned; SSH user/key/host live in repo secrets.
-  deploy-oracle:
-    name: Deploy Oracle
-    if: github.repository == 'tibbis/accounted'
+  # tibbis fork: accounting.helle.cc now runs on Vercel Hobby + Supabase Free
+  # (OCI Ampere was out of capacity). Push to main builds on the runner
+  # (Hobby OOMs on Vercel's build machine) and deploys --prebuilt. Secrets:
+  # VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID. Crons and maxDuration>300
+  # are Hobby-illegal, so this job strips them before upload. Extensions are
+  # slimmed to the live set so the 7GB runner can finish the Next 16 build.
+  deploy-vercel:
+    name: Deploy Vercel
+    if: github.repository == 'tibbis/accounted' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - name: Rebuild accounting.helle.cc from this commit
-        env:
-          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
-          ORACLE_USER: ${{ secrets.ORACLE_USER }}
-          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@65.14.0
+
+      - name: Require Vercel secrets
         run: |
           set -euo pipefail
-          test -n "${ORACLE_HOST:-}"
-          test -n "${ORACLE_USER:-}"
-          test -n "${ORACLE_SSH_KEY:-}"
-          install -d -m 700 ~/.ssh
-          install -m 600 /dev/null ~/.ssh/id_ed25519
-          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/id_ed25519
-          printf '%s\n' \
-            '79.76.51.249 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+XyhzzRHB+A1a4jVa6SmFUDyBLOqMMjDG7aZxnGxO' \
-            > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
-          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes \
-            "${ORACLE_USER}@${ORACLE_HOST}" \
-            'set -euo pipefail
-             cd ~/accounted
-             git fetch origin main
-             # Incoming paths must match origin/main so ff-only can apply.
-             # Host-only edits (Caddyfile Location rewrite, compose override)
-             # stay because they are not in the incoming set.
-             git diff --name-only HEAD origin/main | while IFS= read -r f; do
-               [ -z "$f" ] && continue
-               if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-                 git checkout -- "$f"
-               elif [ -e "$f" ]; then
-                 rm -f -- "$f"
-               fi
-             done
-             git pull --ff-only origin main
-             export COMPOSE_FILE=docker-compose.yml:docker/compose.build.yml:docker/compose.caddy.yml:docker-compose.override.yml
-             docker compose up -d --build
-             docker compose exec -T app wget -qO- http://127.0.0.1:3000/api/health
-             echo
-             git rev-parse --short HEAD'
+          test -n "${VERCEL_TOKEN:-}"
+          test -n "${VERCEL_ORG_ID:-}"
+          test -n "${VERCEL_PROJECT_ID:-}"
+
+      - name: Prepare Hobby-safe build inputs
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+          # Live helle extensions (full set OOMs the 7GB runner).
+          Path('extensions.config.json').write_text(
+            json.dumps({
+              '$schema': './src/extensions/extensions.schema.json',
+              'extensions': [
+                'calendar',
+                'email',
+                'mcp-server',
+                'invoice-inbox',
+                'document-extraction',
+                'enable-banking',
+                'skatteverket',
+                'push-notifications',
+              ],
+            }, indent=2) + '\n'
+          )
+          vercel = json.loads(Path('vercel.json').read_text())
+          vercel['crons'] = []
+          vercel['buildCommand'] = 'NODE_OPTIONS=--max-old-space-size=6144 npm run build'
+          Path('vercel.json').write_text(json.dumps(vercel, indent=2) + '\n')
+          PY
+
+      - name: Pull production env
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build (prebuilt)
+        run: NODE_OPTIONS=--max-old-space-size=6144 vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Cap function maxDuration for Hobby (<=300)
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('.vercel/output/functions')
+          if not root.exists():
+            raise SystemExit('missing .vercel/output/functions')
+          capped = 0
+          for p in root.rglob('.vc-config.json'):
+            data = json.loads(p.read_text())
+            md = data.get('maxDuration')
+            if isinstance(md, int) and md > 300:
+              data['maxDuration'] = 300
+              p.write_text(json.dumps(data))
+              capped += 1
+          print(f'capped_maxDuration_files={capped}')
+          PY
+
+      - name: Deploy prebuilt to production
+        run: vercel deploy --prebuilt --prod --yes --archive=tgz --token="$VERCEL_TOKEN" --scope personal-tibbe
+
+      - name: Smoke accounting.helle.cc
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' https://accounting.helle.cc/login)
+          test "$code" = "200"
+          robots=$(curl -sS https://accounting.helle.cc/robots.txt)
+          printf '%s\n' "$robots" | grep -q 'Disallow: /'
+          echo "smoke ok (login=$code)"
 
   merge:
     name: Merge, sign and scan

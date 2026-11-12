@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import type { User } from '@supabase/supabase-js'
 import { NextResponse, type NextRequest } from 'next/server'
+import { isSelfHosted } from '@/lib/env/public-flags'
 import { createLogger } from '@/lib/logger'
 import { shouldExposeTimingHeaders } from '@/lib/observability/timing-headers'
 import {
@@ -345,6 +346,13 @@ async function updateSessionInner(
     return supabaseResponse
   }
 
+  // robots.txt must stay anonymous: crawlers never hold a session, and a
+  // bounce to /login made self-host instances look "open" (login HTML) while
+  // never serving Disallow. Always public; the route itself decides policy.
+  if (pathname === '/robots.txt') {
+    return supabaseResponse
+  }
+
   // Public agent-discovery + API docs surfaces. /llms.txt and /llms-full.txt
   // exist FOR anonymous consumers (the llms.txt convention targets logged-out
   // crawlers and IDE agents), and /docs is the public API documentation the
@@ -353,11 +361,14 @@ async function updateSessionInner(
   // /login, which silently broke agent discovery on the hosted product
   // (openapi.json only escaped because the proxy matcher skips .json paths).
   // Logged-in users fall through to the same content: no redirect either way.
+  // Self-host skips this: those surfaces would otherwise advertise a private
+  // books install to crawlers and IDE agents.
   if (
-    pathname === '/llms.txt' ||
-    pathname === '/llms-full.txt' ||
-    pathname === '/docs' ||
-    pathname.startsWith('/docs/')
+    !isSelfHosted() &&
+    (pathname === '/llms.txt' ||
+      pathname === '/llms-full.txt' ||
+      pathname === '/docs' ||
+      pathname.startsWith('/docs/'))
   ) {
     return supabaseResponse
   }

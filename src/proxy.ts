@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { usesForbiddenWhiteLabelBackend } from '@/lib/domains/production-white-label-backend'
+import { isSelfHosted } from '@/lib/env/public-flags'
 import { createLogger } from '@/lib/logger'
 import {
   CSP_NONCE_HEADER,
@@ -104,6 +105,11 @@ export async function proxy(request: NextRequest) {
   // so this is the only one the browser receives.
   if (contentSecurityPolicy) {
     response.headers.set('Content-Security-Policy', contentSecurityPolicy)
+  }
+  // Private books installs must not enter search / AI crawls. Hosted keeps
+  // the default (no X-Robots-Tag) so the product site stays discoverable.
+  if (isSelfHosted()) {
+    response.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noai, noimageai')
   }
   return response
 }

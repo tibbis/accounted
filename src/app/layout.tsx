@@ -131,6 +131,12 @@ export async function generateMetadata(): Promise<Metadata> {
     title: appName,
     description: b.appDescription,
     manifest: "/manifest.webmanifest",
+    // Self-host and personal instances are private books, not a public
+    // marketing surface. Hosted Accounted keeps the default (indexable)
+    // so docs/llms discovery still works for the product site.
+    ...(isSelfHosted()
+      ? { robots: { index: false, follow: false, googleBot: { index: false, follow: false } } }
+      : {}),
     appleWebApp: {
       capable: true,
       statusBarStyle: "default",
