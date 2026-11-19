@@ -3,12 +3,14 @@ import { z } from 'zod'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Extension, ExtensionContext } from '@/lib/extensions/types'
 import { registerEmailService } from '@/lib/email/service'
+import { registerSenderDomainChecker } from '@/lib/email/sender-domain-check'
 import { createServiceClientNoCookies } from '@/lib/auth/api-keys'
 import { createLogger } from '@/lib/logger'
 import { CAPABILITY } from '@/lib/entitlements/keys'
 import { requireCapability } from '@/lib/entitlements/has-capability'
 import { isSandboxCompany } from '@/lib/sandbox/guard'
-import { createEmailService } from './lib/email-provider'
+import { createEmailService, resolveEmailProvider } from './lib/email-provider'
+import { resendSenderDomainVerdict } from './lib/verified-sending-domains'
 import {
   ResendDeliverySignatureError,
   isDeliveryWebhookConfigured,
@@ -33,7 +35,14 @@ import {
 // Register the implementation for this deployment immediately when the
 // extension is loaded: Resend (hosted default) or SMTP (EMAIL_PROVIDER=smtp,
 // the sovereign self-host path). See lib/email-provider.ts for precedence.
-registerEmailService(createEmailService())
+const emailProvider = resolveEmailProvider()
+registerEmailService(createEmailService(emailProvider))
+// Resend: a company From is accepted only when that domain is verified in
+// this account. SMTP has no Resend domain list; the relay accepts or
+// rejects the address itself, so the settings check does not block it.
+registerSenderDomainChecker(
+  emailProvider === 'resend' ? resendSenderDomainVerdict : async () => 'verified',
+)
 
 const log = createLogger('email-delivery-webhook')
 

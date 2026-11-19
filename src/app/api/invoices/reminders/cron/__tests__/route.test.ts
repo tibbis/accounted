@@ -31,6 +31,8 @@ vi.mock('@/lib/invoices/reminder-processor', () => ({
   processOverdueReminders: h.processOverdueReminders,
 }))
 
+vi.mock('@/lib/init', () => ({ ensureInitialized: vi.fn() }))
+
 vi.mock('@/lib/email/service', () => ({
   getEmailService: () => ({ isConfigured: h.isConfigured }),
 }))

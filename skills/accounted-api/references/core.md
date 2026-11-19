@@ -456,6 +456,8 @@ Response `200`:
     invoice_late_fee_text: string | null,
     invoice_credit_terms_text: string | null,
     invoice_email_reply_to: string | null,
+    invoice_email_from_address: string | null,
+    invoice_email_from_name: string | null,
     invoice_primary_color: string | null,
     invoice_accent_color: string | null,
     invoice_font_family: string | null,
@@ -566,7 +568,7 @@ Example response `200`:
 **Partially update company settings (contact, invoicing, reminders, voucher series, toggles).**
 `scope:companies:write · risk:medium · idempotent · dry-run · reversible`
 
-Patches any subset of the non-legal company settings: contact and address, invoice payment details (bank account, Bankgiro, Plusgiro, Swish, IBAN/BIC, per-currency payment accounts), invoice numbering, layout and branding, invoice email texts and fixed copy recipients, reminders, voucher series, feature toggles and the vacation-year basis. Same rules as the settings page. Owner or admin only. Idempotent (mandatory Idempotency-Key). Dry-runnable.
+Patches any subset of the non-legal company settings: contact and address, invoice payment details (bank account, Bankgiro, Plusgiro, Swish, IBAN/BIC, per-currency payment accounts), invoice numbering, layout and branding, invoice email From, reply address, texts and fixed copy recipients, reminders, voucher series, feature toggles and the vacation-year basis. Same rules as the settings page. Owner or admin only. Idempotent (mandatory Idempotency-Key). Dry-runnable.
 
 **Use when:** The payment or contact details on invoices change, invoice texts or reminders should be adjusted, or a feature should be switched on or off.
 **Do not use for:** VAT, F-skatt, fiscal year, accounting method or share capital (PATCH /settings/tax-profile), the bookkeeping lock (PATCH /settings/bookkeeping-lock), payroll settings (PATCH /salary/settings). entity_type and org_number are fixed.
@@ -576,6 +578,7 @@ Patches any subset of the non-legal company settings: contact and address, invoi
 - contact_person is stored as default_our_reference: the default "Vår referens" on new invoices.
 - bankgiro and plusgiro must carry a valid Luhn check digit; null or empty string clears them.
 - invoice_email_texts only accepts the placeholders {fakturanummer} {kundnamn} {förnamn} {företag} {förfallodatum} {belopp}.
+- invoice_email_from_address is the From on invoice mail. Null uses the instance default with the company name as the display name. The domain must be verified with the email provider; an unverified domain is rejected (SETTINGS_INVOICE_FROM_DOMAIN_UNVERIFIED) and nothing is sent as another company.
 - reminder_days_level_1 < _2 < _3 must hold after the change (stored values fill in the ones not sent).
 - The booking engine reads default_voucher_series_per_source_type, not default_voucher_series: send the map to move bookings to another series.
 - salary_vacation_year_basis cannot change while open vacation balances exist.
@@ -636,6 +639,8 @@ Request body:
   invoice_email_cc_addresses?: string[] | null,
   invoice_email_bcc_addresses?: string[] | null,
   invoice_email_reply_to?: string | null,
+  invoice_email_from_address?: string | null,
+  invoice_email_from_name?: string | null,
   invoice_primary_color?: string,
   invoice_accent_color?: string,
   invoice_font_family?: "Helvetica" | "Times-Roman" | "Courier" | "Source Sans 3" | "Source Serif 4" | "Custom",
@@ -714,6 +719,8 @@ Response `200`:
     invoice_late_fee_text: string | null,
     invoice_credit_terms_text: string | null,
     invoice_email_reply_to: string | null,
+    invoice_email_from_address: string | null,
+    invoice_email_from_name: string | null,
     invoice_primary_color: string | null,
     invoice_accent_color: string | null,
     invoice_font_family: string | null,
@@ -887,6 +894,8 @@ Response `200`:
     invoice_late_fee_text: string | null,
     invoice_credit_terms_text: string | null,
     invoice_email_reply_to: string | null,
+    invoice_email_from_address: string | null,
+    invoice_email_from_name: string | null,
     invoice_primary_color: string | null,
     invoice_accent_color: string | null,
     invoice_font_family: string | null,
@@ -1091,6 +1100,8 @@ Response `200`:
     invoice_late_fee_text: string | null,
     invoice_credit_terms_text: string | null,
     invoice_email_reply_to: string | null,
+    invoice_email_from_address: string | null,
+    invoice_email_from_name: string | null,
     invoice_primary_color: string | null,
     invoice_accent_color: string | null,
     invoice_font_family: string | null,

@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server'
+import { ensureInitialized } from '@/lib/init'
 import { processOverdueReminders } from '@/lib/invoices/reminder-processor'
 import { REMINDERS_SENDING_ENABLED } from '@/lib/invoices/reminders-enabled'
 import { getEmailService } from '@/lib/email/service'
 import { withCronContext } from '@/lib/api/with-cron-context'
 import { errorResponseFromCode } from '@/lib/errors/get-structured-error'
+
+ensureInitialized()
 
 /**
  * GET/POST /api/invoices/reminders/cron: sends overdue invoice reminders.

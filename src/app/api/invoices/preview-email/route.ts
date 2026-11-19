@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { ensureInitialized } from '@/lib/init'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import { PRIVATE_NO_STORE_HEADERS, privateNoStore } from '@/lib/api/private-no-store'
 import { validateBody } from '@/lib/api/validate'
@@ -9,13 +10,15 @@ import {
   generateInvoiceEmailSubject,
   invoiceEmailEditableTexts,
 } from '@/lib/email/invoice-templates'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import {
   EMAIL_PATTERN,
   resolveInvoiceEmailRecipients,
   resolveInvoiceReplyTo,
 } from '@/lib/invoices/email-recipients'
 import { errorResponseFromCode } from '@/lib/errors/get-structured-error'
+
+ensureInitialized()
 
 /**
  * POST /api/invoices/preview-email
@@ -82,7 +85,16 @@ export const POST = withRouteContext('invoice.preview_email', async (request, {
     configuredCc: company.invoice_email_cc_addresses,
     customerCc: customer.invoice_email_cc_addresses,
   })
-  const sender = await resolveInvoiceSender(supabase, companyId, company.company_name)
+  const sender = await takeInvoiceSender(supabase, companyId, company.company_name)
+  if (!sender.ok) {
+    const messages = invoiceSenderDomainMessages(sender.error)
+    return privateNoStore(errorResponseFromCode('INVOICE_SENDER_DOMAIN_UNVERIFIED', log, {
+      requestId,
+      messageSv: messages.messageSv,
+      messageEn: messages.messageEn,
+      details: { domain: sender.error.domain, address: sender.error.address },
+    }))
+  }
 
   return NextResponse.json(
     {
@@ -90,7 +102,7 @@ export const POST = withRouteContext('invoice.preview_email', async (request, {
         subject: generateInvoiceEmailSubject(emailData),
         html: generateInvoiceEmailHtml(emailData),
         editable: invoiceEmailEditableTexts(emailData),
-        from: { name: sender?.name ?? company.company_name, address: sender?.address ?? null },
+        from: { name: sender.from?.name ?? company.company_name, address: sender.from?.address ?? null },
         reply_to: replyTo,
         to: recipients.to,
         cc: recipients.cc,

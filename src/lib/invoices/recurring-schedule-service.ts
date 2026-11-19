@@ -34,7 +34,7 @@ import {
 import { renderInvoicePdfBuffer } from '@/lib/invoices/render-invoice-pdf'
 import { applyPaymentLinkToInvoice } from '@/lib/extensions/payment-links'
 import { getEmailService } from '@/lib/email/service'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import { hasCapability } from '@/lib/entitlements/has-capability'
 import { CAPABILITY } from '@/lib/entitlements/keys'
 import { isSandboxCompany } from '@/lib/sandbox/guard'
@@ -680,6 +680,15 @@ async function sendInvoiceFromSchedule(
     })
   }
 
+  const invoiceSender = await takeInvoiceSender(supabase, companyId, company.company_name)
+  if (!invoiceSender.ok) {
+    log.error('recurring invoice not sent: sender domain is not verified', invoiceSender.error, {
+      invoiceId: invoice.id,
+      domain: invoiceSender.error.domain,
+    })
+    return { sent: false, warning: invoiceSenderDomainMessages(invoiceSender.error).messageSv }
+  }
+
   // Render PDF with status overridden to 'sent' so the customer doesn't
   // receive a "UTKAST" stamp.
   const renderableInvoice = { ...invoice, status: 'sent' as const }
@@ -757,7 +766,7 @@ async function sendInvoiceFromSchedule(
       text,
       replyTo,
       fromName: company.company_name ?? undefined,
-      from: await resolveInvoiceSender(supabase, companyId, company.company_name),
+      from: invoiceSender.from,
       filename,
       pdfBuffer,
     })

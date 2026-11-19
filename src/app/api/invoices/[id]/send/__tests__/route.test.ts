@@ -51,6 +51,7 @@ const mockIsConfigured = vi.fn()
 // queued-mock sequence (its own tests live in lib/email/__tests__).
 vi.mock('@/lib/email/invoice-sender', () => ({
   resolveInvoiceSender: vi.fn().mockResolvedValue(undefined),
+  takeInvoiceSender: vi.fn().mockResolvedValue({ ok: true, from: undefined }),
 }))
 
 vi.mock('@/lib/email/service', () => ({

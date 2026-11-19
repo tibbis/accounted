@@ -14,24 +14,37 @@ import {
   encodeDisplayName,
   ResendEmailService,
 } from '@/extensions/general/email/lib/resend-service'
+import { resetVerifiedSendingDomainsForTests } from '@/extensions/general/email/lib/verified-sending-domains'
 
 vi.mock('@/lib/branding/service', () => ({
   getBranding: () => ({ appName: 'Accounted' }),
 }))
 
-const { sendMock } = vi.hoisted(() => {
+const { sendMock, listMock } = vi.hoisted(() => {
   // RESEND_FROM_EMAIL / RESEND_API_KEY are read at module load; set them
   // before the service module is evaluated.
   process.env.RESEND_FROM_EMAIL = 'noreply@platform.example'
   process.env.RESEND_API_KEY = 'test-key'
-  return { sendMock: vi.fn() }
+  return { sendMock: vi.fn(), listMock: vi.fn() }
 })
 
 vi.mock('resend', () => ({
   Resend: class {
     emails = { send: sendMock }
+    domains = { list: listMock }
   },
 }))
+
+function verifiedList(names: string[]) {
+  return {
+    data: {
+      object: 'list' as const,
+      has_more: false,
+      data: names.map((name, index) => ({ id: `d${index}`, name, status: 'verified' })),
+    },
+    error: null,
+  }
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -105,6 +118,9 @@ describe('ResendEmailService.sendEmail', () => {
     vi.clearAllMocks()
     eventBus.clear()
     sendMock.mockReset()
+    listMock.mockReset()
+    resetVerifiedSendingDomainsForTests()
+    listMock.mockResolvedValue(verifiedList(['hansbolag.example']))
   })
 
   it('sends once as the platform sender when no explicit From is given', async () => {
@@ -152,9 +168,62 @@ describe('ResendEmailService.sendEmail', () => {
     expect(from.match(/>/g)).toHaveLength(1)
   })
 
-  it('retries once as the platform sender when Resend rejects the company sender', async () => {
+  it('accepts the instance default domain without a Resend list entry', async () => {
+    listMock.mockResolvedValue(verifiedList([]))
+    sendMock.mockResolvedValue({ data: { id: 'msg_p' }, error: null })
+    const result = await service.sendEmail({
+      ...base,
+      from: { name: 'Hans Bolag AB', address: 'noreply@platform.example' },
+    })
+    expect(result.success).toBe(true)
+    expect(sendMock.mock.calls[0][0].from).toBe('Hans Bolag AB <noreply@platform.example>')
+  })
+
+  it('does not send from a domain that is verified only for receiving', async () => {
+    listMock.mockResolvedValue({
+      data: {
+        object: 'list',
+        has_more: false,
+        data: [{ id: 'd1', name: 'helle.cc', status: 'verified', capabilities: { sending: 'disabled' } }],
+      },
+      error: null,
+    })
+    const result = await service.sendEmail({
+      ...base,
+      from: { name: 'TADH Consulting AB', address: 'invoices@helle.cc' },
+    })
+    expect(result.success).toBe(false)
+    expect(result.errorCode).toBe('SENDER_DOMAIN_UNVERIFIED')
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('does not send, and does not fall back, when the company domain is not verified in Resend', async () => {
+    listMock.mockResolvedValue(verifiedList([]))
+    const result = await service.sendEmail({
+      ...base,
+      from: { name: 'TADH Consulting AB', address: 'invoices@helle.cc' },
+    })
+    expect(result.success).toBe(false)
+    expect(result.errorCode).toBe('SENDER_DOMAIN_UNVERIFIED')
+    expect(result.error).toMatch(/helle\.cc/)
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to the platform sender when Resend rejects the company domain as unverified', async () => {
+    sendMock.mockResolvedValueOnce({ data: null, error: { message: 'The hansbolag.example domain is not verified' } })
+    const result = await service.sendEmail({
+      ...base,
+      from: { name: 'Hans Bolag AB', address: 'faktura@hansbolag.example' },
+    })
+    expect(result.success).toBe(false)
+    expect(result.errorCode).toBe('SENDER_DOMAIN_UNVERIFIED')
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    expect(sendMock.mock.calls[0][0].from).toBe('Hans Bolag AB <faktura@hansbolag.example>')
+  })
+
+  it('retries once as the platform sender when Resend rejects a verified company sender for another reason', async () => {
     sendMock
-      .mockResolvedValueOnce({ data: null, error: { message: 'The hansbolag.example domain is not verified' } })
+      .mockResolvedValueOnce({ data: null, error: { message: 'temporarily unavailable' } })
       .mockResolvedValueOnce({ data: { id: 'msg_3' }, error: null })
     const result = await service.sendEmail({
       ...base,
@@ -164,7 +233,6 @@ describe('ResendEmailService.sendEmail', () => {
     expect(sendMock).toHaveBeenCalledTimes(2)
     expect(sendMock.mock.calls[0][0].from).toBe('Hans Bolag AB <faktura@hansbolag.example>')
     expect(sendMock.mock.calls[1][0].from).toBe('Hans Bolag AB <noreply@platform.example>')
-    // Same recipients and content on the retry.
     expect(sendMock.mock.calls[1][0].to).toEqual(['kund@example.com'])
     expect(sendMock.mock.calls[1][0].subject).toBe('Faktura 1')
   })
@@ -193,7 +261,7 @@ describe('ResendEmailService.sendEmail', () => {
 
   it('reports the platform-sender error when the fallback also fails', async () => {
     sendMock
-      .mockResolvedValueOnce({ data: null, error: { message: 'domain not verified' } })
+      .mockResolvedValueOnce({ data: null, error: { message: 'temporarily unavailable' } })
       .mockResolvedValueOnce({ data: null, error: { message: 'rate limited' } })
     const result = await service.sendEmail({
       ...base,

@@ -169,7 +169,7 @@ import {
 } from '@/lib/pending-operations/skatteverket-commit'
 import { PartialCommitError } from '@/lib/pending-operations/errors'
 import { getEmailService } from '@/lib/email/service'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import { hasCapability, capabilityBlockedError } from '@/lib/entitlements/has-capability'
 import { PAID_OPERATION_CAPABILITY_MAP } from '@/lib/entitlements/keys'
 import { exceedsUnattendedLimit } from './unattended-limit'
@@ -2820,6 +2820,16 @@ async function commitSendInvoice(
     }
   }
 
+  const invoiceSender = await takeInvoiceSender(supabase, companyId, company.company_name)
+  if (!invoiceSender.ok) {
+    const messages = invoiceSenderDomainMessages(invoiceSender.error)
+    return {
+      error: messages.messageSv,
+      errorCode: 'INVOICE_SENDER_DOMAIN_UNVERIFIED',
+      status: 400,
+    }
+  }
+
   const items = (invoice.items as InvoiceItem[]).sort(
     (a: InvoiceItem, b: InvoiceItem) => a.sort_order - b.sort_order
   )
@@ -3009,7 +3019,7 @@ async function commitSendInvoice(
       text,
       replyTo,
       fromName: company.company_name,
-      from: await resolveInvoiceSender(supabase, companyId, company.company_name),
+      from: invoiceSender.from,
       filename,
       pdfBuffer,
     })

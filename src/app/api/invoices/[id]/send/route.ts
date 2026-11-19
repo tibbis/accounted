@@ -5,7 +5,7 @@ import { ensureInitialized } from '@/lib/init'
 import { renderInvoicePdfBuffer } from '@/lib/invoices/render-invoice-pdf'
 import { snapshotInvoicePayee } from '@/lib/invoices/invoice-payee'
 import { getEmailService } from '@/lib/email/service'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import {
   generateInvoiceEmailHtml,
   generateInvoiceEmailText,
@@ -198,6 +198,20 @@ export const POST = withRouteContext(
 
     if (companyError || !company) {
       return errorResponseFromCode('INVOICE_SEND_COMPANY_SETTINGS_MISSING', opLog, { requestId })
+    }
+
+    // Before any number is consumed or a verifikat is posted: an unverified
+    // company From must not send, and must not be replaced by the instance
+    // default (another company's address on a multi-company host).
+    const invoiceSender = await takeInvoiceSender(supabase, companyId!, company.company_name)
+    if (!invoiceSender.ok) {
+      const messages = invoiceSenderDomainMessages(invoiceSender.error)
+      return errorResponseFromCode('INVOICE_SENDER_DOMAIN_UNVERIFIED', opLog, {
+        requestId,
+        messageSv: messages.messageSv,
+        messageEn: messages.messageEn,
+        details: { domain: invoiceSender.error.domain, address: invoiceSender.error.address },
+      })
     }
 
     const invoiceCurrency = (invoice as Invoice).currency
@@ -566,7 +580,7 @@ export const POST = withRouteContext(
         text,
         replyTo,
         fromName: company.company_name,
-        from: await resolveInvoiceSender(supabase, companyId!, company.company_name),
+        from: invoiceSender.from,
         filename,
         pdfBuffer,
       })

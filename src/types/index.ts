@@ -596,6 +596,11 @@ export interface CompanySettings {
   // Reply-To for customer-facing invoice mail. null falls back to the company
   // email, then to the sending user (resolveInvoiceReplyTo).
   invoice_email_reply_to?: string | null
+  // From address for customer-facing invoice mail. null uses the instance
+  // default sender. The domain must be verified with the email provider.
+  invoice_email_from_address?: string | null
+  // Display name for that From. null uses the company name.
+  invoice_email_from_name?: string | null
 
   // Automation
   send_invoice_reminders: boolean

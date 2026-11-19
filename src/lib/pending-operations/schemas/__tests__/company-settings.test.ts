@@ -34,6 +34,21 @@ describe('settings.update input: field set', () => {
     expect(parsed.default_voucher_series).toBe('B')
   })
 
+  it('lowercases the invoice from address and accepts a display name', () => {
+    const parsed = parse({
+      invoice_email_from_address: 'Invoices@Helle.CC',
+      invoice_email_from_name: 'TADH Consulting AB',
+    })
+    expect(parsed.invoice_email_from_address).toBe('invoices@helle.cc')
+    expect(parsed.invoice_email_from_name).toBe('TADH Consulting AB')
+    expect(parse({ invoice_email_from_address: null, invoice_email_from_name: null }).invoice_email_from_address).toBeNull()
+  })
+
+  it('rejects a from name that could break the mail header', () => {
+    expect(() => parse({ invoice_email_from_name: 'TADH\nConsulting' })).toThrow()
+    expect(() => parse({ invoice_email_from_address: 'not-an-address' })).toThrow()
+  })
+
   it('accepts an empty-string email (clears the value) and rejects a malformed one', () => {
     expect(parse({ email: '' }).email).toBe('')
     expect(() => parse({ email: 'not-an-email' })).toThrow()

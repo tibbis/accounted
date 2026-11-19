@@ -2799,8 +2799,16 @@
     "toast_save_failed": "Could not save"
   },
   "settings_invoice_email_recipients": {
-    "heading": "Reply address and copies for invoice emails",
-    "description": "The reply address is where a customer's reply to an invoice email goes. The copy recipients are added automatically to every invoice email; you can add more recipients when sending an individual invoice.",
+    "heading": "Sender, reply address and copies for invoice emails",
+    "description": "The sender address is the address the customer sees as From. The reply address is where the customer's reply goes. The copy recipients are added automatically to every invoice email; you can add more recipients when sending an individual invoice.",
+    "from_label": "Sender address (From)",
+    "from_placeholder": "invoices@company.com",
+    "from_hint": "Leave empty to use the instance default sender, with the company name as the display name. The domain must already be verified with the email provider. An unverified address is not saved, and the email is not sent from another company.",
+    "from_name_label": "Sender name",
+    "from_name_placeholder": "Company name",
+    "from_name_hint": "The name the recipient sees. Leave empty to use the company name.",
+    "invalid_name_title": "Invalid sender name",
+    "invalid_name_description": "The name may be at most 120 characters and must not contain line breaks or angle brackets.",
     "reply_to_label": "Reply address (Reply-To)",
     "reply_to_placeholder": "invoices@company.com",
     "reply_to_hint": "A customer's reply to \"Reply directly to this email\" goes here. Leave it empty to use the company email address, or failing that the address of whoever sends the invoice.",
@@ -2816,7 +2824,7 @@
     "too_many_description": "You can enter at most {count} fixed CC and BCC addresses in total.",
     "save_failed": "Could not save the settings",
     "saved_title": "Saved",
-    "saved_description": "The reply address and fixed copy recipients will be used for the next invoice email.",
+    "saved_description": "The sender, reply address and fixed copy recipients will be used for the next invoice email.",
     "save_failed_title": "Could not save",
     "saving": "Saving...",
     "save": "Save"

@@ -8,6 +8,8 @@ import { Resend } from 'resend'
 import { createLogger } from '@/lib/logger'
 import { getBranding } from '@/lib/branding/service'
 import type { EmailService, SendEmailOptions, SendEmailResult } from '@/lib/email/service'
+import { senderDomainOf } from '@/lib/email/invoice-sender'
+import { resendSenderDomainVerdict } from './verified-sending-domains'
 
 const log = createLogger('email')
 
@@ -80,6 +82,11 @@ export function buildFromHeader(input: {
     : `${encodeDisplayName(safeAppName)} <${DEFAULT_FROM_EMAIL}>`
 }
 
+function isUnverifiedSenderRejection(message: string): boolean {
+  const text = message.toLowerCase()
+  return text.includes('not verified') || text.includes('sender domain')
+}
+
 function optionalAddressList(addresses: string | string[] | undefined): string[] | undefined {
   if (!addresses) return undefined
   const list = Array.isArray(addresses) ? addresses : [addresses]
@@ -108,6 +115,21 @@ export class ResendEmailService implements EmailService {
 
     if (!this.isConfigured()) {
       return { success: false, error: 'Email service is not configured' }
+    }
+
+    const explicitFrom = options.from
+    if (explicitFrom) {
+      const domain = senderDomainOf(explicitFrom.address)
+      if (domain) {
+        const verdict = await resendSenderDomainVerdict(domain)
+        if (verdict !== 'verified') {
+          const error = verdict === 'unknown'
+            ? `Could not confirm that ${domain} is verified for sending. No email was sent.`
+            : `The domain ${domain} is not verified for sending. No email was sent.`
+          log.warn('Refusing company sender whose domain is not verified in Resend', { domain, verdict })
+          return { success: false, provider: 'resend', error, errorCode: 'SENDER_DOMAIN_UNVERIFIED' }
+        }
+      }
     }
 
     const from = buildFromHeader({ fromName, from: options.from, fromAddress })
@@ -140,6 +162,25 @@ export class ResendEmailService implements EmailService {
       // letting every invoice for that company fail. The row is corrected by
       // the next verification check; this only keeps mail flowing.
       if (response.error && from !== platformFrom) {
+        // A company chose this address. Resend saying the domain is not
+        // verified must not be retried as the instance From: on a
+        // multi-company host that address is another company's identity.
+        // Other rejections (a blip after we already saw the domain as
+        // verified) still retry once so a transient failure does not strand
+        // the invoice. Brand fromAddress keeps the retry: it is the
+        // deployment's own white-label sender, not a tenant.
+        if (explicitFrom && isUnverifiedSenderRejection(response.error.message)) {
+          log.warn('Resend rejected the company sender; not falling back to the platform sender', {
+            from,
+            error: response.error.message,
+          })
+          return {
+            success: false,
+            provider: 'resend',
+            error: response.error.message,
+            errorCode: 'SENDER_DOMAIN_UNVERIFIED',
+          }
+        }
         log.warn('Resend rejected the company sender, retrying as the platform sender', {
           from,
           error: response.error.message,

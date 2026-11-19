@@ -40,6 +40,12 @@
 import type { z } from 'zod'
 import type { UpdateSettingsSchema } from '@/lib/api/schemas'
 import {
+  InvoiceSenderDomainError,
+  invoiceSenderDomainMessages,
+  senderDomainOf,
+} from '@/lib/email/invoice-sender'
+import { checkSenderDomain } from '@/lib/email/sender-domain-check'
+import {
   hasTaxRelevantFields,
   regenerateTaxDeadlinesForUser,
   shouldRegenerateTaxDeadlines,
@@ -161,6 +167,8 @@ function toUpdatePayload(c: CompanySettingsChanges) {
     invoice_email_cc_addresses: c.invoice_email_cc_addresses,
     invoice_email_bcc_addresses: c.invoice_email_bcc_addresses,
     invoice_email_reply_to: c.invoice_email_reply_to,
+    invoice_email_from_address: c.invoice_email_from_address,
+    invoice_email_from_name: c.invoice_email_from_name,
     invoice_primary_color: c.invoice_primary_color,
     invoice_accent_color: c.invoice_accent_color,
     invoice_font_family: c.invoice_font_family,
@@ -260,6 +268,8 @@ export async function updateCompanySettings(
     body.invoice_email_cc_addresses !== undefined
     || body.invoice_email_bcc_addresses !== undefined
     || body.invoice_email_reply_to !== undefined
+    || body.invoice_email_from_address !== undefined
+    || body.invoice_email_from_name !== undefined
   const changesInvoicePaymentInstructions =
     body.invoice_payment_accounts !== undefined
     || body.bank_name !== undefined
@@ -276,6 +286,26 @@ export async function updateCompanySettings(
       'Bara företagets ägare eller en administratör kan ändra företagsinställningarna.',
     )
     if (denied) return denied
+  }
+
+  if (typeof body.invoice_email_from_address === 'string' && body.invoice_email_from_address.length > 0) {
+    const domain = senderDomainOf(body.invoice_email_from_address)
+    let failure: InvoiceSenderDomainError | null = null
+    if (!domain) {
+      failure = new InvoiceSenderDomainError(body.invoice_email_from_address, body.invoice_email_from_address, 'unverified')
+    } else {
+      const verdict = await checkSenderDomain(domain)
+      if (verdict !== 'verified') {
+        failure = new InvoiceSenderDomainError(
+          body.invoice_email_from_address,
+          domain,
+          verdict === 'unknown' ? 'unknown' : 'unverified',
+        )
+      }
+    }
+    if (failure) {
+      return refuse('SETTINGS_INVOICE_FROM_DOMAIN_UNVERIFIED', invoiceSenderDomainMessages(failure).messageSv)
+    }
   }
 
   const reminderDays = [
@@ -590,7 +620,7 @@ export async function getCompanySettings(ctx: OperationContext): Promise<Operati
   const { data, error } = await ctx.supabase
     .from('company_settings')
     .select(
-      'entity_type, company_name, org_number, address_line1, address_line2, postal_code, city, registered_office, country, phone, email, website, default_our_reference, tax_contact_name, tax_contact_phone, tax_contact_email, bank_name, clearing_number, account_number, bankgiro, plusgiro, swish, iban, bic, invoice_payment_accounts, invoice_prefix, next_invoice_number, next_arrival_number, invoice_default_days, invoice_default_notes, ore_rounding, invoice_show_ocr, invoice_show_bankgiro, invoice_show_plusgiro, invoice_show_swish, invoice_show_payment_qr, invoice_qr_mode, invoice_show_logo, invoice_show_company_name, invoice_company_name_position, invoice_late_fee_text, invoice_credit_terms_text, invoice_payment_links_enabled, invoice_email_texts, invoice_email_cc_addresses, invoice_email_bcc_addresses, invoice_email_reply_to, invoice_primary_color, invoice_accent_color, invoice_font_family, invoice_header_text, invoice_footer_text, send_invoice_reminders, reminder_days_level_1, reminder_days_level_2, reminder_days_level_3, reminder_text_overrides, reminder_fee_enabled, reminder_fee_amount, reminder_interest_rate_override, default_voucher_series, default_voucher_series_per_source_type, voucher_series_labels, sector_slug, dimensions_enabled, mileage_enabled, sales_orders_enabled, quotes_enabled, proforma_enabled, recurring_invoices_enabled, self_billing_enabled, salary_vacation_year_basis, f_skatt, vat_registered, vat_number, moms_period, vat_taxable_base_over_40m, vat_has_eu_trade, vat_filing_method, periodisk_sammanstallning_enabled, periodisk_sammanstallning_period, periodisk_sammanstallning_filing_method, kontrolluppgifter_enabled, rot_rut_enabled, oss_enabled, ioss_enabled, intrastat_enabled, punktskatt_enabled, fyllnadsinbetalning_enabled, fiscal_year_start_month, preliminary_tax_monthly, pays_salaries, employer_registered, employer_seasonal, accounting_method, defer_invoice_booking, aktiekapital, antal_aktier, bookkeeping_locked_through, auto_lock_period_days, onboarding_complete',
+      'entity_type, company_name, org_number, address_line1, address_line2, postal_code, city, registered_office, country, phone, email, website, default_our_reference, tax_contact_name, tax_contact_phone, tax_contact_email, bank_name, clearing_number, account_number, bankgiro, plusgiro, swish, iban, bic, invoice_payment_accounts, invoice_prefix, next_invoice_number, next_arrival_number, invoice_default_days, invoice_default_notes, ore_rounding, invoice_show_ocr, invoice_show_bankgiro, invoice_show_plusgiro, invoice_show_swish, invoice_show_payment_qr, invoice_qr_mode, invoice_show_logo, invoice_show_company_name, invoice_company_name_position, invoice_late_fee_text, invoice_credit_terms_text, invoice_payment_links_enabled, invoice_email_texts, invoice_email_cc_addresses, invoice_email_bcc_addresses, invoice_email_reply_to, invoice_email_from_address, invoice_email_from_name, invoice_primary_color, invoice_accent_color, invoice_font_family, invoice_header_text, invoice_footer_text, send_invoice_reminders, reminder_days_level_1, reminder_days_level_2, reminder_days_level_3, reminder_text_overrides, reminder_fee_enabled, reminder_fee_amount, reminder_interest_rate_override, default_voucher_series, default_voucher_series_per_source_type, voucher_series_labels, sector_slug, dimensions_enabled, mileage_enabled, sales_orders_enabled, quotes_enabled, proforma_enabled, recurring_invoices_enabled, self_billing_enabled, salary_vacation_year_basis, f_skatt, vat_registered, vat_number, moms_period, vat_taxable_base_over_40m, vat_has_eu_trade, vat_filing_method, periodisk_sammanstallning_enabled, periodisk_sammanstallning_period, periodisk_sammanstallning_filing_method, kontrolluppgifter_enabled, rot_rut_enabled, oss_enabled, ioss_enabled, intrastat_enabled, punktskatt_enabled, fyllnadsinbetalning_enabled, fiscal_year_start_month, preliminary_tax_monthly, pays_salaries, employer_registered, employer_seasonal, accounting_method, defer_invoice_booking, aktiekapital, antal_aktier, bookkeeping_locked_through, auto_lock_period_days, onboarding_complete',
     )
     .eq('company_id', ctx.companyId)
     .maybeSingle()

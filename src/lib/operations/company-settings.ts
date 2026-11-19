@@ -95,6 +95,8 @@ export const GENERAL_SETTINGS_FIELDS = [
   'invoice_email_cc_addresses',
   'invoice_email_bcc_addresses',
   'invoice_email_reply_to',
+  'invoice_email_from_address',
+  'invoice_email_from_name',
   'invoice_primary_color',
   'invoice_accent_color',
   'invoice_font_family',
@@ -225,7 +227,7 @@ const SettingsResource = z.object({
       'website', 'tax_contact_name', 'tax_contact_phone', 'tax_contact_email', 'bank_name', 'clearing_number',
       'account_number', 'bankgiro', 'plusgiro', 'swish', 'iban', 'bic', 'invoice_prefix', 'invoice_default_notes',
       'invoice_company_name_position', 'invoice_late_fee_text', 'invoice_credit_terms_text',
-      'invoice_email_reply_to', 'invoice_primary_color', 'invoice_accent_color', 'invoice_font_family',
+      'invoice_email_reply_to', 'invoice_email_from_address', 'invoice_email_from_name', 'invoice_primary_color', 'invoice_accent_color', 'invoice_font_family',
       'invoice_header_text', 'invoice_footer_text', 'default_voucher_series', 'sector_slug',
       'salary_vacation_year_basis', 'vat_number', 'moms_period', 'vat_filing_method',
       'periodisk_sammanstallning_period', 'periodisk_sammanstallning_filing_method', 'accounting_method',
@@ -383,7 +385,7 @@ export const settingsUpdate = defineOperation({
   docs: {
     summary: 'Partially update company settings (contact, invoicing, reminders, voucher series, toggles).',
     description:
-      'Patches any subset of the non-legal company settings: contact and address, invoice payment details (bank account, Bankgiro, Plusgiro, Swish, IBAN/BIC, per-currency payment accounts), invoice numbering, layout and branding, invoice email texts and fixed copy recipients, reminders, voucher series, feature toggles and the vacation-year basis. Same rules as the settings page. Owner or admin only. Idempotent (mandatory Idempotency-Key). Dry-runnable.',
+      'Patches any subset of the non-legal company settings: contact and address, invoice payment details (bank account, Bankgiro, Plusgiro, Swish, IBAN/BIC, per-currency payment accounts), invoice numbering, layout and branding, invoice email From, reply address, texts and fixed copy recipients, reminders, voucher series, feature toggles and the vacation-year basis. Same rules as the settings page. Owner or admin only. Idempotent (mandatory Idempotency-Key). Dry-runnable.',
     useWhen:
       'The payment or contact details on invoices change, invoice texts or reminders should be adjusted, or a feature should be switched on or off.',
     doNotUseFor:
@@ -393,6 +395,7 @@ export const settingsUpdate = defineOperation({
       'contact_person is stored as default_our_reference: the default "Vår referens" on new invoices.',
       'bankgiro and plusgiro must carry a valid Luhn check digit; null or empty string clears them.',
       'invoice_email_texts only accepts the placeholders {fakturanummer} {kundnamn} {förnamn} {företag} {förfallodatum} {belopp}.',
+      'invoice_email_from_address is the From on invoice mail. Null uses the instance default with the company name as the display name. The domain must be verified with the email provider; an unverified domain is rejected (SETTINGS_INVOICE_FROM_DOMAIN_UNVERIFIED) and nothing is sent as another company.',
       'reminder_days_level_1 < _2 < _3 must hold after the change (stored values fill in the ones not sent).',
       'The booking engine reads default_voucher_series_per_source_type, not default_voucher_series: send the map to move bookings to another series.',
       'salary_vacation_year_basis cannot change while open vacation balances exist.',
