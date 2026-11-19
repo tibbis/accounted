@@ -29,7 +29,7 @@ describe('GET /api/agents', () => {
   })
 
   it('rejects an unknown client', async () => {
-    expect((await get('?client=gemini')).status).toBe(400)
+    expect((await get('?client=not-a-client')).status).toBe(400)
     expect(loadAgentsOverview).not.toHaveBeenCalled()
   })
 

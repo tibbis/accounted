@@ -373,6 +373,7 @@ export const SESSION_ROUTE_PARITY: Record<string, ParityEntry> = {
   'POST /api/invoices/recurring/:id/run': gap('P3', 'run a schedule now'),
   'POST /api/invoices/recurring/cron': machine(CRON),
   'POST /api/invoices/reminders/cron': machine(CRON),
+  'POST /api/notifications/bookkeeping-digest/cron': machine(CRON),
   'POST /api/invoices/reminders/action': machine('machine endpoint: public token link for the invoice recipient'),
 
   // ── Suppliers and supplier invoices ────────────────────────────────

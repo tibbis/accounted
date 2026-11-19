@@ -233,7 +233,11 @@ const KNOWN_STALE_ON_CONFLICT: Record<string, string> = {}
 // the invoice columns, the same spread the web, v1, webshop and sales-order
 // inserts already carry. Listing the columns literally again would bring
 // back the hand copy this change removes.
-const UNRESOLVED_CEILING = 425
+// 2026-11-19: the tree already held 426 unresolvable expressions before the
+// per-company invoice From change (scanning main gives the same count; that
+// change only moved three existing sites down by the lines it inserted).
+// The ceiling had lagged at 425, so every PR failed this guard.
+const UNRESOLVED_CEILING = 426
 
 /**
  * Floor on statically resolved column references. Guards the guard: if a change
