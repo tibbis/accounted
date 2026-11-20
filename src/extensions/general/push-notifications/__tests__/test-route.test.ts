@@ -33,7 +33,7 @@ beforeEach(() => {
 
 describe('POST /test', () => {
   it('returns 401 without a user', async () => {
-    const response = await route()(request())
+    const response = await route()(request(), undefined)
     expect(response.status).toBe(401)
     expect(sendTestPushToUser).not.toHaveBeenCalled()
   })

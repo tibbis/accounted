@@ -9,6 +9,7 @@ import {
   SettingsRow,
   SettingsSelect,
 } from '@/components/settings/SettingsRows'
+import { fetchSessionUser } from '@/lib/auth/session-client'
 import { createClient } from '@/lib/supabase/client'
 import type { EmailDigestFrequency } from '@/types'
 
@@ -32,7 +33,7 @@ export function EmailDigestToggle() {
     let active = true
     ;(async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser()
+        const user = await fetchSessionUser()
         if (!user) return
         const { data } = await supabase
           .from('notification_settings')
@@ -59,7 +60,7 @@ export function EmailDigestToggle() {
   async function persist(nextEnabled: boolean, nextFrequency: EmailDigestFrequency) {
     setSaving(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
+      const user = await fetchSessionUser()
       if (!user) throw new Error('Not signed in')
       // Upsert on user_id: most users have no notification_settings row
       // until they touch a notification preference for the first time.

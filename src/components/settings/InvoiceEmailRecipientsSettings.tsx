@@ -17,6 +17,7 @@ import {
   parseInvoiceRecipientText,
 } from '@/lib/invoices/email-recipients'
 import { useCompany } from '@/contexts/CompanyContext'
+import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
 import type { CompanySettings } from '@/types'
 
 interface InvoiceEmailRecipientsSettingsProps {

@@ -36,6 +36,7 @@ export async function sendTaxDeadlineNotifications(
   let skipped = 0
 
   const todayStr = todayIsoStockholm()
+  const today = new Date(`${todayStr}T12:00:00Z`)
   const in7DaysStr = addDaysIso(todayStr, 7)
   const tomorrowStr = addDaysIso(todayStr, 1)
 
@@ -111,6 +112,7 @@ export async function sendInvoiceNotifications(
   let skipped = 0
 
   const todayStr = todayIsoStockholm()
+  const today = new Date(`${todayStr}T12:00:00Z`)
   const in3DaysStr = addDaysIso(todayStr, 3)
   const daysAgo3Str = addDaysIso(todayStr, -3)
   const daysAgo7Str = addDaysIso(todayStr, -7)

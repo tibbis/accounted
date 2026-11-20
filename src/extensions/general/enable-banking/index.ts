@@ -424,7 +424,7 @@ export const enableBankingExtension: Extension = {
           const { data: memberships } = await supabase
             .from('company_members')
             .select('companies:company_id(org_number, entity_type, archived_at)')
-            .eq('user_id', user.id)
+            .eq('user_id', ctx.userId)
           const siblings = ((memberships ?? []) as Array<{
             companies:
               | { org_number: string | null; entity_type: string | null; archived_at: string | null }
