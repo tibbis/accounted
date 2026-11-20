@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/components/ui/use-toast'
+import { useSaveSettings } from '@/components/settings/use-save-settings'
 import {
   SettingsGroup,
   SettingsInput,
@@ -15,7 +16,6 @@ import {
   MAX_INVOICE_EMAIL_COPY_RECIPIENTS,
   parseInvoiceRecipientText,
 } from '@/lib/invoices/email-recipients'
-import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
 import { useCompany } from '@/contexts/CompanyContext'
 import type { CompanySettings } from '@/types'
 
@@ -34,6 +34,7 @@ export function InvoiceEmailRecipientsSettings({
 }: InvoiceEmailRecipientsSettingsProps) {
   const t = useTranslations('settings_invoice_email_recipients')
   const { toast } = useToast()
+  const saveSettings = useSaveSettings()
   const { role } = useCompany()
   // What is shown is exactly what is sent: no implicit fallback address.
   const serverFrom = settings.invoice_email_from_address ?? ''
@@ -117,16 +118,9 @@ export function InvoiceEmailRecipientsSettings({
     }
 
     setIsSaving(true)
-    try {
-      const response = await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-      })
-      if (!response.ok) {
-        const result = await response.json()
-        throw new Error(typeof result.error === 'string' ? result.error : t('save_failed'))
-      }
+    const saved = await saveSettings(updates, { failedTitle: t('save_failed_title') })
+    setIsSaving(false)
+    if (!saved) return
 
       onUpdate(updates)
       setFromAddress(from)
@@ -221,7 +215,7 @@ export function InvoiceEmailRecipientsSettings({
       </SettingsRow>
 
       <div className="flex justify-end px-1 pt-4">
-        <Button type="button" size="sm" onClick={save} disabled={isSaving}>
+        <Button type="button" onClick={save} disabled={isSaving}>
           {isSaving ? t('saving') : t('save')}
         </Button>
       </div>

@@ -3,11 +3,14 @@ import { createAnthropicFamilyService } from './services/anthropic-family'
 import { createOpenAICompatibleService } from './services/openai-compatible'
 import type { AiService } from './types'
 import { withMetering } from './meter'
+import { withCallLimit } from './call-limit'
 
 export type {
   AiChatTurn,
   AiDocumentInput,
+  AiEffort,
   AiImageMediaType,
+  AiProgressEvent,
   AiService,
   AiToolDef,
   AiTier,
@@ -18,7 +21,8 @@ export type {
 export { getAiStatus, readAiConfig } from './config'
 export { extractJsonObject } from './json'
 export type { AiMeter } from './meter'
-export { withAiMeter } from './meter'
+export { withAiMeter, AiSwitchedOffError, isAiSwitchedOffError } from './meter'
+export { withAiDeadline, AiCallTimeoutError, AI_CALL_LIMIT_MS } from './call-limit'
 
 // One service per resolved configuration. Keyed on the non-secret parts of
 // the config plus credential presence, so a changed environment (tests, the
@@ -36,6 +40,7 @@ function cacheKey(cfg: ResolvedAiConfig): string {
     strictJson: cfg.strictJson,
     pdfMode: cfg.pdfMode,
     pdfMaxPages: cfg.pdfMaxPages,
+    callLimitMs: cfg.callLimitMs,
   })
 }
 
@@ -48,11 +53,15 @@ export function getAiService(): AiService {
   const cfg = readAiConfig()
   const key = cacheKey(cfg)
   if (cached && cached.key === key) return cached.service
-  // Every call records its tokens (ai_usage_events), whichever feature made it.
+  // Every call records its tokens (ai_usage_events) and has a time limit
+  // (call-limit.ts), whichever feature made it.
   const service = withMetering(
-    cfg.provider === 'openai-compatible'
-      ? createOpenAICompatibleService(cfg)
-      : createAnthropicFamilyService(cfg),
+    withCallLimit(
+      cfg.provider === 'openai-compatible'
+        ? createOpenAICompatibleService(cfg)
+        : createAnthropicFamilyService(cfg),
+      cfg.callLimitMs,
+    ),
   )
   cached = { key, service }
   return service

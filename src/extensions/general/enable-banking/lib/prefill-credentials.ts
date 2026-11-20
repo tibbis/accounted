@@ -1,3 +1,4 @@
+import { orgNumberKey } from '@/lib/invariants/org-number'
 import type { AuthMethod, AuthMethodCredential } from './api-client'
 import { companyIdPrefillList, type OrgNumberCompany } from '@/lib/company/org-number-clipboard'
 
@@ -14,7 +15,7 @@ export {
  *
  * Handelsbanken (business) asks for "Företags-ID" on that page: the
  * organisationsnummer as 10 digits, no hyphen, and the page shows no format
- * hint and rejects "556809-8239". The company's org number is already in
+ * hint and rejects "554455-6672". The company's org number is already in
  * the ledger, so it is sent prefilled (the page still shows it, autosubmit
  * is off). The signer's personnummer is never known here and is left to the
  * person.
@@ -39,6 +40,16 @@ export {
 
 /** The credential name Enable Banking uses for the company identifier. */
 const COMPANY_ID_CREDENTIAL = 'companyId'
+
+export interface PrefillCompany {
+  org_number: string | null
+  entity_type: string | null
+}
+
+/** The 10-digit organisationsnummer Swedish banks call företags-ID, or null when the stored number reads as none. */
+export function companyIdDigits(company: PrefillCompany): string | null {
+  return orgNumberKey(company.org_number)
+}
 
 /** Whether the method asks the PSU for a company identifier at all. */
 export function wantsCompanyId(method: AuthMethod | undefined): boolean {

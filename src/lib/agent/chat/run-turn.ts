@@ -2,7 +2,6 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   getAnthropic,
   MAX_TOKENS_DEEP,
-  MAX_TOKENS_NO_THINKING,
   MAX_TOKENS_STANDARD,
   SONNET_MODEL,
 } from '@/lib/agent/composer/client'
@@ -10,29 +9,16 @@ import type { AgentIntent } from '@/lib/agent/intents/types'
 import { agentToolRegistry } from '@/lib/agent/tools/registry'
 import type { AgentTool, AgentActorContext, StagedOperationResult } from '@/lib/agent/tools/types'
 import { isStagedOperation } from '@/lib/agent/tools/types'
+import { runWithAgentReason, splitAgentReason } from '@/lib/pending-operations/agent-reason'
 import { resolveAiProvider } from '@/lib/ai/provider'
+import { runOpenAICompatibleChatLoop } from './run-turn-openai'
 import { buildSystemPrompt } from './system-prompt'
 import { loadFiscalYearInventory } from '@/lib/agent/fiscal-years'
 import { createLogger } from '@/lib/logger'
+import { isReadOnlyTool } from './read-only-tools'
+import { assistantShadow } from '@/lib/permissions/shadow'
 import { swedishToday } from '@/lib/utils'
-import { runOpenAICompatibleChatLoop } from './run-turn-openai'
-import {
-  boundToolResultText,
-  friendlyModelError,
-  isTransientStreamError,
-  wrapToolResult,
-  type StreamEvent,
-  MAX_TOOL_RESULT_CHARS,
-} from './shared'
-
-export {
-  boundToolResultText,
-  friendlyModelError,
-  isTransientStreamError,
-  wrapToolResult,
-  MAX_TOOL_RESULT_CHARS,
-  type StreamEvent,
-}
+import type { Locale } from '@/i18n/config'
 
 const log = createLogger('agent.chat.run-turn')
 
@@ -41,11 +27,120 @@ const log = createLogger('agent.chat.run-turn')
  * Raw AWS Bedrock SDK errors (throttling, timeouts, 5xx) are English and
  * technical; the chat surface renders this verbatim, so keep it human.
  */
-// friendlyModelError / isTransientStreamError live in ./shared (re-exported).
+export function friendlyModelError(err: unknown): string {
+  const status = (err as { status?: number } | null)?.status
+  const name = (err as { name?: string } | null)?.name ?? ''
+  const raw = err instanceof Error ? err.message : ''
+  const text = `${name} ${raw}`.toLowerCase()
+  if (isProviderOverload(err)) {
+    return 'Assistenten är överbelastad just nu, försök igen om en minut.'
+  }
+  if (
+    status === 429 ||
+    text.includes('throttl') ||
+    text.includes('too many') ||
+    text.includes('rate limit') ||
+    text.includes('rate exceeded')
+  ) {
+    return 'Anna är upptagen just nu. Vänta en liten stund och försök igen.'
+  }
+  if (
+    text.includes('timeout') ||
+    text.includes('timed out') ||
+    text.includes('etimedout') ||
+    text.includes('econnreset') ||
+    text.includes('network') ||
+    text.includes('socket')
+  ) {
+    return 'Anslutningen till assistenten bröts. Försök igen.'
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return 'Assistenttjänsten har ett tillfälligt fel. Försök igen om en stund.'
+  }
+  return 'Något gick fel hos assistenten. Försök igen om en stund.'
+}
 
-// One automatic retry per turn on a transient stream failure, after a short
-// backoff. Per-turn, not per-iteration: a turn that dies twice is not a blip.
-const STREAM_RETRY_BACKOFF_MS = 750
+/**
+ * True when the model provider is out of capacity rather than broken: an
+ * Anthropic `overloaded_error` (HTTP 529, or an `error` event inside a stream
+ * that already answered 200, which the SDK throws with no status and the
+ * event's JSON as its message) or Bedrock's 503 "Bedrock is unable to process
+ * your request". Both clear up on their own, usually within a minute.
+ */
+export function isProviderOverload(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status
+  if (status === 529 || status === 503) return true
+  if (typeof status === 'number') return false
+  const raw = err instanceof Error ? err.message : ''
+  return raw.toLowerCase().includes('overloaded')
+}
+
+/**
+ * True when a Bedrock stream failure is transient: the identical request can
+ * succeed on an immediate retry without any input change. Covers throttling
+ * (429), server errors (5xx), transport cuts (timeout/reset/socket), the two
+ * known SDK stream-corruption signatures observed in production on the pinned
+ * 0.29.x SDK ("Unexpected event order", "request ended without sending any
+ * chunks"), and the provider's own transient error events inside a stream
+ * (`overloaded_error`, `api_error`): those arrive after the HTTP 200, so the
+ * SDK throws them without a status and never retries them itself.
+ * Auth/validation failures (4xx other than 429) are NOT transient:
+ * retrying them is wasted work and they must keep surfacing immediately.
+ */
+export function isTransientStreamError(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status
+  if (status === 429) return true
+  if (typeof status === 'number' && status >= 500) return true
+  // A non-429 4xx is permanent regardless of message text.
+  if (typeof status === 'number' && status >= 400) return false
+
+  const name = (err as { name?: string } | null)?.name ?? ''
+  const raw = err instanceof Error ? err.message : ''
+  let cause = ''
+  try {
+    const c = (err as { cause?: unknown } | null)?.cause
+    cause = c instanceof Error ? `${c.name} ${c.message}` : c != null ? String(c) : ''
+  } catch {
+    cause = ''
+  }
+  const text = `${name} ${raw} ${cause}`.toLowerCase()
+  return (
+    text.includes('unexpected event order') ||
+    text.includes('request ended without sending any chunks') ||
+    text.includes('overloaded') ||
+    text.includes('api_error') ||
+    text.includes('throttl') ||
+    text.includes('rate limit') ||
+    text.includes('rate exceeded') ||
+    text.includes('too many') ||
+    text.includes('timeout') ||
+    text.includes('timed out') ||
+    text.includes('etimedout') ||
+    text.includes('econnreset') ||
+    text.includes('network') ||
+    text.includes('socket')
+  )
+}
+
+// A transient stream failure is retried within the turn on two budgets:
+//
+//   - The failed attempt showed the user nothing yet (no text, reasoning or
+//     tool chip): up to PRE_OUTPUT_RETRY_DELAYS_MS.length retries per turn,
+//     each after a longer wait. Nothing from the attempt reached the screen,
+//     so the retry is invisible apart from the "Försöker igen…" line. This is
+//     what rides out a provider overload (overloaded_error, Bedrock 503),
+//     which fails before the first token.
+//   - The attempt already streamed output: one restart per turn, the client
+//     dropping the dead attempt's partial bubble on stream_restart. A turn
+//     that dies twice mid-answer is not a blip.
+//
+// No retry starts later than RETRY_WINDOW_MS after the turn's first failure:
+// the SDK already retries a 5xx response twice inside every attempt, so an
+// outage that outlasts the window is better met with an honest message than
+// with a longer spinner.
+export const PRE_OUTPUT_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000]
+const STREAM_RESTART_BACKOFF_MS = 750
+const RETRY_WINDOW_MS = 45_000
 
 // One turn of the chat loop:
 //
@@ -53,7 +148,7 @@ const STREAM_RETRY_BACKOFF_MS = 750
 //   2. Resolve the intent's atom + tool set.
 //   3. Build system prompt with two cache_control breakpoints.
 //   4. Append message history + new user message.
-//   5. Stream from Anthropic (or openai-compatible via run-turn-openai).
+//   5. Stream from Anthropic.
 //   6. On tool_use: dispatch via agentToolRegistry → tool_result → continue.
 //   7. On staged op: stamp pending_operations.agent_metadata.
 //   8. Persist all messages to agent_messages.
@@ -61,7 +156,49 @@ const STREAM_RETRY_BACKOFF_MS = 750
 // Plan refs: §9 (chat loop), §10 (caching), §5 (BFL audit on
 // pending_operations.agent_metadata).
 
-// StreamEvent lives in ./shared (re-exported above).
+export type StreamEvent =
+  | { kind: 'text_delta'; delta: string }
+  // Extended-thinking reasoning stream. Emitted token-by-token while the model
+  // reasons, before it answers or calls a tool. Stream-time only: not
+  // persisted, not hydrated on resume.
+  | { kind: 'reasoning_delta'; delta: string }
+  | { kind: 'tool_use'; tool_use_id: string; name: string; input: Record<string, unknown> }
+  | { kind: 'tool_result'; tool_use_id: string; result: unknown }
+  | {
+      kind: 'staged_operation'
+      tool_use_id: string
+      tool_name: string
+      // The tool-use input: a superset of what the staging tool stored as
+      // pending_operations.params (it may also carry transport fields such
+      // as idempotency_key/dry_run). Carried so chat previews that need
+      // params (e.g. attach_document's DocumentViewButton) work live;
+      // previews read only the fields they need.
+      params: Record<string, unknown>
+      staged: StagedOperationResult
+    }
+  | {
+      // The agent successfully wrote a memory mid-conversation (remember_fact
+      // or forget_fact). Stream-time only: not persisted. The chat surface
+      // renders a discreet "Sparat: …" chip so users know memory happened
+      // without having to visit /settings/assistant?view=memory.
+      kind: 'memory_captured'
+      tool_use_id: string
+      action: 'remembered' | 'forgotten'
+      memory_id: string
+      memory_kind?: 'fact' | 'preference' | 'pattern' | 'correction'
+      content?: string
+    }
+  | {
+      // The Bedrock stream died on a transient error and the attempt is being
+      // retried. Text and eager tool chips from the dead stream were
+      // never persisted; the chat surface must reset the in-progress
+      // assistant bubble to `assistant_text` (what had accumulated BEFORE the
+      // failed attempt) and drop un-completed tool chips.
+      kind: 'stream_restart'
+      assistant_text: string
+    }
+  | { kind: 'turn_complete'; assistant_text: string }
+  | { kind: 'error'; message: string }
 
 interface RunTurnArgs {
   supabase: SupabaseClient
@@ -89,6 +226,16 @@ interface RunTurnArgs {
   // last_accessed_at. Reusing it there would silently change both the prompt
   // and memory touch.
   preloadedProfileSummary?: string | null
+  // The user's UI locale: the agent answers in it. Default 'sv'.
+  locale?: Locale
+  // True for a member who may only read (the viewer role): the turn gets the
+  // intent's read tools only, so the assistant cannot stage or write on
+  // their behalf. Tools here run without the MCP dispatcher's role gate.
+  readOnly?: boolean
+  // The member's role in the company, for the permission shadow
+  // (lib/permissions/shadow.ts): decide() compared with what each tool call
+  // did. Observation only; without it the shadow skips the turn.
+  role?: string
   // Emit events back to the caller. Returns false if the stream was cancelled
   // and the loop should stop emitting (best-effort).
   emit: (event: StreamEvent) => boolean
@@ -103,7 +250,40 @@ const MAX_TOOL_ITERATIONS = 12
 // hundreds) while bounding what a thread costs to continue.
 export const MAX_HISTORY_MESSAGES = 200
 
-// boundToolResultText / wrapToolResult / MAX_TOOL_RESULT_CHARS: ./shared.
+// Bound a tool result before it enters the model context. Read tools (above
+// all gnubok_get_document_content, which returns full OCR/PDF text) can return
+// arbitrarily large payloads. Unbounded, that payload is re-sent on every later
+// iteration of this turn's loop AND replayed on every future turn (it is
+// persisted as a 'tool' message and rehydrated by loadConversationMessages),
+// re-introducing the exact context rot we keep out of the system prompt. We cap
+// the serialized result and tell the model how to narrow if it was truncated.
+//
+// Per Anthropic's tool guidance: truncate with sensible defaults and steer the
+// agent to a narrower request; the practical ceiling cited for a single tool
+// return is ~25k tokens, so 40k chars (~10k tokens) sits well under that while
+// leaving multi-page receipts/invoices intact: only pathological dumps get cut.
+export const MAX_TOOL_RESULT_CHARS = 40_000
+
+export function boundToolResultText(raw: string): string {
+  if (raw.length <= MAX_TOOL_RESULT_CHARS) return raw
+  const head = raw.slice(0, MAX_TOOL_RESULT_CHARS)
+  return `${head}\n\n[avkortat: resultatet var ${raw.length} tecken, visar de första ${MAX_TOOL_RESULT_CHARS}. Be om en smalare sökning (limit, datumintervall, specifikt dokument-id eller fält) för att se mer.]`
+}
+
+// Wrap a bounded tool-result string in <tool_output> markers before feeding
+// it back to the model. Paired with the system-prompt rule that text inside
+// <tool_output> is third-party data, never instructions: mitigates the
+// prompt-injection surface from OCR'd documents, inbox items, and any
+// other tool that returns untrusted vendor/customer text. Closing tag uses a
+// distinct strings so a malicious payload containing the literal token can't
+// trivially escape; the contained JSON is serialized so embedded `<` chars
+// are escaped by JSON.stringify (which they are not; they survive
+// stringification): to defend, we additionally strip the literal close-tag
+// sequence from the content.
+export function wrapToolResult(toolUseId: string, raw: string): string {
+  const safe = raw.replaceAll('</tool_output>', '</tool_​output>') // ZWSP injected
+  return `<tool_output id="${toolUseId}">\n${safe}\n</tool_output>`
+}
 
 // Anthropic content block types ------------------------------------------------
 // We don't import the SDK type: accept any to keep this file decoupled from
@@ -152,10 +332,15 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
     vatStatus,
     today: swedishToday(),
     fiscalYears,
+    locale: args.locale,
     supabase,
   })
 
-  const tools = await collectIntentTools(intent)
+  const tools = await collectIntentTools(intent, args.readOnly === true)
+  // Only a tool offered this turn may run. The model can name any registered
+  // tool (text planted in a document can steer it), and a read-only turn must
+  // not reach a write tool by name.
+  const offeredToolNames = new Set(tools.map((t) => t.name))
 
   // 3: assemble Anthropic messages: prior history + new user turn.
   const history = await loadConversationMessages(supabase, conversationId)
@@ -208,7 +393,7 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
     label: 'In-app chat',
   }
 
-  const anthropic = getAnthropic()
+  const anthropic = await getAnthropic()
   const model = intent.model || SONNET_MODEL
 
   let assistantText = ''
@@ -216,12 +401,15 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
   // stop_reason of the last completed model call: lets the post-loop check
   // tell "finished" from "ran out of output budget before any visible text".
   let lastStopReason: string | null = null
-  // One automatic retry per TURN when the Bedrock stream dies on a transient
-  // error (throttling, 5xx, transport cut, stream corruption). The failed
-  // attempt persisted nothing (persist happens after finalMessage() succeeds),
-  // so a clean retry is safe; the client is told to discard the partial
-  // bubble via stream_restart.
-  let streamRetryUsed = false
+  // Retries when the Bedrock stream dies on a transient error (overload,
+  // throttling, 5xx, transport cut, stream corruption); the budgets are
+  // described at PRE_OUTPUT_RETRY_DELAYS_MS. The failed attempt persisted
+  // nothing (persist happens after finalMessage() succeeds), so a clean retry
+  // is safe; the client is told to discard the partial bubble via
+  // stream_restart.
+  let preOutputRetries = 0
+  let streamRestartUsed = false
+  let firstFailureAt: number | null = null
 
   // Extended thinking ("tänka längre"): when the intent opts in, every model
   // call in the loop gets a reasoning channel so the agent reasons BEFORE it
@@ -235,17 +423,17 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
   // reasoning and the default returned none. Without it the collapsible
   // "Tänker …" block in the chat would silently never populate.
   //
-  // max_tokens now covers thinking and the reply together, so the ceiling
-  // follows what the intent opted into. An intent with no thinking keeps its
-  // reply-sized cap: giving it the reasoning tier's headroom would let a plain
-  // answer run four times longer for no reason.
+  // max_tokens covers thinking and the reply together, so the ceiling follows
+  // the effort the model actually runs at. An intent with no thinking config
+  // still thinks (Sonnet 5 defaults to adaptive at effort high, text omitted),
+  // so it gets the standard ceiling, never a reply-sized one: see
+  // MAX_TOKENS_STANDARD in lib/agent/composer/client.ts.
   const thinking = intent.thinking
     ? { type: 'adaptive' as const, display: 'summarized' as const }
     : undefined
   const outputConfig = intent.thinking ? { effort: intent.thinking.effort } : undefined
-  const maxTokens = !intent.thinking
-    ? MAX_TOKENS_NO_THINKING
-    : intent.thinking.effort === 'xhigh' || intent.thinking.effort === 'max'
+  const maxTokens =
+    intent.thinking?.effort === 'xhigh' || intent.thinking?.effort === 'max'
       ? MAX_TOKENS_DEEP
       : MAX_TOKENS_STANDARD
 
@@ -260,14 +448,17 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
     // for tool detection, persistence and stop-reason control flow.
     //
     // The attempt loop wraps stream creation + finalMessage() so a transient
-    // failure (throttling, 5xx, transport cut, stream corruption) gets ONE
-    // automatic retry per turn. Everything the dead stream emitted is
-    // reverted: assistantText rolls back to its pre-attempt snapshot and the
-    // client discards the partial bubble on stream_restart.
+    // failure (overload, throttling, 5xx, transport cut, stream corruption)
+    // is retried within the turn's budgets. Everything the dead stream
+    // emitted is reverted: assistantText rolls back to its pre-attempt
+    // snapshot and the client discards the partial bubble on stream_restart.
     let response
     let eagerToolIds = new Set<string>()
     for (;;) {
       const assistantTextBefore = assistantText
+      // Whether this attempt has shown the user anything: decides which
+      // retry budget a failure draws on.
+      let attemptEmitted = false
       const stream = anthropic.messages.stream({
         model,
         max_tokens: maxTokens,
@@ -280,6 +471,7 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
 
       stream.on('text', (delta) => {
         assistantText += delta
+        attemptEmitted = true
         emit({ kind: 'text_delta', delta })
       })
 
@@ -300,6 +492,7 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
           e?.delta?.type === 'thinking_delta' &&
           typeof e.delta.thinking === 'string'
         ) {
+          attemptEmitted = true
           emit({ kind: 'reasoning_delta', delta: e.delta.thinking })
           return
         }
@@ -307,6 +500,7 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
           const block = e.content_block
           if (typeof block.id === 'string' && typeof block.name === 'string') {
             eagerToolIds.add(block.id)
+            attemptEmitted = true
             emit({
               kind: 'tool_use',
               tool_use_id: block.id,
@@ -323,13 +517,28 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
         response = await stream.finalMessage()
         break
       } catch (err) {
-        if (!streamRetryUsed && isTransientStreamError(err)) {
-          streamRetryUsed = true
-          log.warn('Bedrock stream failed transiently, retrying once', {
+        const failedAt = Date.now()
+        firstFailureAt ??= failedAt
+        let retryDelayMs: number | null = null
+        if (isTransientStreamError(err) && failedAt - firstFailureAt < RETRY_WINDOW_MS) {
+          if (!attemptEmitted && preOutputRetries < PRE_OUTPUT_RETRY_DELAYS_MS.length) {
+            retryDelayMs = PRE_OUTPUT_RETRY_DELAYS_MS[preOutputRetries]!
+            preOutputRetries++
+          } else if (attemptEmitted && !streamRestartUsed) {
+            retryDelayMs = STREAM_RESTART_BACKOFF_MS
+            streamRestartUsed = true
+          }
+        }
+        if (retryDelayMs !== null) {
+          log.warn('Bedrock stream failed transiently, retrying', {
             conversationId,
             companyId,
             model,
             iterations,
+            retry: preOutputRetries + (streamRestartUsed ? 1 : 0),
+            afterOutput: attemptEmitted,
+            overload: isProviderOverload(err),
+            delayMs: retryDelayMs,
             errMessage: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
             errStatus: (err as { status?: number } | null)?.status,
           })
@@ -338,7 +547,7 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
           // this attempt never happened; the client resets its bubble.
           assistantText = assistantTextBefore
           emit({ kind: 'stream_restart', assistant_text: assistantText })
-          await new Promise((resolve) => setTimeout(resolve, STREAM_RETRY_BACKOFF_MS))
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
           continue
         }
         // Surface as a chat error so the UI clears its streaming state. Re-throw
@@ -376,7 +585,9 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
           companyId,
           model,
           iterations,
-          retried: streamRetryUsed,
+          retried: preOutputRetries > 0 || streamRestartUsed,
+          retries: preOutputRetries + (streamRestartUsed ? 1 : 0),
+          overload: isProviderOverload(err),
           errStatus: typeof bedrockErr?.status === 'number' ? bedrockErr.status : undefined,
           errCode: typeof bedrockErr?.code === 'string' ? bedrockErr.code : undefined,
           errCause,
@@ -420,7 +631,22 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
         })
       }
 
-      const tool = agentToolRegistry.get(tu.name)
+      if (!offeredToolNames.has(tu.name)) {
+        log.warn('model named a tool not offered this turn', {
+          tool: tu.name,
+          intent: intent.id,
+          readOnly: args.readOnly === true,
+        })
+        toolResultBlocks.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          is_error: true,
+          content: `Verktyget ${tu.name} är inte tillgängligt i den här konversationen.`,
+        })
+        continue
+      }
+
+      const tool = await agentToolRegistry.get(tu.name)
       if (!tool) {
         toolResultBlocks.push({
           type: 'tool_result',
@@ -431,14 +657,29 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
         continue
       }
 
+      // The permission shadow: the assistant is a door; decide() is told
+      // what this call did and changes nothing.
+      const shadow = assistantShadow({
+        toolName: tu.name,
+        companyId,
+        userId,
+        role: args.role,
+        doorRule: () => agentToolRegistry.doorOf(tool),
+      })
       try {
-        const result = await tool.execute(
-          tu.input as Record<string, unknown>,
-          companyId,
-          userId,
-          supabase,
-          actor,
-        )
+        // A staging tool's `reason` is the agent's note to the approver,
+        // never an input of the tool (lib/pending-operations/agent-reason.ts).
+        const { args: toolArgs, reason } = splitAgentReason(tool, tu.input as Record<string, unknown>)
+        let result: unknown
+        try {
+          result = await runWithAgentReason(reason, () =>
+            tool.execute(toolArgs, companyId, userId, supabase, actor),
+          )
+        } catch (err) {
+          shadow.failed(err)
+          throw err
+        }
+        shadow.settled(isStagedOperation(result), toolArgs.dry_run === true)
 
         // If the tool staged a pending_operation, stamp the agent metadata
         // for BFL audit reconstructability (plan §5).
@@ -835,9 +1076,11 @@ async function stampAgentMetadata(
 
 // ── Tool conversion ────────────────────────────────────────────────────────
 
-async function collectIntentTools(intent: AgentIntent): Promise<AgentTool[]> {
-  return agentToolRegistry.getMany(intent.tools)
+async function collectIntentTools(intent: AgentIntent, readOnly: boolean): Promise<AgentTool[]> {
+  const names = readOnly ? intent.tools.filter(isReadOnlyTool) : intent.tools
+  return agentToolRegistry.getMany(names)
 }
+
 
 // Thinking blocks stay in the in-memory `messages` array: Anthropic requires
 // the preceding assistant turn's thinking block to be present when you return

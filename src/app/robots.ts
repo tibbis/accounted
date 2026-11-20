@@ -2,10 +2,18 @@ import type { MetadataRoute } from 'next'
 import { isSelfHosted } from '@/lib/env/public-flags'
 
 /**
- * Crawler policy. Self-hosted / personal instances hold live books and must
- * not appear in search or AI-training crawls. Hosted Accounted stays open so
- * public docs and llms.txt discovery keep working.
+ * The paths a crawler may fetch on the hosted product: the anonymous
+ * agent-discovery surfaces. A self-hosted install holds live books and
+ * disallows every path.
  */
+const ROBOTS_ALLOWED_PATHS = [
+  '/llms.txt',
+  '/llms-full.txt',
+  '/docs',
+  '/api/v1/openapi.json',
+  '/.well-known/',
+] as const
+
 export default function robots(): MetadataRoute.Robots {
   if (isSelfHosted()) {
     return {
@@ -19,7 +27,8 @@ export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: '*',
-      allow: '/',
+      allow: [...ROBOTS_ALLOWED_PATHS],
+      disallow: '/',
     },
   }
 }
