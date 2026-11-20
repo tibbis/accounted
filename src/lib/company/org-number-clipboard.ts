@@ -48,6 +48,7 @@ export async function writeCompanyIdClipboard(value: string | null): Promise<boo
     await navigator.clipboard.writeText(value)
     return true
   } catch {
+    // The browser refused the clipboard write.
     return false
   }
 }

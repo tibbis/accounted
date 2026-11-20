@@ -12,6 +12,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { NotificationType } from '@/types'
 import { addDaysIso, todayIsoStockholm } from '@/lib/dates/iso'
+import { filterOwedInvoices } from '@/lib/invoices/overdue'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { NEEDS_DOC_SOURCE_TYPES } from '@/lib/worklist/types'
 import { NON_ISSUED_INVOICE_STATUSES_FILTER } from '@/lib/bookkeeping/matchable-statuses'
@@ -117,16 +118,13 @@ export async function sendInvoiceNotifications(
   const daysAgo3Str = addDaysIso(todayStr, -3)
   const daysAgo7Str = addDaysIso(todayStr, -7)
 
-  const { data: invoices } = await supabase
-    .from('invoices')
-    .select(
-      'id, user_id, company_id, invoice_number, total, currency, due_date, customer:customers(name)',
-    )
-    // Proformas, delivery notes and quotes are never receivables: nothing is
-    // due on them, so they get no förfallo push.
-    .eq('document_type', 'invoice')
-    .in('status', ['sent', 'overdue'])
-    .in('due_date', [in3DaysStr, todayStr, daysAgo3Str, daysAgo7Str])
+  const { data: invoices } = await filterOwedInvoices(
+    supabase
+      .from('invoices')
+      .select(
+        'id, user_id, company_id, invoice_number, total, currency, due_date, customer:customers(name)',
+      ),
+  ).in('due_date', [in3DaysStr, todayStr, daysAgo3Str, daysAgo7Str])
 
   if (!invoices || invoices.length === 0) {
     return { sent: 0, skipped: 0 }

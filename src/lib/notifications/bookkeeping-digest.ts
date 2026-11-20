@@ -35,6 +35,7 @@ import { getEmailService } from '@/lib/email/service'
 import { getSenderForBrand, getBaseUrlForBrand } from '@/lib/email/brand-sender'
 import { resolveBrandForCompany } from '@/lib/branding/resolve'
 import { todayIsoStockholm } from '@/lib/dates/iso'
+import { whereInboxItemOpen } from '@/lib/documents/inbox-item-state'
 import { createLogger } from '@/lib/logger'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { chunk } from '@/lib/utils'
@@ -89,14 +90,8 @@ interface OptedInRow {
 }
 
 /**
- * Count what arrived in the window and is still unhandled, using the same
- * anchors as the worklist counts (lib/worklist/categories.ts). Transactions:
- * created in the window, not yet booked (journal_entry_id anchor only; rows
- * junction-linked via samlingsverifikat are a rounding error a few hours
- * after import), not marked private, and not ignored. Inbox items: created
- * in the window and not yet terminal on any of the three markers
- * (supplier invoice created, booked directly, or matched to a transaction;
- * status stays 'received' in all three cases).
+ * Count what arrived in the window and is still unhandled. Open bank rows
+ * are public.open_bank_rows. Open inbox items are whereInboxItemOpen.
  */
 export async function countNewToBook(
   supabase: SupabaseClient,
@@ -105,22 +100,18 @@ export async function countNewToBook(
 ): Promise<DigestCounts> {
   const [txHead, inboxHead] = await Promise.all([
     supabase
-      .from('transactions')
+      .from('open_bank_rows')
       .select('id', { count: 'exact', head: true })
       .eq('company_id', companyId)
-      .gte('created_at', sinceIso)
-      .is('journal_entry_id', null)
-      .not('is_business', 'is', false)
-      .eq('is_ignored', false),
-    supabase
-      .from('invoice_inbox_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('company_id', companyId)
-      .gte('created_at', sinceIso)
-      .in('status', ['received', 'processing'])
-      .is('created_supplier_invoice_id', null)
-      .is('created_journal_entry_id', null)
-      .is('matched_transaction_id', null),
+      .gte('created_at', sinceIso),
+    whereInboxItemOpen(
+      supabase
+        .from('invoice_inbox_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId)
+        .gte('created_at', sinceIso)
+        .in('status', ['received', 'processing']),
+    ),
   ])
   if (txHead.error) throw new Error(`transactions count failed: ${txHead.error.message}`)
   if (inboxHead.error) throw new Error(`inbox count failed: ${inboxHead.error.message}`)

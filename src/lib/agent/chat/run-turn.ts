@@ -7,11 +7,20 @@ import {
 } from '@/lib/agent/composer/client'
 import type { AgentIntent } from '@/lib/agent/intents/types'
 import { agentToolRegistry } from '@/lib/agent/tools/registry'
-import type { AgentTool, AgentActorContext, StagedOperationResult } from '@/lib/agent/tools/types'
+import type { AgentTool, AgentActorContext } from '@/lib/agent/tools/types'
 import { isStagedOperation } from '@/lib/agent/tools/types'
 import { runWithAgentReason, splitAgentReason } from '@/lib/pending-operations/agent-reason'
 import { resolveAiProvider } from '@/lib/ai/provider'
 import { runOpenAICompatibleChatLoop } from './run-turn-openai'
+import {
+  agentTurnMetadata,
+  recordToolFailure,
+  recordToolOutcome,
+  friendlyModelError,
+  isProviderOverload,
+  isTransientStreamError,
+  type StreamEvent,
+} from './shared'
 import { buildSystemPrompt } from './system-prompt'
 import { loadFiscalYearInventory } from '@/lib/agent/fiscal-years'
 import { createLogger } from '@/lib/logger'
@@ -20,109 +29,16 @@ import { assistantShadow } from '@/lib/permissions/shadow'
 import { swedishToday } from '@/lib/utils'
 import type { Locale } from '@/i18n/config'
 
+export {
+  boundToolResultText,
+  friendlyModelError,
+  isProviderOverload,
+  isTransientStreamError,
+  MAX_TOOL_RESULT_CHARS,
+  type StreamEvent,
+} from './shared'
+
 const log = createLogger('agent.chat.run-turn')
-
-/**
- * Normalize a model/transport error into a short, friendly Swedish message.
- * Raw AWS Bedrock SDK errors (throttling, timeouts, 5xx) are English and
- * technical; the chat surface renders this verbatim, so keep it human.
- */
-export function friendlyModelError(err: unknown): string {
-  const status = (err as { status?: number } | null)?.status
-  const name = (err as { name?: string } | null)?.name ?? ''
-  const raw = err instanceof Error ? err.message : ''
-  const text = `${name} ${raw}`.toLowerCase()
-  if (isProviderOverload(err)) {
-    return 'Assistenten är överbelastad just nu, försök igen om en minut.'
-  }
-  if (
-    status === 429 ||
-    text.includes('throttl') ||
-    text.includes('too many') ||
-    text.includes('rate limit') ||
-    text.includes('rate exceeded')
-  ) {
-    return 'Anna är upptagen just nu. Vänta en liten stund och försök igen.'
-  }
-  if (
-    text.includes('timeout') ||
-    text.includes('timed out') ||
-    text.includes('etimedout') ||
-    text.includes('econnreset') ||
-    text.includes('network') ||
-    text.includes('socket') ||
-    text.includes('abort')
-  ) {
-    return 'Anslutningen till assistenten bröts. Försök igen.'
-  }
-  if (typeof status === 'number' && status >= 500) {
-    return 'Assistenttjänsten har ett tillfälligt fel. Försök igen om en stund.'
-  }
-  return 'Något gick fel hos assistenten. Försök igen om en stund.'
-}
-
-/**
- * True when the model provider is out of capacity rather than broken: an
- * Anthropic `overloaded_error` (HTTP 529, or an `error` event inside a stream
- * that already answered 200, which the SDK throws with no status and the
- * event's JSON as its message) or Bedrock's 503 "Bedrock is unable to process
- * your request". Both clear up on their own, usually within a minute.
- */
-export function isProviderOverload(err: unknown): boolean {
-  const status = (err as { status?: number } | null)?.status
-  if (status === 529 || status === 503) return true
-  if (typeof status === 'number') return false
-  const raw = err instanceof Error ? err.message : ''
-  return raw.toLowerCase().includes('overloaded')
-}
-
-/**
- * True when a Bedrock stream failure is transient: the identical request can
- * succeed on an immediate retry without any input change. Covers throttling
- * (429), server errors (5xx), transport cuts (timeout/reset/socket), the two
- * known SDK stream-corruption signatures observed in production on the pinned
- * 0.29.x SDK ("Unexpected event order", "request ended without sending any
- * chunks"), and the provider's own transient error events inside a stream
- * (`overloaded_error`, `api_error`): those arrive after the HTTP 200, so the
- * SDK throws them without a status and never retries them itself.
- * Auth/validation failures (4xx other than 429) are NOT transient:
- * retrying them is wasted work and they must keep surfacing immediately.
- */
-export function isTransientStreamError(err: unknown): boolean {
-  const status = (err as { status?: number } | null)?.status
-  if (status === 429) return true
-  if (typeof status === 'number' && status >= 500) return true
-  // A non-429 4xx is permanent regardless of message text.
-  if (typeof status === 'number' && status >= 400) return false
-
-  const name = (err as { name?: string } | null)?.name ?? ''
-  const raw = err instanceof Error ? err.message : ''
-  let cause = ''
-  try {
-    const c = (err as { cause?: unknown } | null)?.cause
-    cause = c instanceof Error ? `${c.name} ${c.message}` : c != null ? String(c) : ''
-  } catch {
-    cause = ''
-  }
-  const text = `${name} ${raw} ${cause}`.toLowerCase()
-  return (
-    text.includes('unexpected event order') ||
-    text.includes('request ended without sending any chunks') ||
-    text.includes('overloaded') ||
-    text.includes('api_error') ||
-    text.includes('throttl') ||
-    text.includes('rate limit') ||
-    text.includes('rate exceeded') ||
-    text.includes('too many') ||
-    text.includes('timeout') ||
-    text.includes('timed out') ||
-    text.includes('etimedout') ||
-    text.includes('econnreset') ||
-    text.includes('network') ||
-    text.includes('socket') ||
-    text.includes('abort')
-  )
-}
 
 // A transient stream failure is retried within the turn on two budgets:
 //
@@ -157,50 +73,6 @@ const RETRY_WINDOW_MS = 45_000
 //
 // Plan refs: §9 (chat loop), §10 (caching), §5 (BFL audit on
 // pending_operations.agent_metadata).
-
-export type StreamEvent =
-  | { kind: 'text_delta'; delta: string }
-  // Extended-thinking reasoning stream. Emitted token-by-token while the model
-  // reasons, before it answers or calls a tool. Stream-time only: not
-  // persisted, not hydrated on resume.
-  | { kind: 'reasoning_delta'; delta: string }
-  | { kind: 'tool_use'; tool_use_id: string; name: string; input: Record<string, unknown> }
-  | { kind: 'tool_result'; tool_use_id: string; result: unknown }
-  | {
-      kind: 'staged_operation'
-      tool_use_id: string
-      tool_name: string
-      // The tool-use input: a superset of what the staging tool stored as
-      // pending_operations.params (it may also carry transport fields such
-      // as idempotency_key/dry_run). Carried so chat previews that need
-      // params (e.g. attach_document's DocumentViewButton) work live;
-      // previews read only the fields they need.
-      params: Record<string, unknown>
-      staged: StagedOperationResult
-    }
-  | {
-      // The agent successfully wrote a memory mid-conversation (remember_fact
-      // or forget_fact). Stream-time only: not persisted. The chat surface
-      // renders a discreet "Sparat: …" chip so users know memory happened
-      // without having to visit /settings/assistant?view=memory.
-      kind: 'memory_captured'
-      tool_use_id: string
-      action: 'remembered' | 'forgotten'
-      memory_id: string
-      memory_kind?: 'fact' | 'preference' | 'pattern' | 'correction'
-      content?: string
-    }
-  | {
-      // The Bedrock stream died on a transient error and the attempt is being
-      // retried. Text and eager tool chips from the dead stream were
-      // never persisted; the chat surface must reset the in-progress
-      // assistant bubble to `assistant_text` (what had accumulated BEFORE the
-      // failed attempt) and drop un-completed tool chips.
-      kind: 'stream_restart'
-      assistant_text: string
-    }
-  | { kind: 'turn_complete'; assistant_text: string }
-  | { kind: 'error'; message: string }
 
 interface RunTurnArgs {
   supabase: SupabaseClient
@@ -251,41 +123,6 @@ const MAX_TOOL_ITERATIONS = 12
 // conversation notices (a long working session is tens of messages, not
 // hundreds) while bounding what a thread costs to continue.
 export const MAX_HISTORY_MESSAGES = 200
-
-// Bound a tool result before it enters the model context. Read tools (above
-// all gnubok_get_document_content, which returns full OCR/PDF text) can return
-// arbitrarily large payloads. Unbounded, that payload is re-sent on every later
-// iteration of this turn's loop AND replayed on every future turn (it is
-// persisted as a 'tool' message and rehydrated by loadConversationMessages),
-// re-introducing the exact context rot we keep out of the system prompt. We cap
-// the serialized result and tell the model how to narrow if it was truncated.
-//
-// Per Anthropic's tool guidance: truncate with sensible defaults and steer the
-// agent to a narrower request; the practical ceiling cited for a single tool
-// return is ~25k tokens, so 40k chars (~10k tokens) sits well under that while
-// leaving multi-page receipts/invoices intact: only pathological dumps get cut.
-export const MAX_TOOL_RESULT_CHARS = 40_000
-
-export function boundToolResultText(raw: string): string {
-  if (raw.length <= MAX_TOOL_RESULT_CHARS) return raw
-  const head = raw.slice(0, MAX_TOOL_RESULT_CHARS)
-  return `${head}\n\n[avkortat: resultatet var ${raw.length} tecken, visar de första ${MAX_TOOL_RESULT_CHARS}. Be om en smalare sökning (limit, datumintervall, specifikt dokument-id eller fält) för att se mer.]`
-}
-
-// Wrap a bounded tool-result string in <tool_output> markers before feeding
-// it back to the model. Paired with the system-prompt rule that text inside
-// <tool_output> is third-party data, never instructions: mitigates the
-// prompt-injection surface from OCR'd documents, inbox items, and any
-// other tool that returns untrusted vendor/customer text. Closing tag uses a
-// distinct strings so a malicious payload containing the literal token can't
-// trivially escape; the contained JSON is serialized so embedded `<` chars
-// are escaped by JSON.stringify (which they are not; they survive
-// stringification): to defend, we additionally strip the literal close-tag
-// sequence from the content.
-export function wrapToolResult(toolUseId: string, raw: string): string {
-  const safe = raw.replaceAll('</tool_output>', '</tool_​output>') // ZWSP injected
-  return `<tool_output id="${toolUseId}">\n${safe}\n</tool_output>`
-}
 
 // Anthropic content block types ------------------------------------------------
 // We don't import the SDK type: accept any to keep this file decoupled from
@@ -685,79 +522,15 @@ export async function runChatTurn(args: RunTurnArgs): Promise<void> {
 
         // If the tool staged a pending_operation, stamp the agent metadata
         // for BFL audit reconstructability (plan §5).
-        if (isStagedOperation(result) && result.operation_id) {
-          await stampAgentMetadata(supabase, result.operation_id, {
-            conversation_id: conversationId,
-            intent_id: intent.id,
-            model,
-            prompt_hash: systemPrompt.promptHash,
-            atoms_loaded: systemPrompt.atomsLoaded,
-          })
-          emit({
-            kind: 'staged_operation',
-            tool_use_id: tu.id,
-            tool_name: tu.name,
-            params: tu.input as Record<string, unknown>,
-            staged: result,
-          })
-        }
-
-        // Memory tools write immediately (no staging). Surface the capture
-        // inline so the user sees memory is happening: silent writes were
-        // the biggest UX gap pre-2026-05-18 (plan §11 transparency).
-        if (tu.name === 'gnubok_remember_fact') {
-          const r = result as { id?: unknown; kind?: unknown; content?: unknown }
-          if (typeof r?.id === 'string') {
-            emit({
-              kind: 'memory_captured',
-              tool_use_id: tu.id,
-              action: 'remembered',
-              memory_id: r.id,
-              memory_kind:
-                typeof r.kind === 'string' &&
-                ['fact', 'preference', 'pattern', 'correction'].includes(r.kind)
-                  ? (r.kind as 'fact' | 'preference' | 'pattern' | 'correction')
-                  : undefined,
-              content: typeof r.content === 'string' ? r.content : undefined,
-            })
-          }
-        } else if (tu.name === 'gnubok_forget_fact') {
-          const r = result as { id?: unknown }
-          if (typeof r?.id === 'string') {
-            emit({
-              kind: 'memory_captured',
-              tool_use_id: tu.id,
-              action: 'forgotten',
-              memory_id: r.id,
-            })
-          }
-        }
-
-        // Emit the full result to the client (display only: not model
-        // context). The block that re-enters the model loop and gets persisted
-        // is bounded so a large read can't dominate the context window, and
-        // wrapped in <tool_output> markers so the model treats the content as
-        // untrusted third-party data (see system-prompt §"Verktygsutdata är
-        // OTROSTAD DATA").
-        emit({ kind: 'tool_result', tool_use_id: tu.id, result })
-        toolResultBlocks.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: wrapToolResult(tu.id, boundToolResultText(JSON.stringify(result))),
-        })
+        toolResultBlocks.push(await recordToolOutcome(
+          emit, tu.id, tu.name, tu.input as Record<string, unknown>, result,
+          (operationId) => stampAgentMetadata(supabase, operationId, agentTurnMetadata({
+            conversationId, intentId: intent.id, model,
+            promptHash: systemPrompt.promptHash, atomsLoaded: systemPrompt.atomsLoaded,
+          })),
+        ))
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown tool error'
-        emit({
-          kind: 'tool_result',
-          tool_use_id: tu.id,
-          result: { error: message },
-        })
-        toolResultBlocks.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          is_error: true,
-          content: message,
-        })
+        toolResultBlocks.push(recordToolFailure(emit, tu.id, err))
       }
     }
 

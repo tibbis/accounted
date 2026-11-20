@@ -6,14 +6,14 @@ import {
 } from '@/lib/ai/anthropic-history'
 import type { AgentIntent } from '@/lib/agent/intents/types'
 import { agentToolRegistry } from '@/lib/agent/tools/registry'
-import type { AgentActorContext, AgentTool, StagedOperationResult } from '@/lib/agent/tools/types'
-import { isStagedOperation } from '@/lib/agent/tools/types'
+import type { AgentActorContext, AgentTool } from '@/lib/agent/tools/types'
 import { createLogger } from '@/lib/logger'
 import {
-  boundToolResultText,
+  agentTurnMetadata,
+  recordToolFailure,
+  recordToolOutcome,
   friendlyModelError,
   isTransientStreamError,
-  wrapToolResult,
   type StreamEvent,
 } from './shared'
 
@@ -224,70 +224,15 @@ export async function runOpenAICompatibleChatLoop(args: OpenAICompatibleTurnArgs
           actor,
         )
 
-        if (isStagedOperation(result) && result.operation_id) {
-          await args.stampAgentMetadata(result.operation_id, {
-            conversation_id: conversationId,
-            intent_id: intent.id,
-            model,
-            prompt_hash: args.promptHash,
-            atoms_loaded: args.atomsLoaded,
-          })
-          emit({
-            kind: 'staged_operation',
-            tool_use_id: tu.id,
-            tool_name: tu.name,
-            params: tu.input,
-            staged: result as StagedOperationResult,
-          })
-        }
-
-        if (tu.name === 'gnubok_remember_fact') {
-          const r = result as { id?: unknown; kind?: unknown; content?: unknown }
-          if (typeof r?.id === 'string') {
-            emit({
-              kind: 'memory_captured',
-              tool_use_id: tu.id,
-              action: 'remembered',
-              memory_id: r.id,
-              memory_kind:
-                typeof r.kind === 'string' &&
-                ['fact', 'preference', 'pattern', 'correction'].includes(r.kind)
-                  ? (r.kind as 'fact' | 'preference' | 'pattern' | 'correction')
-                  : undefined,
-              content: typeof r.content === 'string' ? r.content : undefined,
-            })
-          }
-        } else if (tu.name === 'gnubok_forget_fact') {
-          const r = result as { id?: unknown }
-          if (typeof r?.id === 'string') {
-            emit({
-              kind: 'memory_captured',
-              tool_use_id: tu.id,
-              action: 'forgotten',
-              memory_id: r.id,
-            })
-          }
-        }
-
-        emit({ kind: 'tool_result', tool_use_id: tu.id, result })
-        toolResultBlocks.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: wrapToolResult(tu.id, boundToolResultText(JSON.stringify(result))),
-        })
+        toolResultBlocks.push(await recordToolOutcome(
+          emit, tu.id, tu.name, tu.input, result,
+          (operationId) => args.stampAgentMetadata(operationId, agentTurnMetadata({
+            conversationId, intentId: intent.id, model,
+            promptHash: args.promptHash, atomsLoaded: args.atomsLoaded,
+          })),
+        ))
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown tool error'
-        emit({
-          kind: 'tool_result',
-          tool_use_id: tu.id,
-          result: { error: message },
-        })
-        toolResultBlocks.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          is_error: true,
-          content: message,
-        })
+        toolResultBlocks.push(recordToolFailure(emit, tu.id, err))
       }
     }
 

@@ -90,6 +90,7 @@ export async function resendSenderDomainVerdict(domain: string): Promise<SenderD
     if (!statuses) return 'unknown'
     return statuses.get(normalized) === 'verified' ? 'verified' : 'unverified'
   } catch {
+    // A thrown client is an unknown lookup, not a verified domain.
     return 'unknown'
   }
 }

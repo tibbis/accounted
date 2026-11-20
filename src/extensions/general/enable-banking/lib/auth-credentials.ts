@@ -50,6 +50,7 @@ function matchesCredentialTemplate(value: string, template: string): boolean {
   try {
     return new RegExp(template).test(value)
   } catch {
+    // A template that is not a regex cannot match.
     return false
   }
 }

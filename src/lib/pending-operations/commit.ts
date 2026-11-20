@@ -182,11 +182,6 @@ import { hasCapability, capabilityBlockedError } from '@/lib/entitlements/has-ca
 import { PAID_OPERATION_CAPABILITY_MAP } from '@/lib/entitlements/keys'
 import { isSandboxCompany, SANDBOX_BLOCKED_MESSAGE_SV } from '@/lib/sandbox/guard'
 import { exceedsUnattendedLimit } from './unattended-limit'
-import {
-  generateInvoiceEmailHtml,
-  generateInvoiceEmailText,
-  generateInvoiceEmailSubject,
-} from '@/lib/email/invoice-templates'
 import { linkToJournalEntry } from '@/lib/core/documents/document-service'
 import { renderInvoicePdfBuffer } from '@/lib/invoices/render-invoice-pdf'
 import { resolveInvoicePayeeChoice, resolveInvoicePaymentAccount, snapshotInvoicePayee } from '@/lib/invoices/invoice-payee'
@@ -202,7 +197,7 @@ import { convertToInvoice } from '@/lib/invoices/convert-to-invoice'
 import { invoicePdfFilename } from '@/lib/invoices/pdf-filename'
 import {
   reserveInvoiceDelivery,
-  sendTrackedInvoiceEmail,
+  emailIssuedInvoice,
 } from '@/lib/invoices/invoice-deliveries'
 import { linkInvoiceAttachments, loadInvoiceEmailAttachments } from '@/lib/invoices/invoice-attachments'
 import { createLogger } from '@/lib/logger'
@@ -3209,13 +3204,9 @@ async function commitSendInvoice(
   }
 
   const replyTo = resolveInvoiceReplyTo(company as CompanySettings, userEmail)
-  const emailData = { invoice: renderableInvoice, customer, company: company as CompanySettings, replyTo }
-  const subject = generateInvoiceEmailSubject(emailData)
-  const html = generateInvoiceEmailHtml(emailData)
-  const text = generateInvoiceEmailText(emailData)
   let result
   try {
-    result = await sendTrackedInvoiceEmail({
+    result = await emailIssuedInvoice({
       supabase,
       emailService,
       companyId,
@@ -3225,12 +3216,12 @@ async function commitSendInvoice(
       to: recipients.to,
       cc: recipients.cc,
       bcc: recipients.bcc,
-      subject,
-      html,
-      text,
       replyTo,
       fromName: company.company_name,
       from: invoiceSender.from,
+      invoice: renderableInvoice,
+      customer,
+      company: company as CompanySettings,
       filename,
       pdfBuffer,
       extraAttachments: extraAttachments.value,

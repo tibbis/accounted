@@ -86,6 +86,7 @@ export async function getExistingPushSubscription(): Promise<PushSubscription | 
     if (!registration) return null
     return registration.pushManager.getSubscription()
   } catch {
+    // No registration or the browser blocked the probe: treat as unsubscribed.
     return null
   }
 }
@@ -122,7 +123,7 @@ export async function subscribeToPush(vapidPublicKey: string): Promise<void> {
   try {
     await persistSubscription(subscription)
   } catch (error) {
-    await subscription.unsubscribe().catch(() => undefined)
+    await subscription.unsubscribe().catch(() => undefined) // best-effort cleanup; the persist error is rethrown
     throw error
   }
 }
@@ -143,7 +144,7 @@ export async function unsubscribeFromPush(): Promise<void> {
   } catch (error) {
     // Server row is already gone. Re-persist so delivery keeps working and
     // the Konto switch can stay "on" after the caller restores UI state.
-    await persistSubscription(subscription).catch(() => undefined)
+    await persistSubscription(subscription).catch(() => undefined) // the unsubscribe error is the one rethrown
     throw error
   }
 }

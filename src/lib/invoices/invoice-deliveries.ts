@@ -1,5 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { EmailService, SendEmailOptions, SendEmailResult } from '@/lib/email/service'
+import {
+  generateInvoiceEmailHtml,
+  generateInvoiceEmailSubject,
+  generateInvoiceEmailText,
+} from '@/lib/email/invoice-templates'
+import type { CompanySettings, Customer, Invoice } from '@/types'
 import { getSenderForCompany } from '@/lib/email/brand-sender'
 import { deleteDocument, uploadDocument } from '@/lib/core/documents/document-service'
 import { createServiceClient } from '@/lib/supabase/server'
@@ -336,4 +342,53 @@ export async function fetchInvoicesWithImportedCopy(companyId: string): Promise<
       .range(from, to),
   )
   return new Set(rows.map((row) => row.invoice_id))
+}
+
+/** Render the issued-invoice mail and send it through the tracked delivery. */
+export async function emailIssuedInvoice(args: {
+  supabase: SupabaseClient
+  emailService: EmailService
+  companyId: string
+  userId: string
+  invoiceId: string
+  deliveryId: string
+  to: string | string[]
+  cc?: string | string[]
+  bcc?: string | string[]
+  replyTo?: string
+  fromName?: string
+  from?: SendEmailOptions['from']
+  invoice: Invoice
+  customer: Customer
+  company: CompanySettings
+  filename: string
+  pdfBuffer: Buffer
+  extraAttachments?: NonNullable<SendEmailOptions['attachments']>
+}): Promise<TrackedInvoiceEmailResult> {
+  const emailData = {
+    invoice: args.invoice,
+    customer: args.customer,
+    company: args.company,
+    replyTo: args.replyTo,
+  }
+  return sendTrackedInvoiceEmail({
+    supabase: args.supabase,
+    emailService: args.emailService,
+    companyId: args.companyId,
+    userId: args.userId,
+    invoiceId: args.invoiceId,
+    deliveryId: args.deliveryId,
+    to: args.to,
+    cc: args.cc,
+    bcc: args.bcc,
+    replyTo: args.replyTo,
+    fromName: args.fromName,
+    from: args.from,
+    subject: generateInvoiceEmailSubject(emailData),
+    html: generateInvoiceEmailHtml(emailData),
+    text: generateInvoiceEmailText(emailData),
+    filename: args.filename,
+    pdfBuffer: args.pdfBuffer,
+    extraAttachments: args.extraAttachments,
+  })
 }

@@ -47,7 +47,7 @@ export function mergeUiStatePatch(
  * swallowed deliberately.
  */
 export function persistUiState(patch: Partial<UserUiState>): void {
-  void applyUiStatePatch(patch).catch(() => {})
+  void applyUiStatePatch(patch).catch(() => {}) // cosmetic preference: a lost write self-corrects
 }
 
 /** Same write as persistUiState, but the caller can await and handle errors. */
@@ -56,7 +56,7 @@ export function applyUiStatePatch(patch: Partial<UserUiState>): Promise<Response
     USER_UI_STATE_SWR_KEY,
     (current: UserUiState | undefined) => mergeUiStatePatch(current, patch),
     { revalidate: false },
-  ).catch(() => {})
+  ).catch(() => {}) // optimistic cache only; the POST below is the write that matters
   return fetch('/api/user/ui-state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

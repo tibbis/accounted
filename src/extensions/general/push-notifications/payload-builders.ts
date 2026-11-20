@@ -5,6 +5,7 @@
  * Both event handlers and the cron scheduler import from here.
  */
 
+import { isLedgerCurrency } from '@/lib/bookkeeping/currency-utils'
 import { companyDeepLink } from '@/lib/pwa/deep-link'
 import type { NotificationPayload } from './notification-sender'
 
@@ -191,9 +192,9 @@ export function createTaxDeadlinePayload(
   }
 }
 
-// Invoices carry their own currency; "kr" is only correct for SEK.
+// Invoices carry their own currency; "kr" is the ledger currency's label.
 function formatInvoiceAmount(amount: number, currency: string): string {
-  return `${amount.toLocaleString('sv-SE')} ${!currency || currency === 'SEK' ? 'kr' : currency}`
+  return `${amount.toLocaleString('sv-SE')} ${isLedgerCurrency(currency) ? 'kr' : currency}`
 }
 
 export function createInvoiceOverduePayload(

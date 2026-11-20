@@ -102,6 +102,7 @@ export function attachThoughtSignatures(body: string, signatures: Map<string, st
   try {
     parsed = JSON.parse(body) as ChatRequestLike
   } catch {
+    // Not JSON: the request body is left unchanged.
     return body
   }
   if (!Array.isArray(parsed.messages)) return body
@@ -149,6 +150,7 @@ function requestWantsStream(init?: RequestInit): boolean {
   try {
     return (JSON.parse(init.body) as { stream?: unknown }).stream === true
   } catch {
+    // Not JSON: the request is not a streaming chat call.
     return false
   }
 }
@@ -175,6 +177,7 @@ async function harvestResponse(response: Response, signatures: Map<string, strin
   try {
     text = await response.clone().text()
   } catch {
+    // The clone could not be read; the caller still has the original response.
     return
   }
   ingestHarvestedText(text, signatures)
