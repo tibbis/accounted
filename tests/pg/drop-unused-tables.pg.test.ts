@@ -41,22 +41,20 @@ describe('drop unused tables (pg)', () => {
     expect(cols).not.toContain('project_id')
   })
 
-  it('removes the digest toggle, its dedup index and its notification type', async () => {
-    expect(await columnsOf('notification_settings')).not.toContain('email_digest_enabled')
+  it('keeps the digest the fork restored after the drop (20261120150000)', async () => {
+    expect(await columnsOf('notification_settings')).toContain('email_digest_enabled')
 
-    const { rows: idx } = await getPool().query(
+    const { rows: idx } = await getPool().query<{ reg: string | null }>(
       `SELECT to_regclass('public.idx_notification_log_bookkeeping_digest_dedup')::text AS reg`,
     )
-    expect(idx[0].reg).toBeNull()
+    expect(idx[0]!.reg).toBe('idx_notification_log_bookkeeping_digest_dedup')
 
     const userId = await insertAuthUser()
-    await expect(
-      getPool().query(
-        `INSERT INTO public.notification_log (user_id, notification_type, reference_id, days_before)
-         VALUES ($1, 'bookkeeping_digest', $2, 0)`,
-        [userId, randomUUID()],
-      ),
-    ).rejects.toThrow(/notification_log_notification_type_check/)
+    await getPool().query(
+      `INSERT INTO public.notification_log (user_id, notification_type, reference_id, days_before)
+       VALUES ($1, 'bookkeeping_digest', $2, 0)`,
+      [userId, randomUUID()],
+    )
   })
 
   it('still erases an account end to end', async () => {

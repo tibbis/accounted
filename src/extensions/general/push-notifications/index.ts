@@ -204,7 +204,7 @@ async function handleInvoiceSent(
   await notifyCompany(
     supabase,
     companyId,
-    createInvoiceSentPayload(invoice.invoice_number, invoice.id),
+    createInvoiceSentPayload(invoice.invoice_number ?? '', invoice.id),
     'invoice_sent',
     invoice.id,
     ctx?.log ?? console,
@@ -227,11 +227,4 @@ export const pushNotificationsExtension: Extension = {
     { eventType: 'period.year_closed', handler: handleYearClosed },
     { eventType: 'invoice.sent', handler: handleInvoiceSent },
   ],
-  settingsPanel: {
-    label: 'Push-notiser',
-    path: '/settings/account',
-  },
-  async onInstall(ctx) {
-    await ctx.settings.set('settings', DEFAULT_SETTINGS)
-  },
 }

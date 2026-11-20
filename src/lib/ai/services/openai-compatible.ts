@@ -279,6 +279,7 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
       // One model round only: the chat loop executes tools itself. A hanging
       // Gemini SSE used to leave fullStream waiting forever (Docker has no
       // Vercel maxDuration); timeout turns that into a retryable error.
+      const provider = await getProvider()
       const result = streamText({
         model: provider(model),
         ...(req.system ? { system: req.system } : {}),
