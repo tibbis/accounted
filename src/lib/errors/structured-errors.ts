@@ -1700,6 +1700,17 @@ const INVOICE: Record<string, StructuredErrorEntry> = {
     message_en: 'An invoice email may have at most 20 recipients in total.',
     remediation: { description: 'Remove CC or BCC recipients before sending the invoice.' },
   },
+  INVOICE_SENDER_DOMAIN_UNVERIFIED: {
+    httpStatus: 400,
+    message_sv:
+      'Avsändardomänen är inte verifierad för utskick. Ingen e-post skickades, och inte från någon annan avsändare.',
+    message_en:
+      'The sending domain is not verified for sending. No email was sent, and not from another sender.',
+    remediation: {
+      description:
+        'Verify the domain on invoice_email_from_address with the email provider (Resend), or clear the address to use the instance default sender.',
+    },
+  },
   INVOICE_SEND_COMPANY_SETTINGS_MISSING: {
     httpStatus: 404,
     message_sv: 'Företagsinställningar saknas.',
@@ -6719,6 +6730,17 @@ const RECONCILIATION_SIGNOFF: Record<string, StructuredErrorEntry> = {
 // every settings door applies. message_sv is the exact sentence the
 // dashboard's PUT /api/settings has always answered.
 const COMPANY_SETTINGS: Record<string, StructuredErrorEntry> = {
+  SETTINGS_INVOICE_FROM_DOMAIN_UNVERIFIED: {
+    httpStatus: 400,
+    message_sv:
+      'Avsändardomänen är inte verifierad för utskick. Adressen sparades inte.',
+    message_en:
+      'The sending domain is not verified for sending. The address was not saved.',
+    remediation: {
+      description:
+        'Add the domain in the Resend account this instance sends from and publish the DNS records Resend shows, then save invoice_email_from_address again. Or send null to keep the instance default sender.',
+    },
+  },
   SETTINGS_REMINDER_DAYS_ORDER: {
     httpStatus: 400,
     message_sv: 'Påminnelsedagarna måste ligga i stigande ordning.',

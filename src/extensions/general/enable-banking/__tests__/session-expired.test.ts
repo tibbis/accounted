@@ -663,7 +663,7 @@ describe('auth_method selection (Handelsbanken Mobile BankID)', () => {
       'business',
       'REDIRECT',
       undefined,
-      { credentials: { companyId: '556012-5790' } },
+      { companyId: '556012-5790' },
     )
 
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]

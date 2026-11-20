@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { getEmailService } from '@/lib/email/service'
 import { getSenderForCompany, getBaseUrlForBrand } from '@/lib/email/brand-sender'
-import { resolveInvoiceSender, type InvoiceSenderIdentity } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender, type InvoiceSenderIdentity } from '@/lib/email/invoice-sender'
 import { resolveInvoiceReplyTo } from '@/lib/invoices/email-recipients'
 import {
   generateReminderEmailHtml,
@@ -449,6 +449,21 @@ export async function processOverdueReminders(): Promise<ProcessRemindersResult>
       continue
     }
 
+    const invoiceSender = await takeInvoiceSender(supabase, invoice.company_id, company.company_name)
+    if (!invoiceSender.ok) {
+      const messages = invoiceSenderDomainMessages(invoiceSender.error)
+      log.error(`Reminder not sent for invoice ${invoice.invoice_number}: ${messages.messageEn}`)
+      results.push({
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoice_number,
+        customerEmail: customer.email,
+        reminderLevel,
+        success: false,
+        error: messages.messageSv,
+      })
+      continue
+    }
+
     // Send the reminder email
     const sendResult = await sendReminder(
       invoice as Invoice & { customer: Customer },
@@ -462,7 +477,7 @@ export async function processOverdueReminders(): Promise<ProcessRemindersResult>
         interestDays: interest.days,
         reminderFee: chargedFee,
       },
-      await resolveInvoiceSender(supabase, invoice.company_id, company.company_name),
+      invoiceSender.from,
     )
 
     if (sendResult.success) {

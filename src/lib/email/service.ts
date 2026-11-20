@@ -41,6 +41,12 @@ export interface SendEmailResult {
   provider?: string
   messageId?: string
   error?: string
+  /**
+   * Set when the provider refused the company From because its domain is
+   * not verified (or the verification lookup failed). Callers must not
+   * treat that as a transient delivery error: nothing was sent.
+   */
+  errorCode?: 'SENDER_DOMAIN_UNVERIFIED'
 }
 
 export interface EmailService {

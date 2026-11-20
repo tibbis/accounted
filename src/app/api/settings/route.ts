@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { ensureInitialized } from '@/lib/init'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import { validateBody } from '@/lib/api/validate'
 import { UpdateSettingsSchema } from '@/lib/api/schemas'
@@ -8,6 +9,10 @@ import { updateCompanySettings, withEntityTypeFallback } from '@/lib/company/set
 import { sessionFailureResponse } from '@/lib/operations/session'
 import type { OperationOutcome } from '@/lib/operations/types'
 import type { Logger } from '@/lib/logger'
+
+// The invoice From domain is checked with the email provider, which the email
+// extension registers. Without this, a save would refuse every address.
+ensureInitialized()
 
 export const GET = withRouteContext(
   'settings.get',

@@ -3,7 +3,7 @@ import { ensureInitialized } from '@/lib/init'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import { renderInvoicePdfBuffer } from '@/lib/invoices/render-invoice-pdf'
 import { getEmailService } from '@/lib/email/service'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import {
   generatePaymentConfirmationEmailHtml,
   generatePaymentConfirmationEmailSubject,
@@ -100,6 +100,17 @@ export const POST = withRouteContext<{ params: Promise<{ id: string }> }>(
       return errorResponseFromCode('INVOICE_SEND_COMPANY_SETTINGS_MISSING', opLog, { requestId })
     }
 
+    const invoiceSender = await takeInvoiceSender(supabase, companyId, company.company_name)
+    if (!invoiceSender.ok) {
+      const messages = invoiceSenderDomainMessages(invoiceSender.error)
+      return errorResponseFromCode('INVOICE_SENDER_DOMAIN_UNVERIFIED', opLog, {
+        requestId,
+        messageSv: messages.messageSv,
+        messageEn: messages.messageEn,
+        details: { domain: invoiceSender.error.domain, address: invoiceSender.error.address },
+      })
+    }
+
     // The paid copy still prints the payment block, so it needs the same
     // account data the invoice render does.
     const paymentAccountRequired = invoiceRequiresPaymentAccount(invoice as Invoice)
@@ -171,7 +182,7 @@ export const POST = withRouteContext<{ params: Promise<{ id: string }> }>(
       text: generatePaymentConfirmationEmailText(emailData),
       replyTo,
       fromName: company.company_name,
-      from: await resolveInvoiceSender(supabase, companyId, company.company_name),
+      from: invoiceSender.from,
       attachments: [
         {
           filename,

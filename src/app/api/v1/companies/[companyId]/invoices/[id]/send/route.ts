@@ -60,7 +60,7 @@ import { renderInvoicePdfBuffer } from '@/lib/invoices/render-invoice-pdf'
 import { snapshotInvoicePayee } from '@/lib/invoices/invoice-payee'
 import { applyPaymentLinkToInvoice } from '@/lib/extensions/payment-links'
 import { getEmailService } from '@/lib/email/service'
-import { resolveInvoiceSender } from '@/lib/email/invoice-sender'
+import { invoiceSenderDomainMessages, takeInvoiceSender } from '@/lib/email/invoice-sender'
 import {
   generateInvoiceEmailHtml,
   generateInvoiceEmailSubject,
@@ -368,6 +368,18 @@ export const POST = withApiV1<{ params: Promise<{ companyId: string; id: string 
       })
     }
     const settings = company as CompanySettings & { accounting_method?: string }
+    const invoiceSender = await takeInvoiceSender(ctx.supabase, ctx.companyId!, settings.company_name)
+    if (!invoiceSender.ok) {
+      const messages = invoiceSenderDomainMessages(invoiceSender.error)
+      return v1ErrorResponseFromCode('INVOICE_SENDER_DOMAIN_UNVERIFIED', ctx.log, {
+        requestId: ctx.requestId,
+        details: {
+          domain: invoiceSender.error.domain,
+          address: invoiceSender.error.address,
+          message: messages.messageEn,
+        },
+      })
+    }
     const paymentAccountRequired = invoiceRequiresPaymentAccount(typed)
     // Freeze the chosen bank account's payee at issue (no-op without a choice).
     const payeeSnapshot = await snapshotInvoicePayee(ctx.supabase, ctx.companyId!, typed, { persist: !ctx.dryRun })
@@ -725,7 +737,7 @@ export const POST = withApiV1<{ params: Promise<{ companyId: string; id: string 
         text,
         replyTo,
         fromName: settings.company_name ?? undefined,
-        from: await resolveInvoiceSender(ctx.supabase, ctx.companyId!, settings.company_name),
+        from: invoiceSender.from,
         filename,
         pdfBuffer,
       })

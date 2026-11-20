@@ -2799,8 +2799,16 @@
     "toast_save_failed": "Kunde inte spara"
   },
   "settings_invoice_email_recipients": {
-    "heading": "Svarsadress och kopior vid fakturautskick",
-    "description": "Svarsadressen är dit kundens svar på ett fakturamejl går. Kopiemottagarna läggs automatiskt till på varje fakturamejl; du kan komplettera listan när en enskild faktura skickas.",
+    "heading": "Avsändare, svarsadress och kopior vid fakturautskick",
+    "description": "Avsändaradressen är den adress kunden ser som Från. Svarsadressen är dit kundens svar går. Kopiemottagarna läggs automatiskt till på varje fakturamejl; du kan komplettera listan när en enskild faktura skickas.",
+    "from_label": "Avsändaradress (Från)",
+    "from_placeholder": "faktura@foretag.se",
+    "from_hint": "Lämna tomt för att använda instansens standardavsändare, med företagsnamnet som visningsnamn. Domänen måste redan vara verifierad hos e-postleverantören. En overifierad adress sparas inte, och mejlet skickas inte från ett annat bolag.",
+    "from_name_label": "Avsändarnamn",
+    "from_name_placeholder": "Företagsnamn",
+    "from_name_hint": "Namnet mottagaren ser. Lämna tomt för att använda företagsnamnet.",
+    "invalid_name_title": "Ogiltigt avsändarnamn",
+    "invalid_name_description": "Namnet får vara högst 120 tecken och inte innehålla radbrytningar eller vinkelparenteser.",
     "reply_to_label": "Svarsadress (Reply-To)",
     "reply_to_placeholder": "faktura@foretag.se",
     "reply_to_hint": "Kundens svar på \"Svara direkt på detta mejl\" går hit. Lämnas fältet tomt används företagets e-postadress, annars adressen för den som skickar fakturan.",
@@ -2816,7 +2824,7 @@
     "too_many_description": "Du kan ange högst {count} fasta CC- och BCC-adresser totalt.",
     "save_failed": "Kunde inte spara inställningarna",
     "saved_title": "Sparat",
-    "saved_description": "Svarsadressen och de fasta kopiemottagarna används vid nästa fakturautskick.",
+    "saved_description": "Avsändaren, svarsadressen och de fasta kopiemottagarna används vid nästa fakturautskick.",
     "save_failed_title": "Kunde inte spara",
     "saving": "Sparar...",
     "save": "Spara"

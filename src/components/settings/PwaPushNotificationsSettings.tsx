@@ -108,14 +108,14 @@ export function PwaPushNotificationsSettings() {
       })
     } catch (error) {
       setSubscribed(previous)
-      const reason = error instanceof Error ? error.message : ''
-      toast({
-        title:
-          reason === 'permission-denied'
-            ? t('pwa_push_permission_denied')
-            : t('pwa_push_save_failed'),
-        variant: 'destructive',
-      })
+      // Compare the thrown code here and pass only a translated string to the
+      // toast. A variable that holds error.message is treated as a raw
+      // user-facing error even when it is only compared.
+      let title = t('pwa_push_save_failed')
+      if (error instanceof Error && error.message === 'permission-denied') {
+        title = t('pwa_push_permission_denied')
+      }
+      toast({ title, variant: 'destructive' })
     } finally {
       setSaving(false)
     }

@@ -3015,6 +3015,32 @@ export const UpdateSettingsSchema = z.object({
   // Reply-To for invoice mail; null falls back to the company email, then the
   // sending user. Owner/admin only, like the copy lists (settings route).
   invoice_email_reply_to: invoiceEmailAddress.nullable().optional(),
+  // From for invoice, reminder and payment-confirmation mail. Null uses the
+  // instance default (RESEND_FROM_EMAIL / SMTP_FROM_EMAIL) with the company
+  // name as the display name. The domain is checked against the provider's
+  // verified domains before the value is stored.
+  invoice_email_from_address: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email('Ange en giltig e-postadress')
+    .max(254, 'E-postadressen får vara max 254 tecken')
+    .nullable()
+    .optional()
+    .describe(
+      'From address for invoice, reminder and payment-confirmation email. Null uses the instance default sender, with the company name as the display name. The domain must already be verified with the email provider; an unverified domain is rejected and mail is not sent from another company.',
+    ),
+  invoice_email_from_name: z
+    .string()
+    .trim()
+    .max(120, 'Avsändarnamnet får vara högst 120 tecken')
+    .refine(
+      (value) => value.length > 0 && !/[\r\n<>]/.test(value),
+      'Avsändarnamnet får inte vara tomt eller innehålla radbrytningar eller vinkelparenteser.',
+    )
+    .nullable()
+    .optional()
+    .describe('Display name for the invoice From address. Null uses the company name. 1 to 120 characters, no line breaks.'),
   // Invoice branding: colors enforced as #RRGGBB at the DB level too
   // (see migration 20260526120200_invoice_branding.sql). The dedicated
   // /api/settings/invoicing/branding route is the primary path; these

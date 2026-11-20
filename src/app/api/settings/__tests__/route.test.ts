@@ -51,6 +51,10 @@ vi.mock('@/lib/tax/deadline-generator', async (importOriginal) => {
 })
 
 import { PUT } from '../route'
+import {
+  registerSenderDomainChecker,
+  resetSenderDomainCheckerForTests,
+} from '@/lib/email/sender-domain-check'
 import { regenerateTaxDeadlinesForUser } from '@/lib/tax/deadline-generator'
 import { STANDARD_VOUCHER_SERIES_MAP } from '@/lib/bookkeeping/voucher-series-resolver'
 
@@ -61,6 +65,7 @@ describe('PUT /api/settings', () => {
     requireAuthMock.mockResolvedValue({ user: { id: 'user-1' }, supabase, error: null })
     requireWriteMock.mockResolvedValue({ ok: true })
     isAdminMock.mockResolvedValue(true)
+    resetSenderDomainCheckerForTests()
   })
 
   it('returns 401 when not authenticated', async () => {
@@ -483,6 +488,73 @@ describe('PUT /api/settings', () => {
       body: { invoice_email_reply_to: null },
     }), { params: Promise.resolve({}) })
     expect((await parseJsonResponse(cleared)).status).toBe(200)
+  })
+
+  it('saves a verified company from address and clears it', async () => {
+    registerSenderDomainChecker(async () => 'verified')
+    enqueueMany([
+      { data: { entity_type: 'aktiebolag', onboarding_complete: true } },
+      { data: { role: 'admin' } },
+      { data: { id: 's1', invoice_email_from_address: 'invoices@helle.cc', invoice_email_from_name: 'TADH Consulting AB' } },
+      { data: null, count: 5 },
+    ])
+    const saved = await PUT(createMockRequest('/api/settings', {
+      method: 'PUT',
+      body: {
+        invoice_email_from_address: 'Invoices@Helle.CC',
+        invoice_email_from_name: 'TADH Consulting AB',
+      },
+    }), { params: Promise.resolve({}) })
+    const parsed = await parseJsonResponse<{ data: { invoice_email_from_address: string; invoice_email_from_name: string } }>(saved)
+    expect(parsed.status).toBe(200)
+    expect(parsed.body.data.invoice_email_from_address).toBe('invoices@helle.cc')
+    expect(findCall('company_settings', 'update')?.[0]).toMatchObject({
+      invoice_email_from_address: 'invoices@helle.cc',
+      invoice_email_from_name: 'TADH Consulting AB',
+    })
+
+    enqueueMany([
+      { data: { entity_type: 'aktiebolag', onboarding_complete: true } },
+      { data: { role: 'admin' } },
+      { data: { id: 's1', invoice_email_from_address: null, invoice_email_from_name: null } },
+      { data: null, count: 5 },
+    ])
+    const cleared = await PUT(createMockRequest('/api/settings', {
+      method: 'PUT',
+      body: { invoice_email_from_address: null, invoice_email_from_name: null },
+    }), { params: Promise.resolve({}) })
+    expect((await parseJsonResponse(cleared)).status).toBe(200)
+  })
+
+  it('refuses an unverified company from address and does not write it', async () => {
+    registerSenderDomainChecker(async () => 'unverified')
+    enqueueMany([
+      { data: { entity_type: 'aktiebolag', onboarding_complete: true } },
+      { data: { role: 'admin' } },
+    ])
+    const response = await PUT(createMockRequest('/api/settings', {
+      method: 'PUT',
+      body: { invoice_email_from_address: 'invoices@helle.cc' },
+    }), { params: Promise.resolve({}) })
+    const { status, body } = await parseJsonResponse<{ error: string }>(response)
+    expect(status).toBe(400)
+    expect(body.error).toMatch(/helle\.cc/)
+    expect(body.error).toMatch(/inte verifierad/)
+    expect(findCall('company_settings', 'update')).toBeUndefined()
+  })
+
+  it('rejects a from address change from a regular member', async () => {
+    enqueueMany([
+      { data: { entity_type: 'aktiebolag', onboarding_complete: true } },
+      { data: { role: 'member' }, error: null },
+    ])
+    const response = await PUT(createMockRequest('/api/settings', {
+      method: 'PUT',
+      body: { invoice_email_from_address: 'invoices@helle.cc' },
+    }), { params: Promise.resolve({}) })
+    const { status, body } = await parseJsonResponse<{ error: { code: string } }>(response)
+    expect(status).toBe(403)
+    expect(body.error.code).toBe('FORBIDDEN')
   })
 
   it('rejects a malformed reply address', async () => {

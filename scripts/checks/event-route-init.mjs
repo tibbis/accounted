@@ -64,7 +64,6 @@ export const UNINITIALIZED_EMITTING_ROUTES = new Set([
   'app/api/extensions/woocommerce/orders/cron/route.ts',
   'app/api/extensions/zettle/orders/cron/route.ts',
   'app/api/import/sie/worker/cron/route.ts',
-  'app/api/invoices/reminders/cron/route.ts',
   // Raw requireAuth() routes that reach an emitting module only through a
   // helper that never emits (minimisePayload from lib/webhooks/handler,
   // detectFileMagic from document-service): the over-approximation above.

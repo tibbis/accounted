@@ -36,32 +36,60 @@ export function InvoiceEmailRecipientsSettings({
   const { toast } = useToast()
   const { role } = useCompany()
   // What is shown is exactly what is sent: no implicit fallback address.
+  const serverFrom = settings.invoice_email_from_address ?? ''
+  const serverFromName = settings.invoice_email_from_name ?? ''
   const serverReplyTo = settings.invoice_email_reply_to ?? ''
   const serverCcText = listText(settings.invoice_email_cc_addresses ?? [])
   const serverBccText = listText(settings.invoice_email_bcc_addresses ?? [])
+  const [fromAddress, setFromAddress] = useState(serverFrom)
+  const [fromName, setFromName] = useState(serverFromName)
   const [replyTo, setReplyTo] = useState(serverReplyTo)
   const [ccText, setCcText] = useState(serverCcText)
   const [bccText, setBccText] = useState(serverBccText)
   const [isSaving, setIsSaving] = useState(false)
-  const previousServerText = useRef({ replyTo: serverReplyTo, cc: serverCcText, bcc: serverBccText })
+  const previousServerText = useRef({
+    from: serverFrom,
+    fromName: serverFromName,
+    replyTo: serverReplyTo,
+    cc: serverCcText,
+    bcc: serverBccText,
+  })
 
   useEffect(() => {
     const previous = previousServerText.current
+    setFromAddress((current) => current === previous.from ? serverFrom : current)
+    setFromName((current) => current === previous.fromName ? serverFromName : current)
     setReplyTo((current) => current === previous.replyTo ? serverReplyTo : current)
     setCcText((current) => current === previous.cc ? serverCcText : current)
     setBccText((current) => current === previous.bcc ? serverBccText : current)
-    previousServerText.current = { replyTo: serverReplyTo, cc: serverCcText, bcc: serverBccText }
-  }, [serverBccText, serverCcText, serverReplyTo])
+    previousServerText.current = {
+      from: serverFrom,
+      fromName: serverFromName,
+      replyTo: serverReplyTo,
+      cc: serverCcText,
+      bcc: serverBccText,
+    }
+  }, [serverBccText, serverCcText, serverFrom, serverFromName, serverReplyTo])
 
   if (role !== 'owner' && role !== 'admin') return null
 
   async function save() {
+    const from = fromAddress.trim()
+    const name = fromName.trim()
     const replyToAddress = replyTo.trim()
     const cc = parseInvoiceRecipientText(ccText)
     const bcc = parseInvoiceRecipientText(bccText)
-    const invalid = [replyToAddress, ...cc, ...bcc].find(
+    const invalid = [from, replyToAddress, ...cc, ...bcc].find(
       (address) => address !== '' && !EMAIL_PATTERN.test(address),
     )
+    if (name.length > 120 || /[\r\n<>]/.test(name)) {
+      toast({
+        title: t('invalid_name_title'),
+        description: t('invalid_name_description'),
+        variant: 'destructive',
+      })
+      return
+    }
 
     if (invalid) {
       toast({
@@ -81,6 +109,8 @@ export function InvoiceEmailRecipientsSettings({
     }
 
     const updates = {
+      invoice_email_from_address: from || null,
+      invoice_email_from_name: name || null,
       invoice_email_reply_to: replyToAddress || null,
       invoice_email_cc_addresses: cc,
       invoice_email_bcc_addresses: bcc,
@@ -99,6 +129,8 @@ export function InvoiceEmailRecipientsSettings({
       }
 
       onUpdate(updates)
+      setFromAddress(from)
+      setFromName(name)
       setReplyTo(replyToAddress)
       setCcText(listText(cc))
       setBccText(listText(bcc))
@@ -116,6 +148,35 @@ export function InvoiceEmailRecipientsSettings({
 
   return (
     <SettingsGroup label={t('heading')} help={t('description')}>
+      <SettingsRow
+        label={t('from_label')}
+        htmlFor="invoice-email-from"
+        help={t('from_hint')}
+      >
+        <SettingsInput
+          id="invoice-email-from"
+          type="email"
+          autoComplete="off"
+          value={fromAddress}
+          onChange={(event) => setFromAddress(event.target.value)}
+          placeholder={t('from_placeholder')}
+        />
+      </SettingsRow>
+      <SettingsRow
+        label={t('from_name_label')}
+        htmlFor="invoice-email-from-name"
+        help={t('from_name_hint')}
+      >
+        <SettingsInput
+          id="invoice-email-from-name"
+          type="text"
+          autoComplete="off"
+          value={fromName}
+          onChange={(event) => setFromName(event.target.value)}
+          placeholder={settings.company_name ?? t('from_name_placeholder')}
+          maxLength={120}
+        />
+      </SettingsRow>
       <SettingsRow
         label={t('reply_to_label')}
         htmlFor="invoice-email-reply-to"

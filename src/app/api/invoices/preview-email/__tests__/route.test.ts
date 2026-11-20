@@ -24,6 +24,7 @@ vi.mock('@/lib/company/context', () => ({
 // own tests live in lib/email/__tests__.
 vi.mock('@/lib/email/invoice-sender', () => ({
   resolveInvoiceSender: (...args: unknown[]) => resolveInvoiceSenderMock(...args),
+  takeInvoiceSender: async () => ({ ok: true as const, from: await resolveInvoiceSenderMock() }),
 }))
 
 vi.mock('@/lib/currency/riksbanken', async (importOriginal) => ({
