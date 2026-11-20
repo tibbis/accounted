@@ -11,6 +11,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { NotificationType } from '@/types'
+import { addDaysIso, todayIsoStockholm } from '@/lib/dates/iso'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { NEEDS_DOC_SOURCE_TYPES } from '@/lib/worklist/types'
 import { NON_ISSUED_INVOICE_STATUSES_FILTER } from '@/lib/bookkeeping/matchable-statuses'
@@ -34,17 +35,10 @@ export async function sendTaxDeadlineNotifications(
   let sent = 0
   let skipped = 0
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const todayStr = today.toISOString().split('T')[0]
-
-  const in7Days = new Date(today)
-  in7Days.setDate(in7Days.getDate() + 7)
-  const in7DaysStr = in7Days.toISOString().split('T')[0]
-
-  const tomorrow = new Date(today)
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  const tomorrowStr = tomorrow.toISOString().split('T')[0]
+  const todayStr = todayIsoStockholm()
+  const today = new Date(`${todayStr}T12:00:00Z`)
+  const in7DaysStr = addDaysIso(todayStr, 7)
+  const tomorrowStr = addDaysIso(todayStr, 1)
 
   const { data: deadlines } = await supabase
     .from('deadlines')
@@ -117,21 +111,11 @@ export async function sendInvoiceNotifications(
   let sent = 0
   let skipped = 0
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const todayStr = today.toISOString().split('T')[0]
-
-  const in3Days = new Date(today)
-  in3Days.setDate(in3Days.getDate() + 3)
-  const in3DaysStr = in3Days.toISOString().split('T')[0]
-
-  const daysAgo3 = new Date(today)
-  daysAgo3.setDate(daysAgo3.getDate() - 3)
-  const daysAgo3Str = daysAgo3.toISOString().split('T')[0]
-
-  const daysAgo7 = new Date(today)
-  daysAgo7.setDate(daysAgo7.getDate() - 7)
-  const daysAgo7Str = daysAgo7.toISOString().split('T')[0]
+  const todayStr = todayIsoStockholm()
+  const today = new Date(`${todayStr}T12:00:00Z`)
+  const in3DaysStr = addDaysIso(todayStr, 3)
+  const daysAgo3Str = addDaysIso(todayStr, -3)
+  const daysAgo7Str = addDaysIso(todayStr, -7)
 
   const { data: invoices } = await supabase
     .from('invoices')

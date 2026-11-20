@@ -18,9 +18,14 @@ import type {
   GenerateStructuredResult,
   GenerateTextRequest,
   GenerateTextResult,
+  StreamAgentRoundRequest,
+  StreamAgentRoundResult,
+  StreamAgentStopReason,
+  StreamAgentToolSchema,
 } from '../types'
 
 const DEFAULT_MAX_STEPS = 4
+const STREAM_AGENT_ROUND_TIMEOUT_MS = 90_000
 
 /** Earlier turns as message turns, then the prompt as the final user message. */
 function messagesWithHistory(prompt: string, history: AiChatTurn[]): ModelMessage[] {
@@ -266,5 +271,79 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
         ...(result.finishReason === 'length' ? { truncated: true } : {}),
       }
     },
+
+    async streamAgentRound(req: StreamAgentRoundRequest): Promise<StreamAgentRoundResult> {
+      const model = modelFor(req.tier)
+      const { jsonSchema, stepCountIs, streamText, tool } = await import('ai')
+      const tools = capabilities.toolUse ? toSdkToolSchemas(req.tools, tool, jsonSchema) : undefined
+      // One model round only: the chat loop executes tools itself. A hanging
+      // Gemini SSE used to leave fullStream waiting forever (Docker has no
+      // Vercel maxDuration); timeout turns that into a retryable error.
+      const provider = await getProvider()
+      const result = streamText({
+        model: provider(model),
+        ...(req.system ? { system: req.system } : {}),
+        messages: req.messages as ModelMessage[],
+        maxOutputTokens: req.maxTokens,
+        timeout: STREAM_AGENT_ROUND_TIMEOUT_MS,
+        ...(tools ? { tools, stopWhen: stepCountIs(1) } : {}),
+      })
+
+      let text = ''
+      const toolUses: StreamAgentRoundResult['toolUses'] = []
+      let finishReason: string | undefined
+
+      for await (const part of result.fullStream) {
+        if (part.type === 'text-delta') {
+          text += part.text
+          req.onTextDelta(part.text)
+        } else if (part.type === 'reasoning-delta') {
+          req.onReasoningDelta?.(part.text)
+        } else if (part.type === 'tool-input-start') {
+          req.onToolUseStart?.({ id: part.id, name: part.toolName })
+        } else if (part.type === 'tool-call') {
+          toolUses.push({
+            id: part.toolCallId,
+            name: part.toolName,
+            input: (part.input ?? {}) as Record<string, unknown>,
+          })
+        } else if (part.type === 'finish') {
+          finishReason = part.finishReason
+        } else if (part.type === 'error') {
+          throw part.error instanceof Error ? part.error : new Error(String(part.error))
+        }
+      }
+
+      return {
+        text,
+        toolUses,
+        stopReason: mapFinishReason(finishReason),
+        model,
+      }
+    },
   }
+}
+
+/** Tool schemas only: the chat loop executes tools itself. */
+function toSdkToolSchemas(
+  defs: StreamAgentToolSchema[],
+  tool: typeof import('ai').tool,
+  jsonSchema: typeof import('ai').jsonSchema,
+): ToolSet | undefined {
+  if (defs.length === 0) return undefined
+  const out: ToolSet = {}
+  for (const def of defs) {
+    out[def.name] = tool({
+      description: def.description,
+      inputSchema: jsonSchema<Record<string, unknown>>(def.jsonSchema),
+    })
+  }
+  return out
+}
+
+function mapFinishReason(reason: string | undefined): StreamAgentStopReason {
+  if (reason === 'tool-calls') return 'tool_use'
+  if (reason === 'length') return 'max_tokens'
+  if (reason === 'stop') return 'end'
+  return 'other'
 }

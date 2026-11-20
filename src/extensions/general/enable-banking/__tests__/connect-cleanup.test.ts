@@ -233,7 +233,7 @@ describe('POST /connect credential prefill', () => {
     expect(response.status).toBe(200)
     expect(mockStartAuthorization.mock.calls[0][7]).toBeUndefined()
     expect(((await response.json()) as { company_id_clipboard: string | null }).company_id_clipboard).toBe(
-      '5568098239',
+      '5544556672',
     )
   })
 })

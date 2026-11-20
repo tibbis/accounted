@@ -17,12 +17,9 @@ import {
   createPeriodLockedPayload,
   createYearClosedPayload,
   createInvoiceSentPayload,
-  createReceiptExtractedPayload,
-  createReceiptMatchedPayload,
   withCompanyDeepLink,
 } from './payload-builders'
 import { listCompanyMemberUserIds, loadCompanyNames } from './company-targets'
-import { invoiceNumberDisplay } from '@/lib/invoices/display'
 import type { NotificationPayload } from './notification-sender'
 import type { NotificationType } from '@/types'
 import type { SupabaseClient } from '@supabase/supabase-js'
@@ -207,53 +204,11 @@ async function handleInvoiceSent(
   await notifyCompany(
     supabase,
     companyId,
-    createInvoiceSentPayload(invoiceNumberDisplay(invoice.invoice_number), invoice.id),
+    createInvoiceSentPayload(invoice.invoice_number ?? '', invoice.id),
     'invoice_sent',
     invoice.id,
     ctx?.log ?? console,
     `Invoice sent notification for #${invoice.invoice_number}`,
-  )
-}
-
-async function handleReceiptExtracted(
-  payload: EventPayload<'receipt.extracted'>,
-  ctx?: ExtensionContext
-): Promise<void> {
-  const { receipt, userId, companyId } = payload
-
-  const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
-  if (!settings?.receiptExtractedEnabled) return
-
-  const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  await notifyCompany(
-    supabase,
-    companyId,
-    createReceiptExtractedPayload(receipt.merchant_name, receipt.id),
-    'receipt_extracted',
-    receipt.id,
-    ctx?.log ?? console,
-    `Receipt extracted notification for ${receipt.id}`,
-  )
-}
-
-async function handleReceiptMatched(
-  payload: EventPayload<'receipt.matched'>,
-  ctx?: ExtensionContext
-): Promise<void> {
-  const { receipt, transaction, userId, companyId } = payload
-
-  const settings = ctx ? await getSettingsViaCtx(ctx) : await getSettings(userId)
-  if (!settings?.receiptMatchedEnabled) return
-
-  const supabase = ctx?.supabase ?? await (await import('@/lib/supabase/server')).createClient()
-  await notifyCompany(
-    supabase,
-    companyId,
-    createReceiptMatchedPayload(receipt.id, transaction.id),
-    'receipt_matched',
-    receipt.id,
-    ctx?.log ?? console,
-    `Receipt matched notification for ${receipt.id}`,
   )
 }
 
@@ -271,14 +226,5 @@ export const pushNotificationsExtension: Extension = {
     { eventType: 'period.locked', handler: handlePeriodLocked },
     { eventType: 'period.year_closed', handler: handleYearClosed },
     { eventType: 'invoice.sent', handler: handleInvoiceSent },
-    { eventType: 'receipt.extracted', handler: handleReceiptExtracted },
-    { eventType: 'receipt.matched', handler: handleReceiptMatched },
   ],
-  settingsPanel: {
-    label: 'Push-notiser',
-    path: '/settings/account',
-  },
-  async onInstall(ctx) {
-    await ctx.settings.set('settings', DEFAULT_SETTINGS)
-  },
 }

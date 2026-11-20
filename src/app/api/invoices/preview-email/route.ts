@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import { ensureInitialized } from '@/lib/init'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import { PRIVATE_NO_STORE_HEADERS, privateNoStore } from '@/lib/api/private-no-store'
 import { validateBody } from '@/lib/api/validate'
@@ -17,8 +16,6 @@ import {
   resolveInvoiceReplyTo,
 } from '@/lib/invoices/email-recipients'
 import { errorResponseFromCode } from '@/lib/errors/get-structured-error'
-
-ensureInitialized()
 
 /**
  * POST /api/invoices/preview-email

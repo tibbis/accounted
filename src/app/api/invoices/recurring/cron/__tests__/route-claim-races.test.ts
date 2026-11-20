@@ -220,7 +220,10 @@ vi.mock('@/lib/logger', async (importOriginal) => {
 
 // The far end of the send: what it would do to the invoice, and the mail.
 vi.mock('@/lib/email/service', () => ({ getEmailService: async () => ({ isConfigured: () => true }) }))
-vi.mock('@/lib/email/invoice-sender', () => ({ resolveInvoiceSender: async () => undefined }))
+vi.mock('@/lib/email/invoice-sender', () => ({
+  resolveInvoiceSender: async () => undefined,
+  takeInvoiceSender: async () => ({ ok: true, from: undefined }),
+}))
 vi.mock('@/lib/email/invoice-templates', () => ({
   generateInvoiceEmailHtml: () => '<p>Faktura</p>',
   generateInvoiceEmailText: () => 'Faktura',

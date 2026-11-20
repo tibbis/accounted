@@ -175,5 +175,6 @@ export function withCallLimit(service: AiService, limitMs: number = AI_CALL_LIMI
       limited(req.signal, limitMs, (signal) => service.generateStructured(signal ? { ...req, signal } : req)),
     extractFromDocument: (req) =>
       limited(req.signal, limitMs, (signal) => service.extractFromDocument(signal ? { ...req, signal } : req)),
+    streamAgentRound: (req) => limited(undefined, null, () => service.streamAgentRound(req)),
   }
 }

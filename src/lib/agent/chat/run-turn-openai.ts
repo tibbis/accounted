@@ -204,7 +204,7 @@ export async function runOpenAICompatibleChatLoop(args: OpenAICompatibleTurnArgs
         })
       }
 
-      const tool = agentToolRegistry.get(tu.name)
+      const tool = await agentToolRegistry.get(tu.name)
       if (!tool) {
         toolResultBlocks.push({
           type: 'tool_result',

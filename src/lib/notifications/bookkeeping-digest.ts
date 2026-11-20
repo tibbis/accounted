@@ -150,7 +150,7 @@ export async function runBookkeepingDigest(
     failed: 0,
   }
 
-  const email = getEmailService()
+  const email = await getEmailService()
   if (!email.isConfigured()) {
     log.info('bookkeeping digest skipped: email service not configured')
     return summary
@@ -262,7 +262,7 @@ async function sendDigestForCompany(
   input: CompanyDigestInput
 ): Promise<{ sent: number; skippedDuplicate: number; skippedPushDelivered: number; failed: number }> {
   const out = { sent: 0, skippedDuplicate: 0, skippedPushDelivered: 0, failed: 0 }
-  const email = getEmailService()
+  const email = await getEmailService()
 
   const { data: company } = await supabase
     .from('companies')

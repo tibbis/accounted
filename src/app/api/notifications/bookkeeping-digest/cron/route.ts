@@ -1,10 +1,7 @@
 import { NextResponse } from 'next/server'
-import { ensureInitialized } from '@/lib/init'
 import { withCronContext } from '@/lib/api/with-cron-context'
 import { createServiceClient } from '@/lib/supabase/server'
 import { runBookkeepingDigest } from '@/lib/notifications/bookkeeping-digest'
-
-ensureInitialized()
 
 /**
  * GET /api/notifications/bookkeeping-digest/cron, daily 05:45 UTC.

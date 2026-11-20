@@ -85,6 +85,7 @@ vi.mock('@/lib/sandbox/ensure-agent', () => ({ ensureSandboxAgentProfile: vi.fn(
 vi.mock('@/lib/onboarding/ai-clients.server', () => ({
   readAiConnection: loaders.readAiConnection,
   readFirstTaskClient: loaders.readFirstTaskClient,
+  loadAiConnection: loaders.readAiConnection,
 }))
 vi.mock('@/lib/skatteverket/ombud-access', () => ({
   hasSkatteverketOmbudReadAccess: loaders.hasSkatteverketOmbudReadAccess,

@@ -1,13 +1,17 @@
-import { orgNumberKey } from '@/lib/invariants/org-number'
 import type { AuthMethod, AuthMethodCredential } from './api-client'
+import { orgNumberKey } from '@/lib/invariants/org-number'
 import { companyIdPrefillList, type OrgNumberCompany } from '@/lib/company/org-number-clipboard'
 
 export type { OrgNumberCompany as PrefillCompany }
 export {
   companyIdClipboardValue,
-  companyIdDigits,
   companyIdPrefillList,
 } from '@/lib/company/org-number-clipboard'
+
+/** The 10-digit organisationsnummer Swedish banks call företags-ID, or null when the stored number reads as none. */
+export function companyIdDigits(company: OrgNumberCompany): string | null {
+  return orgNumberKey(company.org_number)
+}
 
 /**
  * Credentials we can fill in for the PSU before Enable Banking's hosted page
@@ -40,16 +44,6 @@ export {
 
 /** The credential name Enable Banking uses for the company identifier. */
 const COMPANY_ID_CREDENTIAL = 'companyId'
-
-export interface PrefillCompany {
-  org_number: string | null
-  entity_type: string | null
-}
-
-/** The 10-digit organisationsnummer Swedish banks call företags-ID, or null when the stored number reads as none. */
-export function companyIdDigits(company: PrefillCompany): string | null {
-  return orgNumberKey(company.org_number)
-}
 
 /** Whether the method asks the PSU for a company identifier at all. */
 export function wantsCompanyId(method: AuthMethod | undefined): boolean {

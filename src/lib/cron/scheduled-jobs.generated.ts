@@ -57,6 +57,8 @@ export const SCHEDULED_JOBS: readonly ScheduledJob[] = [
   { path: '/api/bookkeeping/accruals/post-due/cron', schedule: '15 5 * * *', maxDurationSeconds: 300 },
   { path: '/api/bookkeeping/auto-lock/cron', schedule: '40 1 * * *', maxDurationSeconds: 300 },
   { path: '/api/receipt-hunt/cron', schedule: '30 5 * * *', maxDurationSeconds: 300 },
+  { path: '/api/extensions/push-notifications/cron', schedule: '0 9 * * *', maxDurationSeconds: 300 },
+  { path: '/api/notifications/bookkeeping-digest/cron', schedule: '45 5 * * *', maxDurationSeconds: 300 },
   { path: '/api/peppol/inbound/cron', schedule: '*/10 * * * *', maxDurationSeconds: 300 },
   { path: '/api/digital-mailboxes/cron', schedule: '3-59/10 * * * *', maxDurationSeconds: 300 },
   { path: '/api/billing/usage/cron', schedule: '0 6 1 * *', maxDurationSeconds: 300 },

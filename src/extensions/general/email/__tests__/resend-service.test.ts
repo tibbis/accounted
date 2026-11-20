@@ -211,7 +211,7 @@ describe('ResendEmailService.sendEmail', () => {
   })
 
   it('does not fall back to the platform sender when Resend rejects the company domain as unverified', async () => {
-    sendMock.mockResolvedValueOnce({ data: null, error: { message: 'The hansbolag.example domain is not verified' } })
+    sendMock.mockResolvedValueOnce({ data: null, error: { message: 'The hansbolag.example domain is not verified', statusCode: 403, name: 'validation_error' } })
     const result = await service.sendEmail({
       ...base,
       from: { name: 'Hans Bolag AB', address: 'faktura@hansbolag.example' },
@@ -307,7 +307,7 @@ describe('ResendEmailService.sendEmail', () => {
 
   it('passes the idempotency key, and a key of its own to the platform-sender retry', async () => {
     sendMock
-      .mockResolvedValueOnce({ data: null, error: { message: 'domain not verified', statusCode: 403, name: 'validation_error' } })
+      .mockResolvedValueOnce({ data: null, error: { message: 'invalid attachment', statusCode: 422, name: 'validation_error' } })
       .mockResolvedValueOnce({ data: { id: 'msg_5' }, error: null })
     const result = await service.sendEmail({
       ...base,

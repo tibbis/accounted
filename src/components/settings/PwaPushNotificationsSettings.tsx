@@ -192,7 +192,6 @@ export function PwaPushNotificationsSettings() {
           <Button
             type="button"
             variant="outline"
-            size="sm"
             onClick={() => void handleTestPush()}
             disabled={!subscribed || saving || testing}
           >

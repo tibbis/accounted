@@ -215,10 +215,7 @@ describe('readVercelCrons', () => {
  * Every app/api/**\/cron route must either be in vercel.json (and therefore in
  * both crontabs) or be named here with a reason.
  */
-const INTENTIONALLY_UNSCHEDULED: Readonly<Record<string, string>> = {
-  '/api/extensions/stripe/sync/cron':
-    'Pre-existing gap: the docstring says every 15 minutes but no schedule exists anywhere. Needs a vercel.json entry, which is outside the crontab-parity change.',
-}
+const INTENTIONALLY_UNSCHEDULED: Readonly<Record<string, string>> = {}
 
 function findCronRoutes(dir: string, urlPrefix: string): string[] {
   const found: string[] = []
