@@ -1,17 +1,7 @@
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import {
-  generateText,
-  jsonSchema,
-  Output,
-  stepCountIs,
-  streamText,
-  tool,
-  type ModelMessage,
-  type ToolSet,
-  type UserContent,
-} from 'ai'
-import { capabilitiesFor, type ResolvedAiConfig } from '../config'
+import type { OpenAICompatibleProvider } from '@ai-sdk/openai-compatible'
 import { wrapGeminiThoughtSignatureFetch } from '../gemini-thought-signatures'
+import type { ModelMessage, ToolSet, UserContent } from 'ai'
+import { capabilitiesFor, type ResolvedAiConfig } from '../config'
 import { extractJsonObject } from '../json'
 import { rasterizePdf } from '../rasterize-pdf'
 import type {
@@ -28,23 +18,9 @@ import type {
   GenerateStructuredResult,
   GenerateTextRequest,
   GenerateTextResult,
-  StreamAgentRoundRequest,
-  StreamAgentRoundResult,
-  StreamAgentStopReason,
-  StreamAgentToolSchema,
 } from '../types'
 
 const DEFAULT_MAX_STEPS = 4
-const STREAM_AGENT_ROUND_TIMEOUT_MS = 90_000
-
-function addUsage(a: AiUsage, b: AiUsage): AiUsage {
-  return {
-    inputTokens: (a.inputTokens ?? 0) + (b.inputTokens ?? 0),
-    outputTokens: (a.outputTokens ?? 0) + (b.outputTokens ?? 0),
-    cacheCreationInputTokens: (a.cacheCreationInputTokens ?? 0) + (b.cacheCreationInputTokens ?? 0),
-    cacheReadInputTokens: (a.cacheReadInputTokens ?? 0) + (b.cacheReadInputTokens ?? 0),
-  }
-}
 
 /** Earlier turns as message turns, then the prompt as the final user message. */
 function messagesWithHistory(prompt: string, history: AiChatTurn[]): ModelMessage[] {
@@ -61,8 +37,9 @@ function messagesWithHistory(prompt: string, history: AiChatTurn[]): ModelMessag
  * runs the loop itself (calls execute, feeds the result back) up to the
  * stopWhen bound. Returns undefined when there is nothing to attach.
  */
-function toSdkTools(defs: AiToolDef[] | undefined): ToolSet | undefined {
+async function toSdkTools(defs: AiToolDef[] | undefined): Promise<ToolSet | undefined> {
   if (!defs || defs.length === 0) return undefined
+  const { jsonSchema, tool } = await import('ai')
   const out: ToolSet = {}
   for (const def of defs) {
     out[def.name] = tool({
@@ -77,26 +54,6 @@ function toSdkTools(defs: AiToolDef[] | undefined): ToolSet | undefined {
     })
   }
   return out
-}
-
-/** Tool schemas only: the chat loop executes tools itself (staging / StreamEvents). */
-function toSdkToolSchemas(defs: StreamAgentToolSchema[]): ToolSet | undefined {
-  if (defs.length === 0) return undefined
-  const out: ToolSet = {}
-  for (const def of defs) {
-    out[def.name] = tool({
-      description: def.description,
-      inputSchema: jsonSchema<Record<string, unknown>>(def.jsonSchema),
-    })
-  }
-  return out
-}
-
-function mapFinishReason(reason: string | undefined): StreamAgentStopReason {
-  if (reason === 'tool-calls') return 'tool_use'
-  if (reason === 'length') return 'max_tokens'
-  if (reason === 'stop') return 'end'
-  return 'other'
 }
 
 /**
@@ -119,24 +76,28 @@ function mapFinishReason(reason: string | undefined): StreamAgentStopReason {
  *   - JSON: the default is JSON-in-prose plus the caller's extraction + Zod,
  *     which works everywhere; AI_STRICT_JSON=true opts into response_format
  *     json_schema for providers that enforce it.
- *   - Gemini 3 thought signatures: Google's OpenAI-compat tool loop 400s
- *     unless extra_content.google.thought_signature is echoed. Wrapped fetch
- *     restores that field; other OpenAI-compat endpoints are untouched.
  */
 
 export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService {
-  const provider = createOpenAICompatible({
-    name: 'accounted-byo',
-    baseURL: cfg.baseUrl ?? '',
-    // Only send a key when one is configured: a keyless local server would
-    // reject or ignore an empty Bearer, and omitting it means no auth header.
-    ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-    supportsStructuredOutputs: cfg.strictJson,
-    // Gemini 3 400s a tool-loop turn when thought_signature is dropped. The
-    // SDK stores it under this custom provider name and only echoes
-    // providerOptions.google; wrap fetch so the wire format is restored.
-    fetch: wrapGeminiThoughtSignatureFetch(),
-  })
+  // The AI SDK is imported on first call, not at module load: lib/ai is
+  // reached from every route, and only a deployment on this backend calls it.
+  let cachedProvider: OpenAICompatibleProvider | null = null
+  const getProvider = async (): Promise<OpenAICompatibleProvider> => {
+    if (!cachedProvider) {
+      const { createOpenAICompatible } = await import('@ai-sdk/openai-compatible')
+      cachedProvider = createOpenAICompatible({
+        name: 'accounted-byo',
+        baseURL: cfg.baseUrl ?? '',
+        // Only send a key when one is configured: a keyless local server would
+        // reject or ignore an empty Bearer, and omitting it means no auth header.
+        ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+        supportsStructuredOutputs: cfg.strictJson,
+        // Gemini 3 400s a tool-loop turn when thought_signature is dropped.
+        fetch: wrapGeminiThoughtSignatureFetch(),
+      })
+    }
+    return cachedProvider
+  }
   const capabilities = capabilitiesFor(cfg)
   const modelFor = (tier: AiTier): string => {
     const id = cfg.models[tier]
@@ -211,61 +172,31 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
 
     async generateText(req: GenerateTextRequest): Promise<GenerateTextResult> {
       const model = modelFor(req.tier)
+      const provider = await getProvider()
+      const { generateText, stepCountIs } = await import('ai')
       // Only attach tools when the configured model advertises tool use; a
       // text-only local model still answers, just from the prompt (+ snapshot).
-      const tools = capabilities.toolUse ? toSdkTools(req.tools) : undefined
-      const maxSteps = req.maxSteps ?? DEFAULT_MAX_STEPS
-      const history = req.history ?? []
-      const hasHistory = history.length > 0
-      const initialMessages: ModelMessage[] = hasHistory
-        ? messagesWithHistory(req.prompt, history)
-        : [{ role: 'user', content: req.prompt }]
-
+      const tools = capabilities.toolUse ? await toSdkTools(req.tools) : undefined
       const result = await generateText({
         model: provider(model),
         ...(req.system ? { system: req.system } : {}),
         // The SDK takes either `prompt` or `messages`, never both: a plain
         // single-turn call keeps `prompt`; a conversation sends the earlier
         // turns as real messages with the prompt as the final user turn.
-        ...(hasHistory ? { messages: initialMessages } : { prompt: req.prompt }),
+        ...(req.history && req.history.length > 0
+          ? { messages: messagesWithHistory(req.prompt, req.history) }
+          : { prompt: req.prompt }),
         maxOutputTokens: req.maxTokens,
-        ...(tools
-          ? {
-              tools,
-              stopWhen: stepCountIs(maxSteps),
-              // Mirror anthropic-family: the last allowed step must answer in
-              // prose. Without this, a VAT-style first question can burn the
-              // whole step budget on tool calls and return empty text.
-              prepareStep: ({ stepNumber }) =>
-                stepNumber === maxSteps - 1 ? { toolChoice: 'none' as const } : {},
-            }
-          : {}),
+        ...(tools ? { tools, stopWhen: stepCountIs(req.maxSteps ?? DEFAULT_MAX_STEPS), prepareStep: ({ stepNumber }: { stepNumber: number }) => stepNumber === (req.maxSteps ?? DEFAULT_MAX_STEPS) - 1 ? { toolChoice: 'none' as const } : {} } : {}),
+        ...(req.signal ? { abortSignal: req.signal } : {}),
       })
-
-      let text = result.text.trim()
-      let usage = usageOf(result)
-
-      // Belt-and-suspenders: if the model still ends tool-only (ignored
-      // toolChoice, or max_tokens on the last step), replay the transcript
-      // once more with tools declared but toolChoice none.
-      if (!text && tools && result.steps.length > 0) {
-        const final = await generateText({
-          model: provider(model),
-          ...(req.system ? { system: req.system } : {}),
-          messages: [...initialMessages, ...result.response.messages],
-          maxOutputTokens: req.maxTokens,
-          tools,
-          toolChoice: 'none',
-        })
-        text = final.text.trim()
-        usage = addUsage(usage, usageOf(final))
-      }
-
-      return { text, model, usage }
+      return { text: result.text.trim(), model, usage: usageOf(result) }
     },
 
     async generateStructured(req: GenerateStructuredRequest): Promise<GenerateStructuredResult> {
       const model = modelFor(req.tier)
+      const provider = await getProvider()
+      const { generateText, jsonSchema, Output } = await import('ai')
       if (cfg.strictJson) {
         const result = await generateText({
           model: provider(model),
@@ -273,6 +204,7 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
           prompt: req.prompt,
           maxOutputTokens: req.maxTokens,
           output: Output.object({ schema: jsonSchema<Record<string, unknown>>(req.schema.jsonSchema) }),
+          ...(req.signal ? { abortSignal: req.signal } : {}),
         })
         return { value: result.output, model, usage: usageOf(result) }
       }
@@ -286,6 +218,7 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
         system: req.system ? `${req.system}\n\n${schemaHint}` : schemaHint,
         prompt: req.prompt,
         maxOutputTokens: req.maxTokens,
+        ...(req.signal ? { abortSignal: req.signal } : {}),
       })
       const value: unknown = JSON.parse(extractJsonObject(result.text))
       return { value, model, usage: usageOf(result) }
@@ -296,6 +229,8 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
       const model = modelFor(req.tier ?? 'extraction')
       const built = await buildUserContent(req.document, req.instruction)
       if (!built.ok) return { ok: false, skipped: built.skipped }
+      const provider = await getProvider()
+      const { generateText, jsonSchema, Output } = await import('ai')
       const messages: ModelMessage[] = [{ role: 'user', content: built.content }]
       if (cfg.strictJson && req.jsonSchema) {
         const result = await generateText({
@@ -304,6 +239,7 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
           messages,
           maxOutputTokens: req.maxTokens,
           output: Output.object({ schema: jsonSchema<Record<string, unknown>>(req.jsonSchema) }),
+          ...(req.signal ? { abortSignal: req.signal } : {}),
         })
         return {
           ok: true,
@@ -319,6 +255,7 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
         system: req.system,
         messages,
         maxOutputTokens: req.maxTokens,
+        ...(req.signal ? { abortSignal: req.signal } : {}),
       })
       return {
         ok: true,
@@ -327,54 +264,6 @@ export function createOpenAICompatibleService(cfg: ResolvedAiConfig): AiService 
         usage: usageOf(result),
         ...(built.pagesRasterized ? { pagesRasterized: built.pagesRasterized } : {}),
         ...(result.finishReason === 'length' ? { truncated: true } : {}),
-      }
-    },
-
-    async streamAgentRound(req: StreamAgentRoundRequest): Promise<StreamAgentRoundResult> {
-      const model = modelFor(req.tier)
-      const tools = capabilities.toolUse ? toSdkToolSchemas(req.tools) : undefined
-      // One model round only: the chat loop executes tools itself. A hanging
-      // Gemini SSE used to leave fullStream waiting forever (Docker has no
-      // Vercel maxDuration); timeout turns that into a retryable error.
-      const result = streamText({
-        model: provider(model),
-        ...(req.system ? { system: req.system } : {}),
-        messages: req.messages as ModelMessage[],
-        maxOutputTokens: req.maxTokens,
-        timeout: STREAM_AGENT_ROUND_TIMEOUT_MS,
-        ...(tools ? { tools, stopWhen: stepCountIs(1) } : {}),
-      })
-
-      let text = ''
-      const toolUses: StreamAgentRoundResult['toolUses'] = []
-      let finishReason: string | undefined
-
-      for await (const part of result.fullStream) {
-        if (part.type === 'text-delta') {
-          text += part.text
-          req.onTextDelta(part.text)
-        } else if (part.type === 'reasoning-delta') {
-          req.onReasoningDelta?.(part.text)
-        } else if (part.type === 'tool-input-start') {
-          req.onToolUseStart?.({ id: part.id, name: part.toolName })
-        } else if (part.type === 'tool-call') {
-          toolUses.push({
-            id: part.toolCallId,
-            name: part.toolName,
-            input: (part.input ?? {}) as Record<string, unknown>,
-          })
-        } else if (part.type === 'finish') {
-          finishReason = part.finishReason
-        } else if (part.type === 'error') {
-          throw part.error instanceof Error ? part.error : new Error(String(part.error))
-        }
-      }
-
-      return {
-        text,
-        toolUses,
-        stopReason: mapFinishReason(finishReason),
-        model,
       }
     },
   }

@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import { ensureInitialized } from '@/lib/init'
 import { withRouteContext } from '@/lib/api/with-route-context'
 import {
   getMergedWorklistBadgeTotal,
@@ -7,13 +6,14 @@ import {
   listMemberCompanyIds,
 } from '@/lib/worklist'
 
-ensureInitialized()
-
 /**
  * GET /api/worklist/counts: pending-work counts.
  *
  * Default: active company (sidebar / Att göra section).
  * `?scope=all`: sum across every membership (PWA home-screen badge).
+ *
+ * Response: { data: { counts, total, overdueInvoices } }. The per-person rows
+ * (documents_to_sign) are counted for the caller.
  */
 export const GET = withRouteContext('worklist.counts', async (request, ctx) => {
   const { supabase, companyId, user } = ctx
@@ -25,6 +25,6 @@ export const GET = withRouteContext('worklist.counts', async (request, ctx) => {
     return NextResponse.json({ data })
   }
 
-  const data = await getWorklistCounts(supabase, companyId)
+  const data = await getWorklistCounts(supabase, companyId, { userId: user.id })
   return NextResponse.json({ data })
 })

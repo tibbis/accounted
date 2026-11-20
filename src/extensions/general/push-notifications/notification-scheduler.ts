@@ -13,7 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { NotificationType } from '@/types'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { NEEDS_DOC_SOURCE_TYPES } from '@/lib/worklist/types'
-import { NON_ISSUED_INVOICE_STATUSES_FILTER } from '@/lib/invoices/matchable-statuses'
+import { NON_ISSUED_INVOICE_STATUSES_FILTER } from '@/lib/bookkeeping/matchable-statuses'
 import { sendNotificationToUser, readNotificationSettings } from './notification-sender'
 import {
   createTaxDeadlinePayload,

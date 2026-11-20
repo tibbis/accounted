@@ -1,6 +1,6 @@
 # Decision Log
 
-One line per decision, at most 300 characters: `[YYYY-MM-DD] <decision>: <why>`. Details belong in the PR body. Appended by agents and humans when a non-obvious choice is made. Read before re-litigating a past decision.
+The maintainers keep the decision log outside this repository. Entries up to 2026-10-04 are in this file's history: `git show b0b481b9d:DECISIONS.md`, and for entries before August 2026 `git show c36bc125a:DECISIONS.md`.
 
 Keep the current calendar month here. Archive completed months verbatim under `docs/decisions/`, preserving their original order and wording.
 
@@ -1251,3 +1251,4 @@ Keep the current calendar month here. Archive completed months verbatim under `d
 [2026-11-12] tibbis fork CI deploys accounting.helle.cc via GHA vercel build --prebuilt (not Oracle SSH): OCI A1 out of capacity, Hobby OOMs on Vercel builders, so the runner builds and uploads; crons emptied and maxDuration capped for Hobby.
 [2026-11-19] Per-company invoice From is company_settings columns checked live against Resend, not company_sending_domains: that row is one exclusive domain and cannot share a domain the operator already verified. An unverified domain fails the send instead of falling back to RESEND_FROM_EMAIL.
 [2026-11-19] literal-legal-form baseline 78 to 79: main already had 79 sites (this PR only moved two lines). The ceiling was stale and failed every PR; no new comparison was added.
+A code comment that cites `DECISIONS.md <date>` refers to the entry of that date.
