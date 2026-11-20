@@ -594,7 +594,6 @@ export const SESSION_ROUTE_PARITY: Record<string, ParityEntry> = {
   'DELETE /api/invoices/recurring/:id': gap('P3', 'delete a schedule (pause is covered by gnubok_update_recurring_schedule)'),
   'POST /api/invoices/recurring/:id/run': gap('P3', 'run a schedule now'),
   'POST /api/invoices/recurring/cron': machine(CRON),
-  'POST /api/invoices/reminders/cron': machine(CRON),
   'POST /api/notifications/bookkeeping-digest/cron': machine(CRON),
   // Autogiro v1 (pilot, AUTOGIRO_COMPANY_IDS): the dashboard first; the
   // operations for v1 and MCP follow once a real debit has run.

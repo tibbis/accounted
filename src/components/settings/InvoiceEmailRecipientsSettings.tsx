@@ -75,6 +75,7 @@ export function InvoiceEmailRecipientsSettings({
   if (role !== 'owner' && role !== 'admin') return null
 
   async function save() {
+    try {
     const from = fromAddress.trim()
     const name = fromName.trim()
     const replyToAddress = replyTo.trim()

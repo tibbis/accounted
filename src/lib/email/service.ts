@@ -55,6 +55,7 @@ export interface SendEmailResult {
    * treat that as a transient delivery error: nothing was sent.
    */
   errorCode?: 'SENDER_DOMAIN_UNVERIFIED'
+  /**
    * On a failure: true when the mail may have gone out anyway (no answer, a
    * server error after the provider took it, an idempotency conflict);
    * false when the provider refused it, so nothing went out. Absent: the

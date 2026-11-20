@@ -226,7 +226,6 @@ export const POST = withRouteContext(
     // A linked credit note takes its own issue step below.
     const refused = isCreditNote ? null : issuable(invoice as Invoice, company as CompanySettings)
     if (refused) return errorResponseFromCode(refused.code, opLog, { requestId, details: refused.details })
-    const paymentAccountRequired = invoiceRequiresPaymentAccount(invoice as Invoice)
 
     const hasAdditionalRecipients =
       (bodyResult.data.additional_cc?.length ?? 0) > 0
