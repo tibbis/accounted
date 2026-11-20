@@ -1,6 +1,5 @@
 import { createServiceRoleClient } from '@/lib/supabase/service-client'
 import { NextResponse } from 'next/server'
-import { loadExtensions } from '@/lib/extensions/loader'
 import { extensionRegistry } from '@/lib/extensions/registry'
 import {
   sendTaxDeadlineNotifications,
@@ -10,15 +9,14 @@ import {
 import { withCronContext } from '@/lib/api/with-cron-context'
 import { errorResponse, errorResponseFromCode } from '@/lib/errors/get-structured-error'
 
+export const maxDuration = 300
+
 /**
  * GET /api/extensions/push-notifications/cron: daily 09:00 UTC.
  * Sends due tax, invoice and missing-underlag push notifications.
  * Scheduled from vercel.json (and the Docker crontabs generated from it).
  */
 export const GET = withCronContext('cron.push_notifications', async (_request, ctx) => {
-  // Load the registry so it reflects extensions.config.json.
-  loadExtensions()
-
   // Physical routes under app/api/extensions/<id>/ compile into EVERY build,
   // including the core-with-zero-extensions one: the registry (generated from
   // extensions.config.json) is what actually switches an extension on. Mirror

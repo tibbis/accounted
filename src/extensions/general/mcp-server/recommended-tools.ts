@@ -217,6 +217,7 @@ export const WORKFLOW_SKILLS_WITHOUT_LOADOUT: Readonly<Record<string, string>> =
   'kvittojakten-claude': 'Client variant of kvittojakten, which receipt_hunt names.',
   'kvittojakten-chatgpt': 'Client variant of kvittojakten, which receipt_hunt names.',
   'kvittojakten-grok': 'Client variant of kvittojakten, which receipt_hunt names.',
+  'kvittojakten-gemini': 'Client variant of kvittojakten, which receipt_hunt names.',
 }
 
 /** What annotateLoadoutTools needs to know about one registry tool. */

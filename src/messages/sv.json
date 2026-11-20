@@ -1912,6 +1912,8 @@
       "invoice_credit_terms_text_en": "Betalningsvillkor på engelska (fotnot)",
       "invoice_payment_links_enabled": "Betalningslänk på fakturor",
       "invoice_email_texts": "Texter i fakturamejlet",
+      "invoice_email_from_address": "Avsändaradress för fakturamejl",
+      "invoice_email_from_name": "Avsändarnamn för fakturamejl",
       "invoice_email_reply_to": "Svarsadress för fakturamejl",
       "invoice_primary_color": "Huvudfärg på fakturan",
       "invoice_accent_color": "Accentfärg på fakturan",
@@ -4418,6 +4420,7 @@
     "saved_title": "Sparat",
     "saved_description": "Avsändaren, svarsadressen och de fasta kopiemottagarna används vid nästa fakturautskick.",
     "save_failed_title": "Kunde inte spara",
+    "save_failed": "Kunde inte spara. Försök igen.",
     "saving": "Sparar...",
     "save": "Spara"
   },

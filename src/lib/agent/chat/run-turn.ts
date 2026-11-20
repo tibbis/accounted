@@ -50,7 +50,8 @@ export function friendlyModelError(err: unknown): string {
     text.includes('etimedout') ||
     text.includes('econnreset') ||
     text.includes('network') ||
-    text.includes('socket')
+    text.includes('socket') ||
+    text.includes('abort')
   ) {
     return 'Anslutningen till assistenten bröts. Försök igen.'
   }
@@ -118,7 +119,8 @@ export function isTransientStreamError(err: unknown): boolean {
     text.includes('etimedout') ||
     text.includes('econnreset') ||
     text.includes('network') ||
-    text.includes('socket')
+    text.includes('socket') ||
+    text.includes('abort')
   )
 }
 

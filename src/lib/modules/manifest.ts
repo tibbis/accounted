@@ -745,6 +745,9 @@ export const INFRA_LIB_FOLDERS: readonly string[] = Object.freeze([
   // Permissions: the one catalog of what people and their agents may do,
   // the role presets and the door classes every door reads, across modules.
   'permissions',
+  // The installed-app shell: the worklist badge and push subscription the
+  // dashboard layout reads. Not a bookkeeping module.
+  'pwa',
   'rate-limits',
   'reference-data',
   'sandbox',

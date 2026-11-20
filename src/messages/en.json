@@ -1912,6 +1912,8 @@
       "invoice_credit_terms_text_en": "Payment terms in English (footnote)",
       "invoice_payment_links_enabled": "Payment link on invoices",
       "invoice_email_texts": "Invoice email texts",
+      "invoice_email_from_address": "From address for invoice emails",
+      "invoice_email_from_name": "From name for invoice emails",
       "invoice_email_reply_to": "Reply-to address for invoice emails",
       "invoice_primary_color": "Invoice primary colour",
       "invoice_accent_color": "Invoice accent colour",
@@ -4418,6 +4420,7 @@
     "saved_title": "Saved",
     "saved_description": "The sender, reply address and fixed copy recipients will be used for the next invoice email.",
     "save_failed_title": "Could not save",
+    "save_failed": "Could not save. Try again.",
     "saving": "Saving...",
     "save": "Save"
   },
