@@ -63,6 +63,19 @@ export interface IxbrlNote {
   number: number
   title: string
   body: string
+  /**
+   * The K2 note on anläggningstillgångar as tables per balance sheet post:
+   * the document tags the figures from these instead of printing the body.
+   * Absent on every other note and on versions locked before it existed.
+   */
+  fixedAssets?: import('@/lib/bokslut/arsredovisning/k2-fixed-asset-note').FixedAssetNoteTable[]
+  /**
+   * The rows of the K2 "Avskrivningar" note per balance sheet post: the
+   * document tags each as a tuple of its post's table of
+   * avskrivningsprinciper. Absent on every other note and on versions locked
+   * before it existed.
+   */
+  depreciationPrinciples?: import('@/lib/bokslut/arsredovisning/types').DepreciationPrinciple[]
 }
 
 export interface IxbrlSigner {
@@ -98,6 +111,13 @@ export interface IxbrlArsredovisningInput {
   br: ConceptAmounts
   /** Computed subtotals/totals from the mapper (same orientation rules). */
   totals: import('./k2-mapper').K2MappingResult['totals']
+  /**
+   * The year has no closing entry yet: Årets resultat in the balance sheet is
+   * derived from the income statement (K2MappingResult.currentYearDerived),
+   * so the statements tie although the result is not booked. The preflight
+   * refuses it for filing (ACC-2099). Absent for a closed year.
+   */
+  yearNotClosed?: true
 
   forvaltningsberattelse: {
     allmantOmVerksamheten: string
@@ -106,7 +126,23 @@ export interface IxbrlArsredovisningInput {
     /** Period ranges aligned 1:1 with flerarsoversikt rows (newest first).
      *  Index 0/1 reuse period0/period1; 2/3 get their own contexts. */
     flerarsPerioder: Array<{ start: string; end: string }>
+    /** The year states the flerårsöversikt's amounts in thousands of kronor
+     *  (arsredovisning_narratives.flerarsoversikt_tkr). The rows above stay
+     *  whole kronor: the document rounds and tags them at scale 3. Present
+     *  only when true, so every other input, and a version locked before the
+     *  choice existed, keeps its shape and states them in kronor. */
+    flerarsoversiktTkr?: boolean
     egetKapital: EgetKapitalForandring
+    /**
+     * The year's changes in equity per post and kind of movement (the
+     * report's equity specification, as the PDF prints it): the K2 document
+     * prints it as one table with every figure tagged. Absent on versions
+     * locked before it existed, which print the collapsed table from
+     * `egetKapital`, as does one with nothing in it or with a post the
+     * document's taxonomy does not hold. The K3 document reads its own copy
+     * in `k3.equity`.
+     */
+    egetKapitalSpecifikation?: K3EquityInput
     resultatdisposition: Resultatdisposition
     /** The PDF's "Kontrollbalansräkning har upprättats …" statement (ABL 25
      *  kap.). Optional: versions locked before it existed lack the key. */

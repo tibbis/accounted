@@ -161,7 +161,15 @@ export default function QuickReviewDialog({
   const [inReadBox] = useState(() =>
     boxDispute ? inReverseChargeBox(initialProposal, boxDispute.read, transaction?.amount ?? 0, entityType) : null,
   )
-  const openedProposal = inReadBox ?? initialProposal
+  // A learned pair whose reverse-charge box nothing confirms
+  // (reverse_charge_box_unconfirmed): it opens as an account booking in the
+  // box it books, so the box is shown and can be picked; the learned pair
+  // itself has no box to pick.
+  const [inOwnBox] = useState(() => {
+    const box = !boxDispute && initialProposal.reverse_charge_box_unconfirmed ? reverseChargeBoxesOf(initialProposal)[0] : undefined
+    return box ? inReverseChargeBox(initialProposal, box, transaction?.amount ?? 0, entityType) : null
+  })
+  const openedProposal = inReadBox ?? inOwnBox ?? initialProposal
   // The one thing this dialog edits. An account or VAT the person changes
   // turns it into an account booking; everything below (header, preview,
   // confirm) reads this and nothing else.
@@ -222,6 +230,8 @@ export default function QuickReviewDialog({
   const [enrichedTx, setEnrichedTx] = useState<TransactionWithInvoice | null>(transaction)
   const [rateLoading, setRateLoading] = useState(false)
   const [rateError, setRateError] = useState<string | null>(null)
+  // Bumped by "Försök igen" beside a failed rate read: runs the read again.
+  const [rateAttempt, setRateAttempt] = useState(0)
   // Dimension tagging (kostnadsställe/projekt): the picker renders only when
   // company_settings.dimensions_enabled, same gate as BulkBookDialog. Seeded
   // from the counterparty template's learned bag so the user sees what the
@@ -486,7 +496,7 @@ export default function QuickReviewDialog({
     return () => {
       cancelled = true
     }
-  }, [open, transaction, t])
+  }, [open, transaction, t, rateAttempt])
 
   // ── The lines the proposal books ─────────────────────────────────────
   // Built on the server by the code the booking posts with (POST
@@ -936,13 +946,22 @@ export default function QuickReviewDialog({
             {isIncome ? '+' : ''}
             {isForeign ? formatCurrency(tx.amount, tx.currency) : formatCurrency(sekAmount, 'SEK')}
           </p>
-          {isForeign && (
+          {isForeign && rateError && !rateLoading ? (
+            // A failed rate read takes the loading line's place, with the
+            // way to read it again: Bokför waits for the SEK amount.
+            <p role="alert" className="text-[13px] text-destructive">
+              {rateError}{' '}
+              <button type="button" className={QUIET_LINK_CLASS} onClick={() => setRateAttempt((n) => n + 1)}>
+                {tCommon('retry')}
+              </button>
+            </p>
+          ) : isForeign ? (
             <p className="text-[13px] tabular-nums text-foreground/80">
               {rateLoading || sekConversionMissing
                 ? t('amount_loading')
                 : t('amount_approx', { sign: isIncome ? '+' : '', sek: formatCurrency(sekAmount, 'SEK') })}
             </p>
-          )}
+          ) : null}
           {isForeign && tx.exchange_rate != null && tx.exchange_rate_date && !sekConversionMissing && (
             <p className="text-xs text-muted-foreground">
               {t('rate_footnote', {
@@ -952,7 +971,6 @@ export default function QuickReviewDialog({
               })}
             </p>
           )}
-          {rateError && <p role="alert" className="mt-1 text-xs text-destructive">{rateError}</p>}
         </div>
 
         {/* One header says what will be booked and why: the pick, the source
@@ -1053,8 +1071,9 @@ export default function QuickReviewDialog({
               // proposal opened in the read's box is not one nobody chose,
               // and neither is a clearing: the till's record says the money
               // is already booked, so a read that books it as revenue only
-              // offers its pick.
-              autoApply={!isTemplateBooking && !isPersonChoice(proposal) && !docRead && !boxDispute && proposal.source !== 'clearing'}
+              // offers its pick. Nor is a learned pair opened in its own box,
+              // which was a learned booking before it opened.
+              autoApply={!isTemplateBooking && !isPersonChoice(proposal) && !docRead && !boxDispute && !inOwnBox && proposal.source !== 'clearing'}
               onProposal={setAiProposal}
               onTake={takeAssistantPick}
             />

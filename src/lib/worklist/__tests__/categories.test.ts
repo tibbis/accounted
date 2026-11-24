@@ -27,6 +27,8 @@ import {
   countSupplierInvoicesAwaitingApproval,
   countUnbookedSkattekontoRows,
   countUnbookedTransactions,
+  countOpenBankRows,
+  countFoundPairs,
   countVerifikatMissingDocument,
   listExpensePayoutsDue,
   listExpensePayoutSuggestions,
@@ -34,6 +36,7 @@ import {
   countSkattekontoPaymentDue,
   listRotRutPayoutSetSuggestions,
   listSuggestedMatches,
+  watchCountFailures,
 } from '../categories'
 import {
   ATTESTABLE_SUPPLIER_INVOICE_STATUSES,
@@ -114,6 +117,67 @@ describe('countUnbookedTransactions', () => {
   it('soft-fails to 0 on query error', async () => {
     enqueue({ error: { message: 'boom' } })
     await expect(countUnbookedTransactions(supabase, COMPANY)).resolves.toBe(0)
+  })
+})
+
+describe('countOpenBankRows', () => {
+  it('counts every open bank row of the company, from the view Att bokföra lists', async () => {
+    enqueue({ count: 510 })
+    await expect(countOpenBankRows(supabase, COMPANY)).resolves.toBe(510)
+    expect(mockSupabase.from).toHaveBeenCalledWith('open_bank_rows')
+    expect(findCalls('open_bank_rows', 'eq')).toContainEqual(['company_id', COMPANY])
+  })
+
+  it('soft-fails to 0 on query error', async () => {
+    enqueue({ error: { message: 'boom' } })
+    await expect(countOpenBankRows(supabase, COMPANY)).resolves.toBe(0)
+  })
+})
+
+describe('countFoundPairs', () => {
+  it('counts the open bank rows without underlag that an open inbox item looks paid by, each once', async () => {
+    enqueue({ data: [{ bank_match_transaction_id: 'tx-1' }, { bank_match_transaction_id: 'tx-1' }, { bank_match_transaction_id: 'tx-2' }] })
+    enqueue({ count: 1 })
+    await expect(countFoundPairs(supabase, COMPANY)).resolves.toBe(1)
+    expect(findCalls('open_bank_rows', 'in')).toEqual([['id', ['tx-1', 'tx-2']]])
+    expect(findCalls('open_bank_rows', 'is')).toContainEqual(['document_id', null])
+    expect(findCalls('invoice_inbox_items', 'is')).toContainEqual(['matched_transaction_id', null])
+  })
+
+  it('reads no bank rows when nothing was matched', async () => {
+    enqueue({ data: [] })
+    await expect(countFoundPairs(supabase, COMPANY)).resolves.toBe(0)
+    expect(mockSupabase.from).not.toHaveBeenCalledWith('open_bank_rows')
+  })
+})
+
+describe('watchCountFailures', () => {
+  it('reports the counts that answered zero because their read failed, for its company only', async () => {
+    enqueue({ error: { message: 'canceling statement due to statement timeout', code: '57014' } })
+    enqueue({ count: 2 })
+    const { result, failed } = await watchCountFailures(COMPANY, () =>
+      Promise.all([countUnbookedTransactions(supabase, COMPANY), countUnbookedTransactions(supabase, COMPANY)]),
+    )
+    // The zero is still the answer (no count errors the page) ...
+    expect(result).toEqual([0, 2])
+    // ... but the caller learns it is not a real zero.
+    expect(failed).toEqual(['book_transaction'])
+
+    // Another company's failure is not this company's, and a schema gap
+    // (deploy before migrate) is a correct zero, not a failed read.
+    enqueue({ error: { message: 'boom' } })
+    enqueue({ error: { message: 'column does not exist', code: '42703' } })
+    const other = await watchCountFailures(COMPANY, () =>
+      Promise.all([countUnbookedTransactions(supabase, 'other-company'), countUnbookedTransactions(supabase, COMPANY)]),
+    )
+    expect(other.failed).toEqual([])
+  })
+
+  it('stops listening when its reads are done', async () => {
+    const { failed } = await watchCountFailures(COMPANY, async () => 0)
+    enqueue({ error: { message: 'boom' } })
+    await countUnbookedTransactions(supabase, COMPANY)
+    expect(failed).toEqual([])
   })
 })
 

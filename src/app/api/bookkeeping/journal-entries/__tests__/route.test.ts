@@ -47,6 +47,7 @@ vi.mock('@/lib/bookkeeping/engine', () => ({
 }))
 
 import { GET, POST } from '../route'
+import { BookkeepingDatabaseError } from '@/lib/bookkeeping/errors'
 
 describe('GET /api/bookkeeping/journal-entries', () => {
   const mockUser = { id: 'user-1', email: 'test@test.se' }
@@ -887,8 +888,9 @@ describe('GET /api/bookkeeping/journal-entries', () => {
       count: number
       attachment_counts?: Record<string, number>
       invoice_references?: Record<string, number>
+      no_doc_required?: Record<string, string | null>
     }
-    const counted = { counts: { 'je-1': 2 }, invoice_references: { 'je-2': 1 } }
+    const counted = { counts: { 'je-1': 2 }, invoice_references: { 'je-2': 1 }, no_doc_required: { 'je-2': 'Bankavgift' } }
     const noParams = { params: Promise.resolve({}) }
 
     it('leaves the counts out unless asked, and reads none', async () => {
@@ -914,6 +916,9 @@ describe('GET /api/bookkeeping/journal-entries', () => {
       expect(body.count).toBe(2)
       expect(body.attachment_counts).toEqual({ 'je-1': 2 })
       expect(body.invoice_references).toEqual({ 'je-2': 1 })
+      // The rows' "Inget underlag krävs" marks ride along too: the list no
+      // longer reads the company's whole exemption list on mount.
+      expect(body.no_doc_required).toEqual({ 'je-2': 'Bankavgift' })
       expect(mockCountUnderlag).toHaveBeenCalledWith(mockSupabase, 'company-1', ['je-1', 'je-2'])
     })
 
@@ -976,6 +981,7 @@ describe('GET /api/bookkeeping/journal-entries', () => {
       expect(body.data.map((e) => e.id)).toEqual(['je-1'])
       expect(body.attachment_counts).toBeUndefined()
       expect(body.invoice_references).toBeUndefined()
+      expect(body.no_doc_required).toBeUndefined()
     })
   })
 
@@ -1206,6 +1212,36 @@ describe('POST /api/bookkeeping/journal-entries', () => {
     expect(status).toBe(400)
     // Untyped engine errors map to the Swedish context fallback (issue #337).
     expect(body.error).toBe('Kunde inte hantera verifikationen. Försök igen.')
+  })
+
+  it('answers a verifikat dated in a locked year as 400 PERIOD_LOCKED, not a 500 database failure', async () => {
+    // Production 2026-11-22: the year was locked three minutes before; the
+    // period-lock trigger refused the draft insert (P0001) and this door
+    // answered 500 BOOKKEEPING_DATABASE_ERROR.
+    mockCreateJournalEntry.mockRejectedValue(new BookkeepingDatabaseError(
+      'create_draft_entry',
+      'Cannot write to locked/closed fiscal period "Räkenskapsår 2025" (is_closed=t, locked_at=2026-11-22 11:03:58.82+00)',
+      'P0001',
+    ))
+
+    const request = createMockRequest('/api/bookkeeping/journal-entries', {
+      method: 'POST',
+      body: {
+        fiscal_period_id: VALID_UUID,
+        entry_date: '2025-11-30',
+        description: 'Bokat efter låsningen',
+        source_type: 'manual',
+        lines: [
+          { account_number: '6570', debit_amount: 100, credit_amount: 0 },
+          { account_number: '1930', debit_amount: 0, credit_amount: 100 },
+        ],
+      },
+    })
+    const response = await POST(request, { params: Promise.resolve({}) })
+    const { status, body } = await parseJsonResponse<{ error: { code: string } }>(response)
+
+    expect(status).toBe(400)
+    expect(body.error.code).toBe('PERIOD_LOCKED')
   })
 })
 

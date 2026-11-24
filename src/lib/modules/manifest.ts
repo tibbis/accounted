@@ -61,6 +61,7 @@ export const MODULE_IDS = [
   'parties',
   'corporate',
   'capital',
+  'formation',
   'agent',
   'byra',
 ] as const
@@ -432,7 +433,9 @@ const DEFINITIONS: readonly ModuleDefinition[] = [
     layer: 'composite',
     // inbox: commitments (lib/commitments) shares the agreement store, its
     // schedule dates and its Viktiga datum sync with the Arkiv pipeline.
-    uses: ['import', 'inbox', 'parties', 'payroll', 'transactions'],
+    // corporate: the årsredovisning checks the aktiekapital note's share count
+    // against the aktiebok, when the company keeps one (bolaget/reconcile.ts).
+    uses: ['import', 'inbox', 'parties', 'payroll', 'transactions', 'corporate'],
     // commitments: agreements, ställda säkerheter and eventualförpliktelser,
     // the group structure (Bolaget, behind BOLAGET_COMPANY_IDS).
     libFolders: ['bokslut', 'commitments'],
@@ -474,7 +477,8 @@ const DEFINITIONS: readonly ModuleDefinition[] = [
       'Incoming documents: the inbox, reading and extracting documents, the document graph archive, mail search and the receipt hunt that finds missing underlag.',
     dependsOn: [],
     layer: 'foundation',
-    uses: ['parties'],
+    // vat: the reading's seller country asks lib/vat/seller-country.ts.
+    uses: ['parties', 'vat'],
     libFolders: [
       'arkiv',
       // The new Inkorg page's rollout flag and its pure view logic (views,
@@ -645,6 +649,21 @@ const DEFINITIONS: readonly ModuleDefinition[] = [
     jurisdictions: SE,
   },
   {
+    id: 'formation',
+    kind: 'block',
+    name: 'Company formation',
+    nameSv: 'Starta aktiebolag',
+    summary:
+      'Starting an aktiebolag before it exists: the interview checked against the registration rules, the founding documents and the answers for the e-service, and the setup that turns the registered company into one in Accounted with its aktiebok, roles, beneficial owners and share capital booked.',
+    dependsOn: ['corporate', 'capital'],
+    layer: 'composite',
+    uses: ['parties'],
+    libFolders: ['formation'],
+    operationPrefixes: [],
+    v1Segments: [],
+    jurisdictions: SE,
+  },
+  {
     id: 'agent',
     kind: 'block',
     name: 'AI agent',
@@ -748,6 +767,9 @@ export const INFRA_LIB_FOLDERS: readonly string[] = Object.freeze([
   // The installed-app shell: the worklist badge and push subscription the
   // dashboard layout reads. Not a bookkeeping module.
   'pwa',
+  // The question list: questions put to the company's people. Filing reads
+  // the records of several modules to check what a question rests on.
+  'questions',
   'rate-limits',
   'reference-data',
   'sandbox',

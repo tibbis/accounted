@@ -124,8 +124,38 @@ function logAndZero(category: string, companyId: string, error: unknown): number
     log.warn(`worklist count skipped, schema not migrated yet: ${category}`, fields)
   } else {
     log.error(`worklist count failed: ${category}`, fields)
+    for (const listener of countFailureListeners) listener(category, companyId)
   }
   return 0
+}
+
+/**
+ * A zero from a failed read looks like nothing to do. A caller that shows
+ * "Allt är klart" on a zero total (Hem) watches the failures while its
+ * counts run, so it can say instead that not everything could be read.
+ * Listeners are keyed by company, not by request: two overlapping reads for
+ * one company can each see the other's failure, which only ever shows the
+ * warning, never hides work. A schema gap (the minutes between deploy and
+ * migrate) is not reported: that count is correctly zero until it exists.
+ */
+type CountFailureListener = (category: string, companyId: string) => void
+const countFailureListeners = new Set<CountFailureListener>()
+
+export async function watchCountFailures<T>(
+  companyId: string,
+  run: () => Promise<T>,
+): Promise<{ result: T; failed: string[] }> {
+  const failed: string[] = []
+  const listener: CountFailureListener = (category, id) => {
+    if (id === companyId && !failed.includes(category)) failed.push(category)
+  }
+  countFailureListeners.add(listener)
+  try {
+    const result = await run()
+    return { result, failed }
+  } finally {
+    countFailureListeners.delete(listener)
+  }
 }
 
 /**
@@ -153,6 +183,57 @@ export async function countUnbookedTransactions(
     .eq('is_ignored', false)
   if (error) return logAndZero('book_transaction', companyId, error)
   return count ?? 0
+}
+
+/**
+ * Att bokföra's bank rows: every open bank row (the open_bank_rows view the
+ * list reads), the rows triaged as business that never got a verifikat
+ * included, where countUnbookedTransactions counts only the rows still
+ * waiting for a triage decision.
+ */
+export async function countOpenBankRows(supabase: SupabaseClient, companyId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('open_bank_rows')
+    .select('id', { count: 'exact', head: true })
+    .eq('company_id', companyId)
+  if (error) return logAndZero('book_transaction', companyId, error)
+  return count ?? 0
+}
+
+/**
+ * The inbox documents Att bokföra shows on their bank row (Kvitto hittat)
+ * instead of as rows of their own: one per open bank row without underlag
+ * that an open inbox item looks paid by (bank_match_transaction_id), as
+ * lib/bookkeeping/to-book.ts buildToBookRows pairs them. Subtracted from
+ * the documents so a receipt and its bank row count once. The scan stops at
+ * INBOX_SCAN_CAP matched items, the cap countInboxDocuments counts the
+ * documents within, so the two stay bounded alike on every Hem load (at
+ * most seven head counts of 150 ids).
+ */
+export async function countFoundPairs(supabase: SupabaseClient, companyId: string): Promise<number> {
+  const { data, error } = await whereInboxItemOpen(
+    supabase
+      .from('invoice_inbox_items')
+      .select('bank_match_transaction_id')
+      .eq('company_id', companyId)
+      .not('document_id', 'is', null)
+      .not('bank_match_transaction_id', 'is', null),
+  ).limit(INBOX_SCAN_CAP)
+  if (error) return logAndZero('inbox_document', companyId, error)
+  const matched = (data ?? []) as { bank_match_transaction_id: string | null }[]
+  const ids = [...new Set(matched.map((r) => r.bank_match_transaction_id).filter((id): id is string => !!id))]
+  let pairs = 0
+  for (let i = 0; i < ids.length; i += IN_CLAUSE_CHUNK) {
+    const { count, error: rowError } = await supabase
+      .from('open_bank_rows')
+      .select('id', { count: 'exact', head: true })
+      .eq('company_id', companyId)
+      .in('id', ids.slice(i, i + IN_CLAUSE_CHUNK))
+      .is('document_id', null)
+    if (rowError) return logAndZero('inbox_document', companyId, rowError)
+    pairs += count ?? 0
+  }
+  return pairs
 }
 
 /**

@@ -7,6 +7,7 @@
  */
 
 import type { WorklistCategory } from '@/lib/worklist/types'
+import { TO_BOOK_PATH } from '@/lib/bookkeeping/to-book'
 import { attestRemainder, type NeedGroup } from './need-model'
 import type { StepItemsKind } from './StepItems'
 
@@ -43,9 +44,23 @@ export interface CountRowInput {
   invoiceSetRows: number
   /** Attest rows of the signed-in person, shown one per invoice. */
   personAttestRows: number
+  /** The company's open questions (lib/questions); 0 where the question list is not switched on. */
+  openQuestions?: number
+  /**
+   * The booking screen is switched on: the bank rows, the inbox documents and
+   * the skattekonto events waiting to be booked are one row, Att bokföra,
+   * which leads to the list that holds them all.
+   */
+  bookingScreen?: boolean
+  /**
+   * Att bokföra's own figures (WorklistCounts.toBook): with them the row
+   * counts what the list holds, every open bank row and a receipt shown on
+   * its bank row once. Without them it sums the triage counts.
+   */
+  toBook?: { bankRows: number; foundPairs: number } | null
 }
 
-export function countRowSpecs({ counts, hasAi, inboxHref, invoiceSetRows, personAttestRows }: CountRowInput): CountRowSpec[] {
+export function countRowSpecs({ counts, hasAi, inboxHref, invoiceSetRows, personAttestRows, openQuestions = 0, bookingScreen = false, toBook = null }: CountRowInput): CountRowSpec[] {
   const specs: CountRowSpec[] = []
   const add = (count: number, spec: Omit<CountRowSpec, 'count' | 'things'> & { things?: number }) => {
     if (count > 0) specs.push({ ...spec, count, things: spec.things ?? count })
@@ -56,17 +71,25 @@ export function countRowSpecs({ counts, hasAi, inboxHref, invoiceSetRows, person
     key: 'supplier-approval', items: 'attest', earliest: 'due', group: 'attest', href: '/supplier-invoices?tab=registered', labelKey: 'row_supplier_approval', category: 'supplier_invoice_approval',
   })
 
-  add(n('book_transaction'), {
-    key: 'book-transactions', items: 'bank_rows', earliest: 'oldest', group: 'book', href: '/transactions?view=inbox', labelKey: 'row_book_transactions', category: 'book_transaction',
-  })
-  add(n('book_skattekonto'), {
+  if (bookingScreen) {
+    const bankRows = toBook ? Math.max(0, toBook.bankRows) : n('book_transaction')
+    const documents = hasAi ? Math.max(0, n('inbox_document') - (toBook ? Math.max(0, toBook.foundPairs) : 0)) : 0
+    add(bankRows + n('book_skattekonto') + documents, {
+      key: 'to-book', items: 'to_book', earliest: 'oldest', group: 'book', href: TO_BOOK_PATH, labelKey: 'row_to_book', category: 'book_transaction',
+    })
+  } else {
+    add(n('book_transaction'), {
+      key: 'book-transactions', items: 'bank_rows', earliest: 'oldest', group: 'book', href: '/transactions?view=inbox', labelKey: 'row_book_transactions', category: 'book_transaction',
+    })
+  }
+  add(bookingScreen ? 0 : n('book_skattekonto'), {
     key: 'book-skattekonto', items: 'skattekonto', earliest: 'oldest', group: 'book', href: '/transactions?source=skatteverket&view=inbox', labelKey: 'row_book_skattekonto', category: 'book_skattekonto',
   })
   // The single-invoice matches: among the transactions to book already.
   add(Math.max(0, n('suggested_match') - Math.max(0, invoiceSetRows)), {
     key: 'suggested-matches', items: 'matches', earliest: 'oldest', group: 'book', href: '/transactions', labelKey: 'row_suggested_matches', things: 0,
   })
-  add(hasAi ? n('inbox_document') : 0, {
+  add(hasAi && !bookingScreen ? n('inbox_document') : 0, {
     key: 'inbox-documents', items: 'inbox', earliest: 'oldest', group: 'book', href: inboxHref, labelKey: 'row_inbox_documents', hintKey: 'row_inbox_documents_detail', category: 'inbox_document',
   })
   add(n('collection_settlements_to_book'), {
@@ -78,6 +101,11 @@ export function countRowSpecs({ counts, hasAi, inboxHref, invoiceSetRows, person
 
   add(n('collection_decision'), {
     key: 'collection-decision', items: 'collection_decision', group: 'decide', href: '/invoices?status=collections', labelKey: 'row_collection_decision', hintKey: 'row_collection_decision_detail',
+  })
+
+  // The question list is one place to go, whatever the number of questions.
+  add(Math.max(0, Math.floor(openQuestions)), {
+    key: 'company-questions', group: 'decide', href: '/questions', labelKey: 'row_company_questions', things: 1,
   })
 
   add(n('document_relevance'), {

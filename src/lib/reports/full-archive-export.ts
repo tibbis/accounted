@@ -2,7 +2,8 @@ import { formatVoucher } from '@/lib/bookkeeping/voucher-series-resolver'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { createHash } from 'node:crypto'
 import { withSIEPeriodRead } from '@/lib/import/sie-period-read'
-import { ArchiveFolder, ArchiveTooLargeError, collectBytes, readAhead, type ArchiveRead } from './archive-folder'
+import { ArchiveFolder, ArchiveTooLargeError, collectBytes, deflatedJsonArray, deflatedJsonArrayElements, jsonArray, readAhead, type ArchiveRead, type DeflatedBytes } from './archive-folder'
+import type { ZipPart } from './zip-writer'
 import { generateSIEExport } from './sie-export'
 import { generateTrialBalance } from './trial-balance'
 import { generateIncomeStatement } from './income-statement'
@@ -12,6 +13,7 @@ import { generateJournalRegister } from './journal-register'
 import { calculateVatDeclaration } from './vat-declaration'
 import { getAuditLog, type AuditLogCursor } from '@/lib/core/audit/audit-service'
 import { downloadDocumentObject } from '@/lib/core/documents/document-service'
+import { downloadCompanyFolderObject } from '@/lib/core/documents/storage-key'
 import { listAttachmentRowsInRange } from '@/lib/reconciliation/attachments-store'
 import { generateBokslutsbilagor } from './bokslutsbilagor'
 import { generateSystemdokumentation } from './systemdokumentation'
@@ -282,11 +284,12 @@ async function buildFullArchive(
   const revision = zip.folder('revision')
 
   const budget = options.max_bytes !== undefined ? auditBudget(options.max_bytes) : undefined
-  const auditEntries =
+  revision.file(
+    'behandlingshistorik.json',
     options.scope === 'period'
       ? await fetchPeriodAuditEntries(supabase, companyId, periods[0], budget)
-      : await fetchAllAuditEntries(supabase, companyId, {}, budget)
-  revision.file('behandlingshistorik.json', JSON.stringify(auditEntries, null, 2))
+      : await fetchAllAuditJson(supabase, companyId, budget)
+  )
 
   const systemDoc = await buildSystemDoc(supabase, companyId, periods, options.scope)
   revision.file('systemdokumentation.json', JSON.stringify(systemDoc, null, 2))
@@ -348,8 +351,7 @@ async function buildBaseDataArchive(
   await writeMasterData(zip, supabase, companyId)
 
   const revision = zip.folder('revision')
-  const auditEntries = await fetchAllAuditEntries(supabase, companyId, {})
-  revision.file('behandlingshistorik.json', JSON.stringify(auditEntries, null, 2))
+  revision.file('behandlingshistorik.json', await fetchAllAuditJson(supabase, companyId))
   const systemDoc = await buildSystemDoc(supabase, companyId, periods, 'all')
   revision.file('systemdokumentation.json', JSON.stringify(systemDoc, null, 2))
 
@@ -800,7 +802,8 @@ async function writeReconciliationAttachments(
       files.push({
         path: zipPath,
         read: storageRead(
-          () => supabase.storage.from(row.storage_bucket).download(row.storage_path),
+          // Only the company's own folder of the documents bucket, where the attachments are stored (storage-key.ts).
+          () => downloadCompanyFolderObject(supabase, row.storage_bucket, row.storage_path, companyId).then(({ blob, error }) => ({ data: blob, error })),
           (error) => { manifest[index] = { ...base, zip_path: null, status: 'error', error } },
         ),
       })
@@ -1491,6 +1494,11 @@ export const MASTER_DATA_DUMP_TABLES: MasterDataTableSpec[] = [
   // the allmännyttig statement, the exempt/taxable/shared treatment per
   // account and the ruta overrides. The bridge from the books to the return.
   { name: 'ink3_underlag_inputs', file: 'ink3_underlag_inputs.json', orderBy: 'created_at' },
+  // What an enskild firma's owner entered for the NE-bilaga sida 2 per
+  // räkenskapsår: egenavgift category, kapitalunderlag, earlier funds and the
+  // figures last year's declaration handed on. The bridge from the books to
+  // the return.
+  { name: 'ne_declaration_inputs', file: 'ne_declaration_inputs.json', orderBy: 'created_at' },
   // The underskottsregister (IL 40 kap.): per räkenskapsår the deficit
   // brought forward (INK2S 4.14 a), the spärrar and the deficit carried
   // forward, with the ownership change behind a spärr. No personal data.
@@ -1572,6 +1580,7 @@ export const ARCHIVE_COVERED_ELSEWHERE_TABLES: Record<string, string> = {
  * a portable räkenskapsinformation backup.
  */
 export const ARCHIVE_EXCLUDED_TABLES: Record<string, string> = {
+  company_formations: 'the founder\'s draft before the company existed (answers, payment state); the company it set up exports its aktiebok, roles, verifikat and the founding documents themselves',
   ledger_account_days: 'sums of the journal per account and day, derived by triggers and rebuilt from it; the journal itself is exported',
   vat_eu_trade_fiscal_years: 'which räkenskapsår the nightly pass saw EU trade in, derived from the journal exported here; it only dates the helårsmoms deadline',
   ledger_dimension_days: 'the same sums per dimension value, derived from the journal lines exported here',
@@ -1606,6 +1615,7 @@ export const ARCHIVE_EXCLUDED_TABLES: Record<string, string> = {
   supplier_invoice_attest_batches: 'batched attest mail link tokens (secrets, hashed) for one attester and the invoices one mail listed; expire in 7 days, not räkenskapsinformation (every decision made through them is exported in supplier_invoice_attestations)',
   supplier_invoice_attest_mail_state: 'which attest mails (request, reminders, notices) have gone out for an invoice, so each goes once; mail bookkeeping, not räkenskapsinformation (the decisions are exported in supplier_invoice_attestations)',
   party_person_private: 'the personnummer (ciphertext and keyed HMAC) and postal address of the people in the aktiebok and the roles; personal data, never exported as a table (an owner or admin prints them in the aktiebok PDF)',
+  party_person_private_history: 'the identity number (ciphertext) and postal address a holder in the aktiebok had before a change, kept ten years (ABL 5:3); personal data, never exported as a table',
   signing_signer_private: 'per signer the personnummer lock (hash and ciphertext) and the BankID signature with the full personnummer; operational personal data, never exported as a table (the signatures are in each completed request\'s evidence package, an archive document)',
   payment_signing_links: 'signing link tokens (secrets, hashed) for a basket of bank payments; expire in 72 hours, not räkenskapsinformation (the payment orders and their events, who approved and who signed, are exported)',
   bank_connections: 'PSD2 connection state and tokens, not portable',
@@ -1629,11 +1639,16 @@ export const ARCHIVE_EXCLUDED_TABLES: Record<string, string> = {
     "which person accepted which version of Accounted's terms and DPA, the provider relationship rather than räkenskapsinformation; company_id is context only",
   company_suggestions:
     'which suggestions are open, snoozed or declined; the proposals and decisions are pending_operations rows and every package switch an audit_log row',
+  company_questions:
+    'questions put to the company and how each ended; an answer worth keeping is saved as an agent_memory fact. AI assistant state, not räkenskapsinformation',
+  company_question_operations:
+    'which staged operations were linked to which question; the operations themselves are pending_operations rows. AI assistant state, not räkenskapsinformation',
   company_inbound_domains: 'inbound-mail infrastructure',
   company_inboxes: 'inbound-mail infrastructure',
   company_sending_domains: 'outbound-mail infrastructure (sender domain verification state)',
   company_invitations: 'membership state, meaningless outside the platform',
   company_members: 'membership state, meaningless outside the platform',
+  rattelse_actor_names: 'the name behind a platform user id, kept for the reports\' labels after the account is deleted; user identities are platform state, like company_members',
   company_subscriptions: 'billing state',
   usage_statements: "billing state: Accounted's monthly usage statements and invoice ids, not räkenskapsinformation (the usage itself is in the exported payment orders, deliveries and signings)",
   usage_consents: 'billing state: the charge for use above what the plan includes, opened for the company, by whom and at what price; not räkenskapsinformation',
@@ -1924,11 +1939,19 @@ async function fetchPeriodAuditEntries(
   companyId: string,
   period: FiscalPeriodRow,
   budget?: AuditBudget
-): Promise<AuditLogEntry[]> {
-  const windowed = await fetchAllAuditEntries(supabase, companyId, {
+): Promise<ZipPart[]> {
+  // Each row as when it was logged and its text, made as its page arrives
+  // and held deflated, so the rows themselves are let go page by page
+  // (fetchAllAuditJson).
+  const byId = new Map<string, { created_at: string; element: DeflatedBytes }>()
+  const hold = deflatedJsonArrayElements()
+  const keep = (row: AuditLogEntry) => {
+    byId.set(row.id, { created_at: row.created_at, element: hold(row) })
+  }
+  await forEachAuditPage(supabase, companyId, {
     from_date: period.period_start,
     to_date: `${period.period_end}T23:59:59.999Z`,
-  }, budget)
+  }, budget, (rows) => rows.forEach(keep))
 
   const entryIds = (
     await fetchAllRows<{ id: string }>(({ from, to }) =>
@@ -1943,7 +1966,7 @@ async function fetchPeriodAuditEntries(
         .range(from, to)
     )
   ).map((r) => r.id)
-  if (entryIds.length === 0) return windowed
+  if (entryIds.length === 0) return jsonArray([...byId.values()].map((row) => row.element))
 
   // journal_entry_lines has no company_id column; tenant scoping comes from
   // the entry ids fetched above.
@@ -1960,9 +1983,6 @@ async function fetchPeriodAuditEntries(
     )
     lineIds.push(...lines.map((r) => r.id))
   }
-
-  const byId = new Map<string, AuditLogEntry>()
-  for (const row of windowed) byId.set(row.id, row)
 
   // write_audit_log derives company_id from the audited row, and
   // journal_entry_lines has no such column, so line audit rows carry
@@ -1985,20 +2005,41 @@ async function fetchPeriodAuditEntries(
         .range(from, to)
     )
     budget?.charge(rows.filter((row) => !byId.has(row.id)))
-    for (const row of rows) byId.set(row.id, row)
+    rows.forEach(keep)
   }
 
   // Newest first, matching getAuditLog's output order.
-  return [...byId.values()].sort((a, b) => b.created_at.localeCompare(a.created_at))
+  return jsonArray(
+    [...byId.values()].sort((a, b) => b.created_at.localeCompare(a.created_at)).map((row) => row.element)
+  )
 }
 
-async function fetchAllAuditEntries(
+/**
+ * The whole behandlingshistorik, newest first, as the parts of its JSON: each
+ * row becomes text as its page arrives, so the rows are let go page by page
+ * and the text is never one string. For a company with years of history both
+ * run to hundreds of MB, more than a backup run has to spare. The text is
+ * held deflated until the archive writes it: a long history can pass a
+ * gigabyte of text, held with everything else before the first byte.
+ */
+async function fetchAllAuditJson(
+  supabase: SupabaseClient,
+  companyId: string,
+  budget?: AuditBudget
+): Promise<ZipPart[]> {
+  return deflatedJsonArray((push) =>
+    forEachAuditPage(supabase, companyId, {}, budget, (rows) => {
+      for (const row of rows) push(row)
+    }))
+}
+
+async function forEachAuditPage(
   supabase: SupabaseClient,
   companyId: string,
   filters: { from_date?: string; to_date?: string },
-  budget?: AuditBudget
-): Promise<AuditLogEntry[]> {
-  const all: AuditLogEntry[] = []
+  budget: AuditBudget | undefined,
+  onPage: (rows: AuditLogEntry[]) => void
+): Promise<void> {
   const pageSize = 500
   // Keyset, not page numbers: each page starts after the last row of the one
   // before, so page 400 costs what page 1 does (getAuditLog's `after`).
@@ -2012,14 +2053,13 @@ async function fetchAllAuditEntries(
       ...(after ? { after } : {}),
     })
     budget?.charge(result.data)
-    all.push(...result.data)
+    onPage(result.data)
     if (result.data.length < pageSize) {
       break
     }
     const last = result.data[result.data.length - 1]
     after = { created_at: last.created_at, id: last.id }
   }
-  return all
 }
 
 async function buildSystemDoc(

@@ -49,7 +49,7 @@ export const API_KEY_SCOPES = {
   'compliance:read':    { label: 'Compliance: läs',     description: 'Pre-flight-kontroller: momsstängning, bokslutsberedskap, voucher-gap, IB/UB-kontinuitet; Skatteverket-status (moms + AGI)' },
   'skatteverket:write': { label: 'Skatteverket: skriv', description: 'Lämna momsdeklaration och arbetsgivardeklaration (AGI) till Skatteverket (stagas; signeras med BankID)' },
   'agent:read':         { label: 'Agent: läs',          description: 'Specialiserad bokföringsassistent: profil, laddade specialister/atomer, minnen (briefing + skill-katalog)' },
-  'agent:write':        { label: 'Agent: skriv',        description: 'Spara och ta bort agentens minnen om företaget (remember_fact, forget_fact) och spara, ändra och ta bort egna skills (create_skill)' },
+  'agent:write':        { label: 'Agent: skriv',        description: 'Spara och ta bort agentens minnen om företaget (remember_fact, forget_fact), ställa och stänga frågor till företaget och koppla egna förslag till en fråga (ask_question, close_question, link_question_operation) och spara, ändra och ta bort egna skills (create_skill)' },
   // Shown to users as "Agentförslag", the name of the review list under
   // Att göra (issue #3408): "stagade operationer" read as developer jargon.
   'pending_operations:read':    { label: 'Agentförslag: läs',     description: 'Lista agentförslag som väntar på ditt godkännande' },
@@ -257,6 +257,7 @@ export const TOOL_SCOPE_MAP: Record<string, ApiKeyScope> = {
   // Companies
   gnubok_list_companies:                  'companies:read',
   gnubok_create_company:                  'companies:write',
+  gnubok_formation:                       'companies:write',
   gnubok_lookup_company:                  'companies:read',
   // Multi-company (one connection, every company): the scoped read tools
   // need companies:read for the scope itself; run_across_companies then
@@ -641,6 +642,7 @@ export const TOOL_SCOPE_MAP: Record<string, ApiKeyScope> = {
   gnubok_delete_account: 'bookkeeping:write',
   gnubok_activate_accounts: 'bookkeeping:write',
   gnubok_deactivate_accounts: 'bookkeeping:write',
+  gnubok_set_oss_account_countries: 'bookkeeping:write',
   gnubok_update_company_tax_profile: 'companies:write',
   gnubok_update_bookkeeping_lock: 'companies:write',
   gnubok_create_dimension:                'bookkeeping:write',
@@ -784,6 +786,13 @@ export const TOOL_SCOPE_MAP: Record<string, ApiKeyScope> = {
   // 20260619140000 migration so this does not regress them.
   gnubok_remember_fact:                   'agent:write',
   gnubok_forget_fact:                     'agent:write',
+  // The question list (lib/questions): filing, closing and linking a staged
+  // operation to a question write no räkenskapsinformation; the list is read
+  // with the briefing's scope.
+  gnubok_ask_question:                    'agent:write',
+  gnubok_close_question:                  'agent:write',
+  gnubok_link_question_operation:         'agent:write',
+  gnubok_list_questions:                  'agent:read',
   gnubok_create_skill:                    'agent:write',
   // Pending operations approval (mirrors the /pending web UI)
   gnubok_list_pending_operations:         'pending_operations:read',
@@ -889,6 +898,19 @@ const RECORD_KIND_SCOPES: Record<string, ApiKeyScope> = {
   invoice: 'invoices:read',
   supplier_invoice: 'suppliers:read',
   skattekonto_transaction: 'reconciliation:read',
+}
+
+/**
+ * The part of a gnubok_get_record answer a kind serves only under a further
+ * scope, while the rest stays under documents:read. A journal_entry's lines,
+ * status and correction history are the ledger, read under the scope of
+ * gnubok_query_journal; its header and documents are not. The tool reads the
+ * key's scopes from the dispatcher's __keyScopes and answers without the part
+ * when they are missing (a call the dispatcher did not make), as
+ * gnubok_propose_accruals does for payroll detail.
+ */
+export const RECORD_KIND_DETAIL_SCOPES: Readonly<Record<string, ApiKeyScope>> = {
+  journal_entry: 'reports:read',
 }
 
 /**

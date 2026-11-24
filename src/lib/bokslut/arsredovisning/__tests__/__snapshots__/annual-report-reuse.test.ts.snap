@@ -247,7 +247,7 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -284,7 +284,7 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -303,6 +303,8 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
   },
   "entity_type": "aktiebolag",
   "fiscal_period_id": "fp-2025",
+  "framework_confirmed": false,
+  "framework_source": "company_fallback",
   "generated_at": "2026-02-01T10:00:00.000Z",
   "ixbrl": {
     "br": {
@@ -644,6 +646,52 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
           "ub": 72629,
         },
         "utdelning": 0,
+      },
+      "egetKapitalSpecifikation": {
+        "kinds": [
+          {
+            "kind": "resultatdisposition",
+            "label": "Balanseras i ny räkning",
+          },
+          {
+            "kind": "arets_resultat",
+            "label": "Årets resultat",
+          },
+        ],
+        "placement": "management_report",
+        "posts": [
+          {
+            "bound": true,
+            "closing": 25000,
+            "concept": "Aktiekapital",
+            "label": "Aktiekapital",
+            "movements": {},
+            "opening": 25000,
+          },
+          {
+            "bound": false,
+            "closing": 21753,
+            "concept": "BalanseratResultat",
+            "label": "Balanserat resultat",
+            "movements": {
+              "resultatdisposition": 15876,
+            },
+            "opening": 5877,
+          },
+          {
+            "bound": false,
+            "closing": 25876,
+            "concept": "AretsResultatEgetKapital",
+            "label": "Årets resultat",
+            "movements": {
+              "arets_resultat": 25876,
+              "resultatdisposition": -15876,
+            },
+            "opening": 15876,
+          },
+        ],
+        "previous": null,
+        "source": "ledger",
       },
       "flerarsPerioder": [
         {
@@ -1305,6 +1353,7 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
         },
         "unclassified": [],
       },
+      "row_labels": "k2",
       "warnings": [],
     },
     "fiscal_period": {
@@ -1522,7 +1571,7 @@ exports[`annual report over a ledger: aktiebolag > builds the canonical model, i
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -1925,6 +1974,52 @@ exports[`annual report over a ledger: aktiebolag > builds the iXBRL input on its
         "ub": 72629,
       },
       "utdelning": 0,
+    },
+    "egetKapitalSpecifikation": {
+      "kinds": [
+        {
+          "kind": "resultatdisposition",
+          "label": "Balanseras i ny räkning",
+        },
+        {
+          "kind": "arets_resultat",
+          "label": "Årets resultat",
+        },
+      ],
+      "placement": "management_report",
+      "posts": [
+        {
+          "bound": true,
+          "closing": 25000,
+          "concept": "Aktiekapital",
+          "label": "Aktiekapital",
+          "movements": {},
+          "opening": 25000,
+        },
+        {
+          "bound": false,
+          "closing": 21753,
+          "concept": "BalanseratResultat",
+          "label": "Balanserat resultat",
+          "movements": {
+            "resultatdisposition": 15876,
+          },
+          "opening": 5877,
+        },
+        {
+          "bound": false,
+          "closing": 25876,
+          "concept": "AretsResultatEgetKapital",
+          "label": "Årets resultat",
+          "movements": {
+            "arets_resultat": 25876,
+            "resultatdisposition": -15876,
+          },
+          "opening": 15876,
+        },
+      ],
+      "previous": null,
+      "source": "ledger",
     },
     "flerarsPerioder": [
       {
@@ -2487,7 +2582,7 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -2531,7 +2626,7 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -2550,6 +2645,8 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
   },
   "entity_type": "enskild_firma",
   "fiscal_period_id": "fp-2025",
+  "framework_confirmed": false,
+  "framework_source": "company_fallback",
   "generated_at": "2026-02-01T10:00:00.000Z",
   "ixbrl": {
     "br": {
@@ -2888,6 +2985,13 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
           "ub": 0,
         },
         "utdelning": 0,
+      },
+      "egetKapitalSpecifikation": {
+        "kinds": [],
+        "placement": "management_report",
+        "posts": [],
+        "previous": null,
+        "source": "ledger",
       },
       "flerarsPerioder": [
         {
@@ -3482,6 +3586,7 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
         },
         "unclassified": [],
       },
+      "row_labels": "k2",
       "warnings": [],
     },
     "fiscal_period": {
@@ -3704,7 +3809,7 @@ exports[`annual report over a ledger: enskild_firma > builds the canonical model
       },
       {
         "code": "AR-K2-LISTED-UNKNOWN",
-        "message": "Om värdepapper är upptagna till handel på en reglerad marknad är inte besvarad.",
+        "message": "Om värdepapper som bolaget självt har gett ut är upptagna till handel på en reglerad marknad är inte besvarad.",
         "remediation": "Besvara frågan i avsnittet Omfattning och regelverk.",
         "section": "scope",
         "severity": "error",
@@ -4167,6 +4272,13 @@ exports[`annual report over a ledger: enskild_firma > builds the iXBRL input on 
         "ub": 0,
       },
       "utdelning": 0,
+    },
+    "egetKapitalSpecifikation": {
+      "kinds": [],
+      "placement": "management_report",
+      "posts": [],
+      "previous": null,
+      "source": "ledger",
     },
     "flerarsPerioder": [
       {

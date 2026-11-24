@@ -24,6 +24,7 @@ import {
   accountsCreate,
   accountsDeactivate,
   accountsDelete,
+  accountsOssCountries,
   accountsUpdate,
 } from './accounts'
 import {
@@ -183,6 +184,7 @@ import {
 import {
   importsSkattekontoFile,
 } from './skattekonto-file'
+import { importsDepositSpecification } from './deposit-specification'
 import {
   journalEntriesBatchNoDocumentRequired,
   journalEntriesClearNoDocumentRequired,
@@ -267,7 +269,7 @@ import { BOLAGET_OPERATIONS } from './bolaget'
 import { BOLAGET_CAPITAL_OPERATIONS } from './bolaget-capital'
 import { BOLAGET_OWNER_TAX_OPERATIONS } from './bolaget-owner-tax'
 import { CORPORATE_MEETING_OPERATIONS } from './corporate-meetings'
-import { bolagetRollout } from '@/lib/env/bolaget-switch'
+import { bolagetRegistersConfigured, bolagetRollout } from '@/lib/env/bolaget-switch'
 import { SUPPLIER_INVOICE_ATTEST_OPERATIONS } from './supplier-invoice-attest'
 import { readCollectionsEnv } from '@/lib/collections/flags'
 import { CUSTOMER_LOSS_OPERATION_LIST } from './customer-loss'
@@ -302,6 +304,7 @@ const CORE_OPERATIONS: readonly AnyOperation[] = [
   accountsDelete,
   accountsActivate,
   accountsDeactivate,
+  accountsOssCountries,
   // company-settings
   settingsGet,
   settingsUpdate,
@@ -461,6 +464,8 @@ const CORE_OPERATIONS: readonly AnyOperation[] = [
   importsOpeningBalanceReviewAcknowledge,
   // skattekonto-file
   importsSkattekontoFile,
+  // deposit-specification
+  importsDepositSpecification,
   // journal-entries
   journalEntriesUpdateDraft,
   journalEntriesCancelDraft,
@@ -597,8 +602,8 @@ export const OPERATIONS: readonly AnyOperation[] = [
   ...(customerLossEnabled() ? CUSTOMER_LOSS_OPERATION_LIST : []),
   // Kvittning likewise only while COUNTERPARTY_SETOFF_ENABLED is set.
   ...(counterpartySetoffEnabled() ? COUNTERPARTY_SETOFF_OPERATION_LIST : []),
-  // The Bolaget registers only while BOLAGET_COMPANY_IDS names a company; each run() checks the company too.
-  ...(bolagetRollout() === 'all' || bolagetRollout().length > 0 ? BOLAGET_OPERATIONS : []),
+  // The Bolaget registers only while BOLAGET_COMPANY_IDS or BOLAGET_REGISTERS_COMPANY_IDS names a company; each run() checks the company too.
+  ...(bolagetRegistersConfigured() ? BOLAGET_OPERATIONS : []),
   ...(bolagetRollout() === 'all' || bolagetRollout().length > 0 ? BOLAGET_CAPITAL_OPERATIONS : []),
   ...(bolagetRollout() === 'all' || bolagetRollout().length > 0 ? BOLAGET_OWNER_TAX_OPERATIONS : []),
   // Meetings and minutes roll out with the registers (same switch, same per-company check in run()).

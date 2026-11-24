@@ -14,7 +14,7 @@ import { Dialog, DialogConsequence, DialogContent, DialogFooter, DialogHeader, D
 import { useToast } from '@/components/ui/use-toast'
 import { getErrorMessage } from '@/lib/errors/get-error-message'
 import { Skeleton, LateReveal } from '@/components/ui/skeleton'
-import { GuidedSteps, HemCalm, NeedList, type HemView, type LeadAction, type NeedRow } from './att-gora-views'
+import { GuidedSteps, HemCalm, type HemView, type LeadAction, type NeedRow } from './att-gora-views'
 import { countRowSpecs } from './need-rows'
 import { isAwaitingAttestInList } from '@/lib/supplier-invoices/list-tabs'
 import type { SupplierInvoiceRow } from './StepItems'
@@ -22,7 +22,7 @@ import { formatCurrency, formatDate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { useFormat } from '@/lib/hooks/use-format'
 import { switchDeepLink } from '@/lib/bank-feed/switch-link'
-import { useCapability, useCompany } from '@/contexts/CompanyContext'
+import { useBookingScreenEnabled, useCapability, useCompany } from '@/contexts/CompanyContext'
 import { CAPABILITY } from '@/lib/entitlements/keys'
 import type { AiTaskCategory } from '@/lib/worklist/ai-task'
 import type { DocumentToSignDue, PaymentFailedDue, PaymentsVerificationDue, SuggestedMatch, SupplierPayeeChangeDue } from '@/lib/worklist/types'
@@ -59,6 +59,7 @@ import {
   LinkIcon,
   PaperAirplaneIcon,
   PencilSquareIcon,
+  QuestionMarkCircleIcon,
   ScaleIcon,
   ShieldCheckIcon,
   ShieldExclamationIcon,
@@ -179,6 +180,8 @@ interface AttGoraSectionProps {
    * aldrig. The customer's agent finds the same three in its briefing.
    */
   suggestions?: OpenSuggestion[]
+  /** How many questions wait for the company's people (lib/questions): one row that opens the list. */
+  openQuestions?: number
   /**
    * What the company's rules for automatic booking (lib/grants) let an agent
    * book without asking, since someone last marked it reviewed: the
@@ -246,7 +249,7 @@ interface AttGoraSectionProps {
   initialStep?: string | null
   /** Today in Stockholm (yyyy-MM-dd): what "brådskar" and "Först" are read against. */
   todayIso: string
-  /** Hem: Kom igång and the assistant prompt, under the headline. */
+  /** Hem: Kom igång, under the headline. */
   afterHeadline?: ReactNode
   /** Hem: the glance line under the headline. */
   facts?: ReactNode
@@ -349,6 +352,7 @@ export default function AttGoraSection({
   paymentsFailed = [],
   invoiceSets = [],
   suggestions = [],
+  openQuestions = 0,
   grantReview = null,
   expiringBankConnections = [],
   emptyLedger = false,
@@ -384,6 +388,7 @@ export default function AttGoraSection({
   // must not offer a row that jumps to the gated workspace. Mirrors the sidebar
   // + command palette gate; the page itself enforces it server-side.
   const hasAi = useCapability(CAPABILITY.ai)
+  const bookingScreen = useBookingScreenEnabled()
   const { canWrite } = useViewerLock()
 
   const [counts, setCounts] = useState(worklist.counts)
@@ -408,7 +413,9 @@ export default function AttGoraSection({
   useEffect(() => {
     if (!wantsCompanyAttest) return
     let live = true
-    fetch('/api/supplier-invoices?status=all')
+    // Only what is not settled: an invoice to attest is never paid, and
+    // the whole register took seconds for a company with years of them.
+    fetch('/api/supplier-invoices?status=unsettled')
       .then(async (res) => {
         if (!res.ok) throw new Error(String(res.status))
         const data = ((await res.json()).data ?? []) as SupplierInvoiceRow[]
@@ -469,8 +476,11 @@ export default function AttGoraSection({
   // server render: take its numbers instead of keeping the first ones. Same
   // adjust-state-during-render pattern as DashboardNav.
   const [renderedWorklist, setRenderedWorklist] = useState(worklist)
+  // A count that could not be read answered zero: never "Allt är klart" then.
+  const [countsIncomplete, setCountsIncomplete] = useState(worklist.incomplete === true)
   if (worklist !== renderedWorklist) {
     setRenderedWorklist(worklist)
+    setCountsIncomplete(worklist.incomplete === true)
     setCounts(worklist.counts)
     setOverdueInvoices(worklist.overdueInvoices ?? null)
     setAttestRows(attestsDue)
@@ -487,6 +497,7 @@ export default function AttGoraSection({
       if (json.data) {
         setCounts(json.data.counts)
         setOverdueInvoices(json.data.overdueInvoices ?? null)
+        setCountsIncomplete(json.data.incomplete === true)
       }
     } catch (err) {
       // Stale counts self-correct on the next page load: never block the
@@ -570,6 +581,9 @@ export default function AttGoraSection({
       inboxHref: worklist.inboxHref ?? LEGACY_INBOX_HREF,
       invoiceSetRows: invoiceSetRows.length,
       personAttestRows: attestSteps.length,
+      openQuestions,
+      bookingScreen,
+      toBook: worklist.toBook,
     }).map((spec) => [spec.key, spec]),
   )
   // A step that is many things names them: its heading says how many of what
@@ -747,7 +761,9 @@ export default function AttGoraSection({
     })
   }
 
-  // Bokför
+  // Bokför: with the booking screen, one row for the bank rows and the
+  // documents, the list that holds both.
+  specRow('to-book', ArrowsRightLeftIcon)
   specRow('book-transactions', ArrowsRightLeftIcon)
   specRow('book-skattekonto', BuildingLibraryIcon)
   // One row per bank row that settles several invoices of one counterparty
@@ -820,6 +836,7 @@ export default function AttGoraSection({
     })
   }
   specRow('collection-decision', ScaleIcon)
+  specRow('company-questions', QuestionMarkCircleIcon)
   countRow(counts.collection_batch_ready > 0, {
     key: 'collection-batch',
     group: 'decide',
@@ -879,7 +896,7 @@ export default function AttGoraSection({
       icon: LightBulbIcon,
       label: s.title,
       detail: s.reason ?? undefined,
-      href: '/?vy=behover#decide',
+      href: '/#decide',
       embed: (
         <ViewerLock>
           <SuggestionCards
@@ -907,7 +924,7 @@ export default function AttGoraSection({
       group: 'review',
       icon: ShieldCheckIcon,
       label: t('band_grant_postings'),
-      href: '/?vy=behover#review',
+      href: '/#review',
       count: grantReview.postings.length,
       embed: (
         <div>
@@ -1108,24 +1125,13 @@ export default function AttGoraSection({
       />
     ) : null
 
-  // The sidebar's Behöver dig row shows the number Hem counts (need-count.ts).
+  // The sidebar's Hem row shows the number Hem counts (need-count.ts).
   usePublishNeedCount(company?.id, countThings(rows))
 
   return (
     <section aria-label={t('att_gora_title')}>
       {view === 'borja' ? (
         <GuidedSteps rows={rows} todayIso={todayIso} stepKey={currentStep} onStep={goToStep} notStarted={notStarted} />
-      ) : view === 'behover' ? (
-        <NeedList
-          rows={rows}
-          todayIso={todayIso}
-          clearTitle={tHem(notStarted ? 'headline_not_started' : 'headline_clear')}
-          // The Kom igång steps are on Hem, not above this list: say where, and lead there.
-          clearBody={emptyState === 'new_ledger' ? tHem('new_ledger_list_body') : clearBody}
-          notStarted={notStarted}
-          lead={emptyState === 'new_ledger' ? { label: tHem('back_home'), href: '/' } : lead}
-          resume={resume}
-        />
       ) : (
         <HemCalm
           rows={rows}
@@ -1141,6 +1147,7 @@ export default function AttGoraSection({
           afterHeadline={afterHeadline}
           resume={resume}
           connections={connections}
+          incomplete={countsIncomplete}
         />
       )}
 

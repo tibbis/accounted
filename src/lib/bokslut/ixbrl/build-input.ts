@@ -365,16 +365,40 @@ export async function buildIxbrlInput(
     rr: mapping.rr,
     br: mapping.br,
     totals: mapping.totals,
+    // Only while the result is not closed: an absent key keeps every closed
+    // year's input, and its content hash, unchanged.
+    ...(mapping.currentYearDerived ? { yearNotClosed: true as const } : {}),
     forvaltningsberattelse: {
       allmantOmVerksamheten: allmant,
       vasentligaHandelser: pdfData.forvaltningsberattelse.important_events,
       flerarsoversikt,
       flerarsPerioder,
+      // The year's choice to state the flerårsöversikt in tkr, as the PDF
+      // does; spread only when on, so every other input keeps its content hash.
+      ...(pdfData.forvaltningsberattelse.flerarsoversikt_tkr === true ? { flerarsoversiktTkr: true } : {}),
       egetKapital,
+      // K2: the specification itself, per post and kind, so the document's
+      // table is the PDF's and tags every movement (the K3 document carries
+      // its own in `k3.equity`). The adapter is K3's: the shape is the same.
+      // The K2 table shows the year only, so the jämförelseår is left out
+      // of what a version stores.
+      ...(framework === 'k3'
+        ? {}
+        : { egetKapitalSpecifikation: { ...k3EquityInput(pdfData, mapping.br, 'k2'), previous: null } }),
       resultatdisposition,
       kontrollbalansrakningUpprattad: pdfData.forvaltningsberattelse.kontrollbalans_required === true,
     },
-    noter: pdfData.noter.map((note) => ({ number: note.number, title: note.title, body: note.body })),
+    // fixedAssets is spread only when the note has it, so the content hash
+    // of a document without the tables does not move.
+    noter: pdfData.noter.map((note) => ({
+      number: note.number,
+      title: note.title,
+      body: note.body,
+      ...(note.fixedAssets && note.fixedAssets.length > 0 ? { fixedAssets: note.fixedAssets } : {}),
+      ...(note.depreciationPrinciples && note.depreciationPrinciples.length > 0
+        ? { depreciationPrinciples: note.depreciationPrinciples }
+        : {}),
+    })),
     disclosures: {
       longTermDebtOverFiveYears:
         pdfData.disclosures.long_term_debt_over_five_years ?? 0,

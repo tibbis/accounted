@@ -61,6 +61,7 @@ import {
 } from '@/lib/currency/supplier-invoice-rate'
 import { defaultVatRateForTreatment, normalizeVatRateToDecimal, treatmentDeductsInputVat } from '@/lib/vat/supplier-invoice-line-checks'
 import { allocateDocumentVat } from '@/lib/vat/document-vat'
+import { rateForStoredRowVat } from '@/lib/bookkeeping/supplier-invoice-registration-lines'
 import { suggestExpenseBalanceAccount } from '@/lib/bookkeeping/accruals/account-suggestions'
 import { netVat } from '@/lib/bookkeeping/gross-split'
 import { roundOre } from '@/lib/money'
@@ -77,11 +78,13 @@ import { isBookkeepingError } from '@/lib/bookkeeping/errors'
 import { resolveInboxKind } from '@/lib/documents/inbox-kind'
 import { resolveInboxCreditTarget } from '@/lib/supplier-invoices/credit-target'
 import { coerceDimensionsBag } from '@/lib/bookkeeping/dimension-resolver'
+import { fetchChartVatTreatments } from '@/lib/bookkeeping/chart-vat-treatments'
 import { invoiceDefaultDimensions } from '@/lib/suppliers/default-dimensions'
 import { rejectSupersededInboxConversions } from '@/lib/pending-operations/supersede'
 import {
   resolveSupplierInvoiceReverseCharge,
   resolveSupplierInvoiceReverseChargeKind,
+  reverseChargeAccountRefusal,
   reverseChargeLineRateRefusal,
   supplierInvoicePayableTotal,
   type ComputedSupplierInvoiceItem,
@@ -401,6 +404,12 @@ export async function convertInboxItemToSupplierInvoice(
   // Reverse charge: the seller charged no Swedish moms, so no line may carry a rate.
   const reverseChargeRefusal = reverseChargeLineRateRefusal(reverseCharge, pricedItems)
   if (reverseChargeRefusal) return reverseChargeRefusal
+  // Nor may a line sit on an account that declares the purchase in a box of
+  // its own: the basis pair would declare it twice.
+  const accountRefusal = reverseChargeAccountRefusal(
+    reverseCharge, pricedItems, reverseCharge ? await fetchChartVatTreatments(supabase, companyId) : null,
+  )
+  if (accountRefusal) return accountRefusal
 
   // VAT per rate as the document has it, the same rule as createSupplierInvoice:
   // the VAT on the summed base or the stated vat_breakdown, spread onto the
@@ -417,6 +426,7 @@ export async function convertInboxItemToSupplierInvoice(
   if (!documentVat.ok) return { ok: false, code: documentVat.code, details: documentVat.details }
   documentVat.lineVat.forEach((lineVat, index) => {
     pricedItems[index].vat_amount = lineVat
+    pricedItems[index].vat_rate = rateForStoredRowVat(pricedItems[index].line_total, pricedItems[index].vat_rate, lineVat)
   })
 
   // Icke momsregistrerad (feedback seq 708521): amounts arrive excluding VAT

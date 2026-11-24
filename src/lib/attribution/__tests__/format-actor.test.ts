@@ -22,6 +22,7 @@ describe('agentDisplayName', () => {
     expect(agentDisplayName('api_key', 'Claude (Anthropic)')).toBe('Claude')
     expect(agentDisplayName('api_key', 'ChatGPT (OpenAI)')).toBe('ChatGPT')
     expect(agentDisplayName('mcp_oauth', 'Grok (xAI)')).toBe('Grok')
+    expect(agentDisplayName('mcp_oauth', 'Copilot Studio (Microsoft)')).toBe('Copilot Studio')
     expect(agentDisplayName('api_key', 'Cursor')).toBe('Cursor')
   })
 
@@ -162,6 +163,5 @@ describe('mcpClientDisplayName', () => {
     expect(formatActorAttribution({ actorType: 'mcp_oauth', actorLabel: mcpClientDisplayName('other'), personName: 'Jonas Ek' }, svWords, inline)).toBe('AI-anslutning åt Jonas Ek')
     expect(formatActorAttribution({ actorType: 'mcp_oauth', actorLabel: mcpClientDisplayName('chatgpt'), personName: en.settings.memory_creator_deleted }, enWords, inline)).toBe('ChatGPT for a deleted user')
     expect(formatActorAttribution({ actorType: 'user', personName: null }, svWords, inline)).toBe('en användare')
-    expect(translator(sv.settings)('memory_saved_by', { who: 'Claude åt Jonas Ek' })).toBe('Sparad av Claude åt Jonas Ek')
   })
 })

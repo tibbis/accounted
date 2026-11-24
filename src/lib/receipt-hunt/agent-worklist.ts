@@ -27,7 +27,7 @@ import { formatVoucher } from '@/lib/bookkeeping/voucher-series-resolver'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { fetchLinesByEntryIds } from '@/lib/bookkeeping/entry-lines'
-import { booksPurchase, type PlausibilityLine } from '@/lib/bookkeeping/voucher-plausibility'
+import { booksPurchase, movesOnlyBetweenOwnAccounts, type PlausibilityLine } from '@/lib/bookkeeping/voucher-plausibility'
 import { resolveInboxAddress } from '@/lib/documents/inbox-address'
 import { resolvePortal, type CompanyPortal } from './company-portals'
 import { fetchPurchasesWithoutUnderlag } from './purchases-without-underlag'
@@ -58,10 +58,12 @@ export interface AgentWorklistItem {
   search_from: string
   search_to: string
   /**
-   * False for rows that never have a mailed receipt (salary, tax, bank fees),
-   * for verifikat that bought nothing (money in, a transfer between the
-   * company's own accounts) and for verifikat imported from earlier books:
-   * the agent skips the mail search and reports them as needing a human.
+   * False for rows that never have a mailed receipt (salary, tax, bank fees,
+   * Stripe's rows), for verifikat that bought nothing (money in, a share
+   * issue) and for verifikat imported from earlier books: the agent skips the
+   * mail search and reports them as needing a human. A transfer between the
+   * company's own accounts is not on the list at all: the bank statement is
+   * its underlag.
    */
   mail_searchable: boolean
   /** Where the invoice lives when the vendor does not mail it. */
@@ -115,9 +117,10 @@ const VERIFIKAT_PAGE = 100
  * over. Fixed, never derived from `offset`: a window that grew with the page
  * would re-rank, and page two would repeat or skip items of page one. It used
  * to be one RPC page, so a second round of the hunt could only re-request the
- * same top 100 (agent feedback seq 957595).
+ * same top 100 (agent feedback seq 957595). Also the most verifikat the VAT
+ * close check classifies (MissingUnderlagErrands.maxRows).
  */
-const VERIFIKAT_WINDOW = 500
+export const VERIFIKAT_WINDOW = 500
 
 /**
  * How far back an invoice settled by bankgiro, plusgiro or OCR is worth
@@ -159,6 +162,20 @@ const IN_PERSON_DESCRIPTOR =
  */
 const PROVIDER_OWN_ROW = /^(?:FEE-(?:CARD|TRANSFER|BALANCE)-\d+|BALANCE-\d+\s+Converted\b)/i
 
+/**
+ * transactions.import_source of the Stripe feed, which brings the Stripe
+ * balance in as a bank account (stripe/lib/transaction-sync.ts,
+ * STRIPE_IMPORT_SOURCE; a test there keeps the two equal). Every outflow on
+ * it is Stripe's own row: its fee on each payment ("Stripe-avgift
+ * (Stripe-betalning <payer>)", the payer being the company's customer), its
+ * usage fees, automatic tax, a refund to a buyer, a payout to the bank. No
+ * mailbox holds a receipt for one: Stripe bills its fees on a monthly invoice,
+ * and the rest is on its balance report. Read on the row's source, never its
+ * words: a card purchase paid through Stripe at another merchant
+ * ("STRIPE* ...") on the bank account has a receipt of its own.
+ */
+export const STRIPE_FEED_IMPORT_SOURCE = 'stripe'
+
 /** As much of a posted verifikat's line as the classifier reads. */
 export type BookedLine = Pick<PlausibilityLine, 'account_number' | 'debit_amount'>
 
@@ -186,15 +203,19 @@ function shiftDate(isoDate: string, days: number): string {
  * its invoice behind a login, a chain that sends to Kivra, a counter purchase
  * that only exists on paper, and otherwise the mailbox. Before all of them,
  * what has no receipt at all: salary and tax, and a verifikat that bought
- * nothing. First of all, a verifikat imported from earlier books: its
- * underlag is where those books were kept (the previous system, the byrå or
- * paper), so the errand is to confirm that, not to search (crm#1582).
+ * nothing. Before those, what is not a receipt errand: a row of the Stripe
+ * feed, or a verifikat booked from one, whose underlag is Stripe's invoice
+ * or report (stripe), and a transfer between the company's own accounts,
+ * whose underlag is the bank statement, so nothing is missing (own_transfer).
+ * First of all, a verifikat imported from earlier books: its underlag is
+ * where those books were kept (the previous system, the byrå or paper), so
+ * the errand is to confirm that, not to search (crm#1582).
  *
  * Exported because this is derived, never stored: the app can classify the
  * rows it already has without an agent having run, and the agent's sentence
  * and the app's summary then say the same thing by construction.
  */
-export type NextStepKind = 'imported' | 'not_mail' | 'no_purchase' | 'portal' | 'kivra' | 'paper' | 'mail'
+export type NextStepKind = 'imported' | 'not_mail' | 'no_purchase' | 'stripe' | 'own_transfer' | 'portal' | 'kivra' | 'paper' | 'mail'
 
 /**
  * `companyPortals` are the company's own (public.company_portals); without
@@ -202,23 +223,33 @@ export type NextStepKind = 'imported' | 'not_mail' | 'no_purchase' | 'portal' | 
  *
  * `lines` are a posted verifikat's; absent for an unbooked bank row, which has
  * only its words. They catch what no word does: a verifikat that bought
- * nothing (booksPurchase), such as a share issue, a transfer between the
- * company's own accounts or a sales samlingsverifikat. In a trial run
- * (2026-10-28) those, sorted largest first, filled the whole first page of a
- * mail search. The words go first: a tax payment says so, and the sentence
- * for it names the skattekonto.
+ * nothing (booksPurchase), such as a share issue or a sales
+ * samlingsverifikat, and among those a transfer between the company's own
+ * accounts (movesOnlyBetweenOwnAccounts), which needs nothing beyond the bank
+ * statement. In a trial run (2026-10-28) those, sorted largest first, filled
+ * the whole first page of a mail search. A transfer is read before the words,
+ * whatever it is called; otherwise the words go first: a tax payment says so,
+ * and the sentence for it names the skattekonto.
  *
  * `sourceType` is a posted verifikat's journal_entries.source_type: 'import'
  * (SIE) wins over every word, since even an imported salary verifikat has its
  * lönespecifikation in the earlier books, not in a mailbox.
+ *
+ * `importSource` is the feed of the bank row (transactions.import_source): an
+ * unbooked row's own, or for a posted verifikat STRIPE_FEED_IMPORT_SOURCE
+ * when a row of the Stripe feed is booked on it, so the day's sales
+ * samlingsverifikat reads as Stripe's errand like its rows did.
  */
 export function nextStepKind(
   descriptor: string | null,
   companyPortals: readonly CompanyPortal[] = [],
   lines?: readonly BookedLine[],
   sourceType?: string | null,
+  importSource?: string | null,
 ): NextStepKind {
   if (sourceType === 'import') return 'imported'
+  if (importSource === STRIPE_FEED_IMPORT_SOURCE) return 'stripe'
+  if (lines && movesOnlyBetweenOwnAccounts(lines)) return 'own_transfer'
   if (!canHaveEmailReceipt(descriptor)) return 'not_mail'
   if (lines && !booksPurchase(lines)) return 'no_purchase'
   if (resolvePortal(companyPortals, descriptor)) return 'portal'
@@ -246,10 +277,14 @@ function nextStep(kind: NextStepKind, portal: AgentWorklistItem['portal']): stri
       // The reason is the one the waiver dialogs suggest
       // (journal_list.no_doc_required_suggestion_archived_elsewhere).
       return `Importerat verifikat: underlaget finns där bokföringen fördes tidigare. Ligger det kvar där, markera det Inget underlag krävs med orsaken "${UNDERLAG_ARCHIVED_ELSEWHERE_REASON}".`
+    case 'own_transfer':
+      return 'Överföring mellan egna konton: kontoutdraget är underlaget, så det finns inget att hämta.'
     case 'not_mail':
       return 'Hämtas inte ur mejlen: underlaget är lönespecifikationen, skattekontot eller kontoutdraget.'
     case 'no_purchase':
       return 'Inget inköp, så inget kvitto: underlaget är kontoutdraget eller betalleverantörens rapport.'
+    case 'stripe':
+      return 'Logga in på Stripe och ladda ner underlaget: månadsfakturan för Stripes avgifter, saldorapporten för övriga rader.'
     case 'portal':
       return `Logga in på ${portal?.vendor ?? 'leverantören'} och ladda ner fakturan: ${portal?.url ?? ''}`.trim()
     case 'kivra':
@@ -270,6 +305,7 @@ function withSearchHints(
   lines?: readonly BookedLine[],
   underlagOn: UnderlagElsewhere | null = null,
   sourceType?: string | null,
+  importSource?: string | null,
 ): AgentWorklistItem {
   const descriptor = base.counterparty ?? base.description
   // A payment that settles an invoice opens the window earlier: the invoice was
@@ -293,12 +329,14 @@ function withSearchHints(
       underlag_on: underlagOn,
     }
   }
-  // An unbooked bank row has no lines to say it bought nothing, only its words.
-  const kind =
-    base.kind === 'transaction' && PROVIDER_OWN_ROW.test(base.description ?? '')
+  // An unbooked bank row has no lines to say it bought nothing, only its words
+  // and the feed it came from (nextStepKind reads the Stripe feed first).
+  const kind: NextStepKind =
+    base.kind === 'transaction' && importSource !== STRIPE_FEED_IMPORT_SOURCE && PROVIDER_OWN_ROW.test(base.description ?? '')
       ? 'no_purchase'
-      : nextStepKind(descriptor, companyPortals, lines, sourceType)
-  const mailSearchable = kind !== 'imported' && kind !== 'not_mail' && kind !== 'no_purchase'
+      : nextStepKind(descriptor, companyPortals, lines, sourceType, importSource)
+  const mailSearchable =
+    kind !== 'imported' && kind !== 'not_mail' && kind !== 'no_purchase' && kind !== 'stripe' && kind !== 'own_transfer'
   // The company's own portal for the supplier first, then the directory's.
   const portal = mailSearchable ? resolvePortal(companyPortals, descriptor) : null
   const portalHint = portal ? { vendor: portal.vendor, url: portal.url, note: portal.note } : null
@@ -350,16 +388,25 @@ interface VerifikatContext {
   currency: string | null
 }
 
-/** Who the verifikat is about: the supplier invoice it registers, else the bank row it books. */
+/** A voucher link (samlingsverifikat, split) with the feed of its bank row. */
+type FeedLinkRow = { journal_entry_id: string; tx: { import_source: string | null } | null }
+
+/**
+ * Who the verifikat is about: the supplier invoice it registers, else the bank
+ * row it books. Beside it, which verifikat have a row of the Stripe feed
+ * booked on them: through the row's own pointer, or through a voucher link,
+ * the only anchor of a samlingsverifikat's rows.
+ */
 async function fetchVerifikatContext(
   supabase: SupabaseClient,
   companyId: string,
   journalEntryIds: string[],
-): Promise<Map<string, VerifikatContext>> {
+): Promise<{ context: Map<string, VerifikatContext>; stripeFed: Set<string> }> {
   const context = new Map<string, VerifikatContext>()
+  const stripeFed = new Set<string>()
   for (let i = 0; i < journalEntryIds.length; i += LOOKUP_CHUNK) {
     const chunk = journalEntryIds.slice(i, i + LOOKUP_CHUNK)
-    const [siRes, txRes] = await Promise.all([
+    const [siRes, txRes, stripeLinks] = await Promise.all([
       supabase
         .from('supplier_invoices')
         .select('registration_journal_entry_id, supplier_invoice_number, total, currency, supplier:suppliers(name)')
@@ -367,12 +414,25 @@ async function fetchVerifikatContext(
         .in('registration_journal_entry_id', chunk),
       supabase
         .from('transactions')
-        .select('journal_entry_id, merchant_name, amount, currency')
+        .select('journal_entry_id, merchant_name, amount, currency, import_source')
         .eq('company_id', companyId)
         .in('journal_entry_id', chunk),
+      fetchAllRows<FeedLinkRow>((range) =>
+        supabase
+          .from('transaction_voucher_links')
+          .select('journal_entry_id, tx:transactions!inner(import_source)')
+          .eq('company_id', companyId)
+          .eq('tx.import_source', STRIPE_FEED_IMPORT_SOURCE)
+          .in('journal_entry_id', chunk)
+          .order('id', { ascending: true })
+          .range(range.from, range.to) as unknown as PromiseLike<{ data: FeedLinkRow[] | null; error: { message: string } | null }>,
+      ),
     ])
     if (siRes.error) throw new Error(`supplier_invoices lookup failed: ${siRes.error.message}`)
     if (txRes.error) throw new Error(`transactions lookup failed: ${txRes.error.message}`)
+    for (const link of stripeLinks) {
+      if (link.tx?.import_source === STRIPE_FEED_IMPORT_SOURCE) stripeFed.add(link.journal_entry_id)
+    }
 
     // Bank rows first so a supplier invoice, which names the supplier and the
     // invoice number, overwrites the thinner bank descriptor.
@@ -381,7 +441,9 @@ async function fetchVerifikatContext(
       merchant_name: string | null
       amount: number
       currency: string | null
+      import_source?: string | null
     }[]) {
+      if (r.import_source === STRIPE_FEED_IMPORT_SOURCE) stripeFed.add(r.journal_entry_id)
       context.set(r.journal_entry_id, {
         counterparty: r.merchant_name,
         invoice_number: null,
@@ -404,7 +466,73 @@ async function fetchVerifikatContext(
       })
     }
   }
-  return context
+  return { context, stripeFed }
+}
+
+/** Who each verifikat is about and what it booked: what its errand is read on. */
+async function fetchVerifikatFacts(
+  supabase: SupabaseClient,
+  companyId: string,
+  journalEntryIds: string[],
+): Promise<{
+  context: Map<string, VerifikatContext>
+  linesByEntry: Map<string, PlausibilityLine[]>
+  /** The feed (import_source) to read each verifikat's errand on: the Stripe feed's, or null. */
+  feedOf: (journalEntryId: string) => string | null
+}> {
+  const [{ context, stripeFed }, lines] = await Promise.all([
+    fetchVerifikatContext(supabase, companyId, journalEntryIds),
+    // What each verifikat booked: whether it bought anything at all, and
+    // whether it pays an invoice (the credit side of kundfordringar).
+    fetchLinesByEntryIds<PlausibilityLine & { id: string; journal_entry_id: string }>(
+      supabase,
+      journalEntryIds,
+      'account_number, debit_amount, credit_amount',
+    ),
+  ])
+  const linesByEntry = new Map<string, PlausibilityLine[]>()
+  for (const line of lines) {
+    const entryLines = linesByEntry.get(line.journal_entry_id)
+    if (entryLines) entryLines.push(line)
+    else linesByEntry.set(line.journal_entry_id, [line])
+  }
+  const feedOf = (journalEntryId: string) => (stripeFed.has(journalEntryId) ? STRIPE_FEED_IMPORT_SOURCE : null)
+  return { context, linesByEntry, feedOf }
+}
+
+/** As much of a verifikat_without_documents row as its errand is read on. */
+export interface VerifikatErrandRow {
+  journal_entry_id: string
+  description: string | null
+  source_type?: string | null
+}
+
+/**
+ * The errand (nextStepKind) of each verifikat without underlag, read on what
+ * the worklist reads a verifikat on: the name of the supplier invoice or bank
+ * row behind it, the feed of that row, its lines, its source type and the
+ * company's own portals.
+ * For readers that hold the RPC's rows rather than the worklist (the
+ * missing-underlag list, the VAT close check), so one verifikat reads as the
+ * same errand everywhere. Throws on a failed read.
+ */
+export async function verifikatNextStepKinds(
+  supabase: SupabaseClient,
+  companyId: string,
+  rows: readonly VerifikatErrandRow[],
+): Promise<Map<string, NextStepKind>> {
+  const kinds = new Map<string, NextStepKind>()
+  if (rows.length === 0) return kinds
+  const [{ context, linesByEntry, feedOf }, companyPortals] = await Promise.all([
+    fetchVerifikatFacts(supabase, companyId, [...new Set(rows.map((r) => r.journal_entry_id))]),
+    readCompanyPortals(supabase, companyId),
+  ])
+  for (const row of rows) {
+    const id = row.journal_entry_id
+    const descriptor = context.get(id)?.counterparty ?? row.description
+    kinds.set(id, nextStepKind(descriptor, companyPortals, linesByEntry.get(id), row.source_type, feedOf(id)))
+  }
+  return kinds
 }
 
 /**
@@ -421,16 +549,20 @@ async function fetchVerifikatWindow(
   supabase: SupabaseClient,
   companyId: string,
   since: string | null,
+  until: string | null,
 ): Promise<{ rows: VerifikatRow[]; total: number }> {
   const rows: VerifikatRow[] = []
   let total = 0
   for (let offset = 0; offset < VERIFIKAT_WINDOW; offset += VERIFIKAT_PAGE) {
+    // p_until (inclusive) goes only with an until, as in
+    // gnubok_list_verifikat_without_documents.
     const { data, error } = await supabase.rpc('verifikat_without_documents', {
       p_company_id: companyId,
       p_since: since,
       p_min_amount: 0,
       p_limit: VERIFIKAT_PAGE,
       p_offset: offset,
+      ...(until ? { p_until: until } : {}),
     })
     if (error) throw new Error(`verifikat_without_documents failed: ${error.message}`)
     const result = data as {
@@ -453,40 +585,43 @@ async function fetchVerifikatWindow(
 export async function resolveAgentWorklist(
   supabase: SupabaseClient,
   companyId: string,
-  opts: { limit?: number; offset?: number; since?: string | null } = {},
+  /** `since` and `until` are ISO dates, both inclusive, applied to both sources. */
+  opts: { limit?: number; offset?: number; since?: string | null; until?: string | null } = {},
 ): Promise<AgentWorklist> {
   const limit = Math.min(Math.max(1, opts.limit ?? 25), MAX_ITEMS)
   const offset = Math.max(0, Math.floor(opts.offset ?? 0))
   const since = opts.since ?? null
+  const until = opts.until ?? null
 
   const [verifikatWindow, transactions, claimed, inboxAddress, companyPortals] = await Promise.all([
-    fetchVerifikatWindow(supabase, companyId, since),
+    fetchVerifikatWindow(supabase, companyId, since, until),
     fetchPurchasesWithoutUnderlag(supabase, companyId),
     fetchClaimedTargets(supabase, companyId),
     resolveInboxAddress(supabase, companyId),
     readCompanyPortals(supabase, companyId),
   ])
 
-  const verifikat = verifikatWindow.rows.filter(
+  const unclaimed = verifikatWindow.rows.filter(
     (v) => !claimed.journalEntryIds.has(v.journal_entry_id),
   )
-  const verifikatIds = verifikat.map((v) => v.journal_entry_id)
-  const [context, lines] = await Promise.all([
-    fetchVerifikatContext(supabase, companyId, verifikatIds),
-    // What each verifikat booked: whether it bought anything at all, and
-    // whether it pays an invoice (the credit side of kundfordringar).
-    fetchLinesByEntryIds<PlausibilityLine & { id: string; journal_entry_id: string }>(
-      supabase,
-      verifikatIds,
-      'account_number, debit_amount, credit_amount',
-    ),
-  ])
-  const linesByEntry = new Map<string, PlausibilityLine[]>()
-  for (const line of lines) {
-    const entryLines = linesByEntry.get(line.journal_entry_id)
-    if (entryLines) entryLines.push(line)
-    else linesByEntry.set(line.journal_entry_id, [line])
-  }
+  const { context, linesByEntry, feedOf } = await fetchVerifikatFacts(
+    supabase,
+    companyId,
+    unclaimed.map((v) => v.journal_entry_id),
+  )
+  // A transfer between the company's own accounts has the bank statement as
+  // its underlag: nothing is missing and there is nothing to hunt for, so it
+  // is left out like a claimed one.
+  const verifikat = unclaimed.filter(
+    (v) =>
+      nextStepKind(
+        context.get(v.journal_entry_id)?.counterparty ?? v.description,
+        companyPortals,
+        linesByEntry.get(v.journal_entry_id),
+        v.source_type,
+        feedOf(v.journal_entry_id),
+      ) !== 'own_transfer',
+  )
   const underlagElsewhere = await resolveUnderlagElsewhere(supabase, companyId, verifikat, linesByEntry)
 
   // Ranked on the SEK value: `amount` is in the row's own currency, and a
@@ -507,13 +642,14 @@ export async function resolveAgentWorklist(
         counterparty: ctx?.counterparty ?? null,
         description: v.description,
         invoice_number: ctx?.invoice_number ?? null,
-      }, companyPortals, linesByEntry.get(v.journal_entry_id), underlagElsewhere.get(v.journal_entry_id) ?? null, v.source_type),
+      }, companyPortals, linesByEntry.get(v.journal_entry_id), underlagElsewhere.get(v.journal_entry_id) ?? null, v.source_type, feedOf(v.journal_entry_id)),
     })
   }
   for (const tx of transactions) {
     if (claimed.transactionIds.has(tx.id)) continue
     if (!tx.date || tx.amount == null) continue
     if (since && tx.date < since) continue
+    if (until && tx.date > until) continue
     ranked.push({
       sek: Math.abs(tx.amount_sek ?? tx.amount),
       item: withSearchHints({
@@ -527,7 +663,7 @@ export async function resolveAgentWorklist(
         counterparty: tx.merchant_name ?? null,
         description: tx.description ?? null,
         invoice_number: null,
-      }, companyPortals),
+      }, companyPortals, undefined, null, null, tx.import_source),
     })
   }
 
@@ -536,8 +672,9 @@ export async function resolveAgentWorklist(
   return {
     items: ranked.slice(offset, end).map((r) => r.item),
     // The verifikat total comes from the RPC (it may exceed the window
-    // fetched here); claimed rows inside the window are subtracted so the
-    // number matches what the agent can actually work on.
+    // fetched here); claimed rows and transfers between own accounts inside
+    // the window are subtracted so the number matches what the agent can
+    // actually work on.
     total_count:
       verifikatWindow.total -
       (verifikatWindow.rows.length - verifikat.length) +

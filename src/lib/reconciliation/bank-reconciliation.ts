@@ -22,6 +22,7 @@ import {
 } from '@/lib/bookkeeping/ledger-line-amount'
 import { createLogger } from '@/lib/logger'
 import { chunk } from '@/lib/utils'
+import { mapWithConcurrency } from '@/lib/concurrency'
 import { addDaysIso, todayIsoStockholm } from '@/lib/dates/iso'
 import { resolveLedgerSettlements } from './ledger-settlement-store'
 import { findOpeningBalanceFloor, sumAccountBalance } from './gl-balance'
@@ -163,8 +164,12 @@ export interface ReconciliationStatus {
    * unrealised kursdifferens and is revalued separately. (Use
    * `gl_1930_period_movement` for the reconciliation diff, since this figure
    * still includes the opening balance.)
+   *
+   * `null` on a foreign account whose opening balance in the window is not
+   * known in the account's currency (see `gl_1930_opening_balance`): the
+   * movement is known, the balance is not.
    */
-  gl_1930_balance: number
+  gl_1930_balance: number | null
   /** Ledger movement on the bank account excluding opening_balance: i.e.
    *  the ledger balance minus IB, less the verifikat dated before the bank's
    *  history (before_history_total, see history_start). Storno/correction
@@ -173,8 +178,16 @@ export interface ReconciliationStatus {
    *  what `difference` compares against. */
   gl_1930_period_movement: number
   /** IB on the bank account within the date range: surfaced separately so
-   *  reconciliation doesn't treat it as an unmatched bank transaction. */
-  gl_1930_opening_balance: number
+   *  reconciliation doesn't treat it as an unmatched bank transaction.
+   *
+   *  On a foreign account the IB is booked in kronor (year-end, SIE import,
+   *  set_opening_balances). Its amount in the account's currency is then
+   *  what stood on the account the day before, when the IB restates that day
+   *  and every line behind it carries the currency (account_ib_in_currency).
+   *  `null` otherwise (an import's first year, history booked in kronor):
+   *  the IB is unknown in the currency. It is never part of `difference`, so
+   *  the account reconciles on its movement either way. */
+  gl_1930_opening_balance: number | null
   /** Net of posted storno/correction lines on the bank account within the date
    *  range. INFORMATIONAL ONLY: it is part of the ledger balance and is included
    *  in gl_1930_period_movement, not subtracted from it. Surfaced so the UI can
@@ -262,7 +275,9 @@ export interface ReconciliationStatus {
    */
   unexplained_difference: number | null
   /** Counted ledger lines on the account that carry no amount in `currency`
-   *  (see {@link ledgerLineAmountIn}). Always 0 on a SEK account. */
+   *  (see {@link ledgerLineAmountIn}). Always 0 on a SEK account. The opening
+   *  balance at the window's floor is not counted: it is outside the movement
+   *  the two sides are compared on. */
   unconvertible_gl_line_count: number
   /**
    * Machine-readable reason the window cannot be reconciled at all, or null
@@ -643,8 +658,10 @@ export async function runReconciliation(
   // Fetch unlinked GL lines via RPC. A partially allocated verifikat (1:N
   // slices settle part of it, remaining_amount set) is listed for the user,
   // never auto-linked: its lines carry the full amount, not the open part.
+  // A verifikat labelled opening_balance off a year start is listed too, but
+  // no link may name it (isBankMovementEntry), so it is no match candidate.
   const glLines = (await fetchUnlinkedGLLines(supabase, companyId, accountNumber, dateFrom, dateTo)).filter(
-    (line) => line.remaining_amount == null,
+    (line) => line.remaining_amount == null && isBankMovementEntry(line),
   )
 
   // Fetch unmatched transactions, scoped to the selected cash account.
@@ -946,8 +963,10 @@ export async function getReconciliationStatus(
   const effectiveFrom = facts.effective_from
 
   // The ledger-only verifikat on the account over the floored window, from
-  // get_account_gl_lines_for_matching (RPC excludes opening_balance and
-  // storno; posted correction vouchers are candidates since 20260923150000,
+  // get_account_gl_lines_for_matching (RPC excludes the storno and an
+  // opening_balance verifikat on a fiscal year's first day, the IB; one
+  // labelled so on any other day is ledger-only since 20261122160000;
+  // posted correction vouchers are candidates since 20260923150000,
   // a linked one drops out through its link like any other voucher).
   // Account-scoped since 20260723160000: a voucher whose links all sit on
   // another cash account (a transfer's other leg) counts as unmatched HERE,
@@ -1044,7 +1063,12 @@ export async function getReconciliationStatus(
   // ONLY: it is part of the ledger balance and is INCLUDED in the movement,
   // never subtracted.
   const glBalance = Number(facts.gl.balance)
-  const glOpeningBalance = Number(facts.gl.opening_balance)
+  // A foreign account's IB is booked in kronor by year-end, SIE import and
+  // set_opening_balances. The read answers it from the lines before it when
+  // the IB restates them and they all carry the currency, and null when not:
+  // the movement is still known then, the balance is not.
+  const openingBalanceKnown = facts.gl.opening_balance !== null
+  const glOpeningBalance = Number(facts.gl.opening_balance ?? 0)
   const glCorrectionAdjustment = Number(facts.gl.correction_adjustment)
   const unconvertibleLineCount = Number(facts.gl.unconvertible_line_count)
   // Period movement = the ledger balance minus the opening balance, less the
@@ -1098,7 +1122,7 @@ export async function getReconciliationStatus(
         historyStart: beforeHistory.splitAt,
         windowFrom: effectiveFrom,
         ibFloor,
-        openingBalanceInWindow: roundOre(glOpeningBalance),
+        openingBalanceInWindow: openingBalanceKnown ? roundOre(glOpeningBalance) : null,
         beforeHistoryTotal,
         saldo: facts.saldo,
       })
@@ -1115,9 +1139,9 @@ export async function getReconciliationStatus(
     bank_transaction_count: Number(facts.bank.count),
     ignored_transaction_total: roundOre(ignoredTotal),
     ignored_transaction_count: Number(facts.bank.ignored_count),
-    gl_1930_balance: Math.round(glBalance * 100) / 100,
+    gl_1930_balance: openingBalanceKnown ? Math.round(glBalance * 100) / 100 : null,
     gl_1930_period_movement: Math.round(glPeriodMovement * 100) / 100,
-    gl_1930_opening_balance: Math.round(glOpeningBalance * 100) / 100,
+    gl_1930_opening_balance: openingBalanceKnown ? Math.round(glOpeningBalance * 100) / 100 : null,
     gl_1930_correction_adjustment: Math.round(glCorrectionAdjustment * 100) / 100,
     difference,
     // Avstämt requires BOTH sides to hold: the totals agree AND nothing is left
@@ -1166,7 +1190,8 @@ interface BankReconciliationFacts {
   effective_from: string | null
   gl: {
     balance: number | string
-    opening_balance: number | string
+    /** Null: a foreign account's IB that states no amount in its currency and that the ledger before it cannot answer. `balance` is then the movement alone. */
+    opening_balance: number | string | null
     correction_adjustment: number | string
     unconvertible_line_count: number | string
   }
@@ -1352,7 +1377,8 @@ async function bankOpeningComparison(input: {
   historyStart: string
   windowFrom: string | null
   ibFloor: string | null
-  openingBalanceInWindow: number
+  /** Null when the IB in the window is not known in the account's currency. */
+  openingBalanceInWindow: number | null
   beforeHistoryTotal: number
   saldo: BankSaldoFacts | null
 }): Promise<OpeningComparison> {
@@ -1367,7 +1393,9 @@ async function bankOpeningComparison(input: {
     before = null
   }
   const ledgerBalanceBeforeStart =
-    before === null ? null : roundOre(before + input.openingBalanceInWindow + input.beforeHistoryTotal)
+    before === null || input.openingBalanceInWindow === null
+      ? null
+      : roundOre(before + input.openingBalanceInWindow + input.beforeHistoryTotal)
   const saldoAtStart = bankSaldoAtStart(input)
   return {
     ledger_balance_before_start: ledgerBalanceBeforeStart,
@@ -2367,6 +2395,86 @@ async function tagHeldBankRow(
 // ============================================================
 
 /**
+ * Verifikat one call of a candidate predicate judges. About 1 s cold and
+ * 50 ms warm on the largest company's account, far inside the 8 s statement
+ * timeout, and a slice of them seldom has more lines than one 1 000-row page,
+ * so most slices are one request.
+ */
+const CANDIDATE_ENTRY_SLICE = 500
+
+/** Slices read side by side: fetchAllRows' pages in flight, for the same pool. */
+const CANDIDATE_SLICES_IN_FLIGHT = 3
+
+type CandidateLineKey = Pick<UnlinkedGLLine, 'entry_date' | 'voucher_number' | 'line_id'>
+
+/**
+ * The candidate RPCs' order: entry_date, voucher_number, line_id, ascending,
+ * NULLs last, as Postgres sorts them. An ISO date sorts as its text, and a
+ * uuid's lowercase text sorts as its bytes.
+ */
+function compareCandidateLines(a: CandidateLineKey, b: CandidateLineKey): number {
+  if (a.entry_date !== b.entry_date) return a.entry_date < b.entry_date ? -1 : 1
+  if (a.voucher_number !== b.voucher_number) {
+    if (a.voucher_number == null) return 1
+    if (b.voucher_number == null) return -1
+    return a.voucher_number - b.voucher_number
+  }
+  if (a.line_id === b.line_id) return 0
+  return a.line_id < b.line_id ? -1 : 1
+}
+
+/**
+ * One candidate list, read as the RPC's own two halves: its narrowing once,
+ * then its predicate on slices of the verifikat the narrowing names.
+ *
+ * Not .range() over the RPC (crm#2150): the RPC is plpgsql, so PostgREST runs
+ * it to the end for every page and cuts 1 000 rows out of the result. A list
+ * of n lines cost n/1 000 runs over the whole window; on the largest
+ * company's account every run took longer than the 8 s statement timeout, so
+ * a reconciliation without date_from failed on its first page. The predicate
+ * judges every verifikat it is handed in full (window, status, links, tenant
+ * guard) and each row depends on its own verifikat alone, so the slices
+ * together answer the RPC's rows, each verifikat judged once. They are put
+ * back in the RPC's order: the matcher keeps list order between equal
+ * candidates.
+ */
+async function readCandidateLines<T extends CandidateLineKey>(
+  supabase: SupabaseClient,
+  narrowing: string,
+  predicate: string,
+  args: Record<string, unknown>,
+): Promise<T[]> {
+  const { data, error } = await supabase.rpc(narrowing, args)
+  if (error) throw dbError(error, null)
+  // One failed slice fails the read, and the slices not yet asked for are
+  // never asked: the pool is not kept busy for an answer no one will use.
+  let failed = false
+  const slices = await mapWithConcurrency(
+    chunk((data ?? []) as string[], CANDIDATE_ENTRY_SLICE),
+    CANDIDATE_SLICES_IN_FLIGHT,
+    async (entryIds) => {
+      if (failed) return []
+      try {
+        // A slice can still pass PostgREST's silent 1000-row cap (a verifikat
+        // with many lines on the account), so it pages, with line_id unique.
+        return await fetchAllRows<T>(({ from, to }) =>
+          supabase
+            .rpc(predicate, { ...args, p_entry_ids: entryIds })
+            .order('entry_date')
+            .order('voucher_number')
+            .order('line_id')
+            .range(from, to),
+        )
+      } catch (err) {
+        failed = true
+        throw err
+      }
+    },
+  )
+  return slices.flat().sort(compareCandidateLines)
+}
+
+/**
  * Fetch unlinked GL lines for a settlement account. `accountNumber` defaults to
  * '1930' for back-compat; multi-account customers (Plusgiro 1920, kreditkort
  * 1940, EUR-konto 1932, etc.) pass the BAS code of the account they're
@@ -2380,28 +2488,18 @@ export async function fetchUnlinkedGLLines(
   dateFrom?: string,
   dateTo?: string,
 ): Promise<UnlinkedGLLine[]> {
-  // Paginated: the RPC returns SETOF and is subject to the same silent
-  // 1000-row PostgREST cap as table selects; truncation here would hide match
-  // candidates and undercount unmatched_gl_line_count. The .order() chain
-  // preserves the RPC's chronological order for consumers (the UI table, the
-  // picker) while the unique line_id tiebreaker keeps pages stable: several
-  // lines of one entry share entry_date/voucher_number. A failed read throws:
-  // an empty list would read as "nothing to match", so runReconciliation and
-  // the unattended sweeps would record a clean run that never looked
-  // (accounted#115).
-  return fetchAllRows<UnlinkedGLLine>(({ from, to }) =>
-    supabase
-      .rpc('get_unlinked_gl_lines', {
-        p_company_id: companyId,
-        p_account_number: accountNumber,
-        p_date_from: dateFrom || null,
-        p_date_to: dateTo || null,
-      })
-      .order('entry_date')
-      .order('voucher_number')
-      .order('line_id')
-      .range(from, to),
-  )
+  // get_unlinked_gl_lines' rows (bank_account_unlinked_entries, then
+  // bank_account_unlinked_lines) in its chronological order, every one of
+  // them: a truncated list would hide match candidates and undercount
+  // unmatched_gl_line_count. A failed read throws: an empty list would read
+  // as "nothing to match", so runReconciliation and the unattended sweeps
+  // would record a clean run that never looked (accounted#115).
+  return readCandidateLines<UnlinkedGLLine>(supabase, 'bank_account_unlinked_entries', 'bank_account_unlinked_lines', {
+    p_company_id: companyId,
+    p_account_number: accountNumber,
+    p_date_from: dateFrom || null,
+    p_date_to: dateTo || null,
+  })
 }
 
 /**
@@ -2462,23 +2560,22 @@ export async function fetchGLLinesForMatching(
   dateTo?: string,
   includeMatched: boolean = false,
 ): Promise<GLLineForMatching[]> {
-  // Paginated + ordered chronologically with the unique line_id tiebreaker,
-  // for the same reasons as fetchUnlinkedGLLines.
+  // get_account_gl_lines_for_matching's rows (bank_account_candidate_entries,
+  // then bank_account_candidate_lines), all of them in its chronological
+  // order, for the same reasons as fetchUnlinkedGLLines.
   let data: GLLineForMatching[]
   try {
-    data = await fetchAllRows<GLLineForMatching>(({ from, to }) =>
-      supabase
-        .rpc('get_account_gl_lines_for_matching', {
-          p_company_id: companyId,
-          p_account_number: accountNumber,
-          p_date_from: dateFrom || null,
-          p_date_to: dateTo || null,
-          p_include_matched: includeMatched,
-        })
-        .order('entry_date')
-        .order('voucher_number')
-        .order('line_id')
-        .range(from, to),
+    data = await readCandidateLines<GLLineForMatching>(
+      supabase,
+      'bank_account_candidate_entries',
+      'bank_account_candidate_lines',
+      {
+        p_company_id: companyId,
+        p_account_number: accountNumber,
+        p_date_from: dateFrom || null,
+        p_date_to: dateTo || null,
+        p_include_matched: includeMatched,
+      },
     )
   } catch {
     return []

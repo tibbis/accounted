@@ -73,6 +73,23 @@ function horizonEndFor(type: TaxDeadlineType, today: Date): Date {
 }
 
 /**
+ * The years the generator dates and detection expects, as of `fromDate`:
+ * last year, this year and the next. The monthly and quarterly configs are
+ * keyed by the year of the period (generateDates), and a December or Q4
+ * period falls due in the next calendar year (AGI and moms for December in
+ * January and February). Without last year, every regeneration from 1 January
+ * leaves them out of the set, and replace_system_tax_deadlines deletes their
+ * pending rows while they are still ahead. The configs keyed by the year a
+ * deadline falls due add nothing from last year but a notice's kvarskatt,
+ * which is kept past its date as in any year; every other row already past
+ * is skipped.
+ */
+export function deadlineWindowYears(fromDate: Date = new Date()): number[] {
+  const year = stockholmYearMonth(fromDate).year
+  return [year - 1, year, year + 1]
+}
+
+/**
  * Fields in company_settings that affect tax deadline generation
  */
 export const TAX_RELEVANT_FIELDS = [
@@ -494,11 +511,10 @@ export async function generateTaxDeadlinesForUser(
   // also include their own due-date years so a newly entered overdue notice is
   // represented instead of disappearing only because its exact date has passed.
   if (years.length === 0) {
-    const currentYear = stockholmYearMonth().year
     const noticeYears = (settings.tax_assessment_notices ?? [])
       .map((notice) => Number(notice.paymentDueDate.slice(0, 4)))
       .filter(Number.isInteger)
-    years = Array.from(new Set([currentYear, currentYear + 1, ...noticeYears]))
+    years = Array.from(new Set([...deadlineWindowYears(), ...noticeYears]))
   }
 
   // The begäran deadline is data-dependent: a row for year Y only exists
@@ -650,7 +666,10 @@ export async function generateTaxDeadlinesForUser(
           : adjustDeadlineToNextBankingDay(rawDate)
         const dueDate = formatDateISO(adjustedDate)
 
-        // Skip if the deadline is in the past
+        // Skip if the deadline is in the past. A notice's kvarskatt is kept:
+        // one entered after its payment date must still show. Its old row
+        // lies before the window, so the replacement removes it by notice
+        // (replace_system_tax_deadlines, migration 20261121111517).
         if (adjustedDate < today && !instance.taxAssessmentNoticeId) {
           continue
         }
@@ -730,12 +749,14 @@ export async function generateTaxDeadlinesForUser(
   )
 
   // The new set replaces the old one in one transaction, under a per-company
-  // lock (replace_system_tax_deadlines, migration 20261113020219): the rows
-  // are inserted, then every other pending system row in the window is
-  // deleted. A failed insert leaves the previous deadlines intact, and two
-  // regenerations that overlap (a settings save racing the nightly repair)
-  // run one after the other, so the company always holds one whole set. As
-  // two separate statements each deleted the other's freshly inserted rows.
+  // lock (replace_system_tax_deadlines, migrations 20261113020219 and
+  // 20261121111517): the rows are inserted, then every other pending system
+  // row in the window is deleted, and every other pending row of a notice the
+  // set has a row for, wherever its date falls. A failed insert leaves the
+  // previous deadlines intact, and two regenerations that overlap (a settings
+  // save racing the nightly repair) run one after the other, so the company
+  // always holds one whole set. As two separate statements each deleted the
+  // other's freshly inserted rows.
   //
   // Dismissed rows survive the delete: deleting one would erase the opt-out
   // and let the next regeneration recreate the obligation as a fresh pending
@@ -827,6 +848,16 @@ async function replaceDeadlinesInTwoStatements(
     newIds = (insertedData ?? []).map((d: { id: string }) => d.id)
   }
 
+  // The window, and the old rows of a notice the new set has a row for
+  // wherever they fall (a kvarskatt already past due), as the function does.
+  // The ids went into a uuid column in the insert above, so they are safe
+  // inside the filter string.
+  const noticeIds = Array.from(new Set(
+    uniqueDeadlines
+      .map((row) => row.tax_assessment_notice_id)
+      .filter((id): id is string => typeof id === 'string'),
+  ))
+
   let deleteQuery = supabase
     .from('deadlines')
     .delete()
@@ -834,8 +865,12 @@ async function replaceDeadlinesInTwoStatements(
     .eq('source', 'system')
     .eq('is_completed', false)
     .is('dismissed_at', null)
-    .gte('due_date', todayIso)
-    .lte('due_date', endDate)
+
+  deleteQuery = noticeIds.length > 0
+    ? deleteQuery.or(
+        `and(due_date.gte.${todayIso},due_date.lte.${endDate}),tax_assessment_notice_id.in.(${noticeIds.join(',')})`,
+      )
+    : deleteQuery.gte('due_date', todayIso).lte('due_date', endDate)
 
   if (newIds.length > 0) {
     deleteQuery = deleteQuery.not('id', 'in', `(${newIds.join(',')})`)
@@ -900,8 +935,7 @@ export async function regenerateTaxDeadlinesForUser(
   companyId: string,
   newSettings: CompanySettingsForDeadlines
 ): Promise<{ created: number; deleted: number }> {
-  const currentYear = stockholmYearMonth().year
-  return generateTaxDeadlinesForUser(supabase, companyId, newSettings, [currentYear, currentYear + 1])
+  return generateTaxDeadlinesForUser(supabase, companyId, newSettings, deadlineWindowYears())
 }
 
 interface DeadlineSettingsRow extends Partial<CompanySettingsForDeadlines> {
@@ -943,10 +977,7 @@ export function getExpectedUpcomingDeadlineKeys(
   years: number[] = [],
   fromDate: Date = new Date(),
 ): Set<string> {
-  if (years.length === 0) {
-    const currentYear = stockholmYearMonth(fromDate).year
-    years = [currentYear, currentYear + 1]
-  }
+  if (years.length === 0) years = deadlineWindowYears(fromDate)
 
   const today = parseDate(todayIsoStockholm(fromDate))
   // Keyed by type:period, last one wins, exactly like the generator's own
@@ -1066,8 +1097,7 @@ export function findSettingsWithStaleUpcomingDeadlines(
   years: number[] = [],
   fromDate: Date = new Date(),
 ): DeadlineSettingsRow[] {
-  const currentYear = stockholmYearMonth(fromDate).year
-  const windowYears = years.length > 0 ? years : [currentYear, currentYear + 1]
+  const windowYears = years.length > 0 ? years : deadlineWindowYears(fromDate)
   const todayIso = todayIsoStockholm(fromDate)
   // The generator's delete window (generateTaxDeadlinesForUser's endDate).
   const windowEnd = `${Math.max(...windowYears) + 1}-12-31`
@@ -1136,7 +1166,6 @@ export async function generateNewYearDeadlines(
   supabase: SupabaseClient,
   options: DeadlinePassOptions = {},
 ): Promise<{ usersProcessed: number; totalCreated: number; companiesNotReached: number }> {
-  const newYear = stockholmYearMonth().year
   const allSettings = await hydrateRecordedEuTradeYears(
     supabase,
     await hydrateSalariedEmployeeSince(
@@ -1162,7 +1191,7 @@ export async function generateNewYearDeadlines(
         supabase,
         settings.company_id,
         toDeadlineSettings(settings),
-        [newYear, newYear + 1]
+        deadlineWindowYears(),
       )
       usersProcessed++
       totalCreated += result.created
@@ -1199,8 +1228,8 @@ export async function backfillMissingTaxDeadlines(
   // (already passed) due date must still count as satisfied, otherwise the
   // repair loop flags the company forever while the generator (correctly)
   // refuses to recreate a filed obligation. Matches the generator's own
-  // completed-row floor.
-  const pastFloor = `${stockholmYearMonth().year - 1}-01-01`
+  // completed-row floor for the window regeneration uses.
+  const pastFloor = `${Math.min(...deadlineWindowYears()) - 1}-01-01`
   const [rawSettings, upcomingDeadlineRows] = await Promise.all([
     fetchAllDeadlineSettings(supabase),
     fetchAllRows<UpcomingDeadlineCompanyRow>(({ from, to }) =>
@@ -1392,8 +1421,7 @@ export async function alignYearlyVatDeadlinesWithBooks(
   if (pastDeadline(options)) return nothing
 
   const todayIso = todayIsoStockholm()
-  const currentYear = stockholmYearMonth().year
-  const years = [currentYear, currentYear + 1]
+  const years = deadlineWindowYears()
   const queue = (await hydrateFiscalYears(supabase, candidates))
     .map((row) => {
       const settings = toDeadlineSettings(row)

@@ -32,7 +32,7 @@ Load a sibling with \`gnubok_load_skill\` when you reach its part.
 Answer each of these with a tool, not an assumption:
 
 1. **Which company.** \`gnubok_list_companies\`. Several: ask which one, then pass that \`company_id\` on every call, including approval. Never let the connection default decide.
-2. **Legal form, accounting method, framework.** \`gnubok_get_agent_briefing\` gives identity and \`accounting_method\` (kontantmetoden or faktureringsmetoden). This skill is for AB; if the company is an enskild firma, jump to "If the company is an enskild firma" below. K2 or K3: \`gnubok_preview_arsredovisning\` returns \`report.accounting_framework\`. K3 adds its own steps (the transition, components, nedskrivning, deferred tax): see "If the company reports under K3".
+2. **Legal form, accounting method, framework.** \`gnubok_get_agent_briefing\` gives identity and \`accounting_method\` (kontantmetoden or faktureringsmetoden). This skill is for AB; if the company is an enskild firma, jump to "If the company is an enskild firma" below. K2 or K3: \`gnubok_preview_arsredovisning\` returns \`report.accounting_framework\`; when \`framework_confirmed\` is false it is only the company default, so ask the owner which framework the year is prepared under and never decide it yourself. K3 adds its own steps (the transition, components, nedskrivning, deferred tax): see "If the company reports under K3".
 3. **Which year, and its state.** \`gnubok_list_fiscal_periods\`. Find the period the user means by its \`period_end\` (the räkenskapsår may be brutet, never assume 31 December). Status: open, locked or closed.
 4. **Earlier years.** In the same list, check every period that ends before this one. See "If a prior year is not closed".
 5. **Bank.** \`gnubok_get_reconciliation_status\` with \`date_from\`/\`date_to\` = the period. No connected bank or a difference at balansdagen means the books are not complete yet.
@@ -49,7 +49,11 @@ The opening balances of this year are the closing balances of the last one. Clos
 
 ## Step 1: Readiness
 
-\`gnubok_year_end_readiness({ fiscal_period_id })\`. Run it first to see the scope of work, and again after each fix. Blockers and what to do:
+\`gnubok_year_end_readiness({ fiscal_period_id })\` lists only what blocks the close: \`ready: true\` means the close can run, not that the bokslut is done. Run it first, and again after each fix.
+
+The scope of work is the year-end checklist: \`gnubok_get_bokslutsbilagor({ period_id })\` (search-only: through \`gnubok_call_tool\`) returns \`checklist.items\` with each step's \`state\` (bank and skattekonto signed off at balansdagen, the reskontra tie-outs, periodiseringar, avskrivningar, dispositioner, the year's tax and more) and \`checklist.summary.open\`, plus every balance account with its sign-off. Read it at the start, work the open items through Steps 2 to 5, and name the ones still open in the report. Steps the system cannot judge are ticked by the user on the Bokslut page in Accounted, not by you.
+
+Blockers and what to do:
 
 | Blocker \`kind\` | Meaning | What you do |
 |---|---|---|
@@ -89,12 +93,14 @@ ${CUTOFF_STEP}
 - \`gnubok_propose_accruals({ fiscal_period_id })\` proposes what Accounted can compute today, mainly the change in semesterlöneskuld. Read \`notices\`: they say why a proposal was withheld (for example no employees).
 - \`gnubok_list_accrual_schedules\` shows running periodiseringar (17xx/29xx) and what remains.
 - Everything else comes from the user. Ask concrete questions: prepaid rent or insurance covering next year, customer work done but not invoiced, costs for this year billed next year, an estimated fee for bokslut or revision.
-- Under K2, a recurring cost under 5 000 SEK per item that does not vary more than 20 % year on year need not be accrued; personnel costs always are. Under K3 there is no such threshold.
+- Under K2, an inkomst or utgift under 7 000 SEK need not be accrued (punkt 2.4), and an advance received or paid for a good or service under 7 000 SEK may be booked as income or cost at once (punkt 2.4A). The amount is the one on each invoice, agreement or similar document, with split invoices summed, never the part to accrue. These limits come from BFNAR 2025:2 and apply to a räkenskapsår that began after 2025-12-31, or to the first, förlängt räkenskapsår of a business started after 2025-06-30 that ends 2026-12-31 or later; for earlier years punkt 2.4 says 5 000 SEK. Under K3 there is no such amount limit.
+- Also under K2, a cost of the same kind that recurs every year and is not a personnel cost may be expensed in the year the company normally receives the invoice or pays under the agreement, with no amount limit, if it can be expected to vary at most 20 % between years and each year carries one year's cost; the first year the rule is used for a cost need not meet the one-year's-cost condition (punkt 7.9).
+- Under BFNAR 2025:2, punkterna 2.4, 2.4A and 7.9 may not be used to the extent that, alone or together, they materially affect the company's intäkter, kostnader or ställning (punkt 2.4B): accrue those items and keep the relief for the rest.
 - Stage each accrual with \`gnubok_create_voucher\` dated on balansdagen, balanced lines, the amount the user gave you with its underlag. Tell the user the reversal belongs on day one of the next year, and put it under "next step": the next period normally exists only after the close.
 
 ### Avskrivningar (depreciation)
 - \`gnubok_list_assets\` first. Then ask: "Did the company buy equipment, computers or vehicles this year that are not in this list?" and "Was anything sold, scrapped or taken out of use?" Compare the purchases booked on 10xx-12xx accounts (\`gnubok_query_journal\` with \`account_from\`/\`account_to\` and the year's dates) with the register.
-- A purchase not in the register: register it with \`gnubok_create_asset\` after the user confirms cost, date put into use and useful life. A purchase below half a prisbasbelopp (29 400 SEK for 2025, 29 600 SEK for 2026) or with a useful life of three years or less is normally a förbrukningsinventarie and expensed: ask before moving anything. A sold or scrapped asset: \`gnubok_dispose_asset\`, with the user's facts.
+- A purchase not in the register: register it with \`gnubok_create_asset\` after the user confirms cost, date put into use and useful life. A purchase below half a prisbasbelopp (29 400 SEK for 2025, 29 600 SEK for 2026, 29 800 SEK for 2027) or with a useful life of three years or less is normally a förbrukningsinventarie and expensed: ask before moving anything. A sold or scrapped asset: \`gnubok_dispose_asset\`, with the user's facts.
 - \`gnubok_propose_annual_depreciation({ fiscal_period_id })\`, show the per-asset amounts, then \`gnubok_post_annual_depreciation({ fiscal_period_id })\` (or with \`asset_ids\` for a subset). One verifikat per asset, staged. Assets that already have a posting this year are skipped.
 - This is planenlig avskrivning. The tax-side difference (överavskrivning, 2150/8850) is a bokslutsdisposition, Step 5, not a depreciation posting.
 
@@ -159,7 +165,7 @@ Read \`gnubok_get_k3_transition({ fiscal_period_id })\` first: \`year.framework\
 
 ## If the company is an enskild firma
 
-This skill is filtered to AB, but if you reach it for an EF: readiness, accruals, depreciation and \`gnubok_run_year_end\` work the same way (the close uses the EF equity account, named on the approval card). There are no bokslutsdispositioner and no bolagsskatt to book: \`gnubok_propose_dispositioner\` returns none. Periodiseringsfond, expansionsfond, räntefördelning and egenavgifter exist only in the NE-bilaga and are never booked. \`gnubok_preview_ef_declaration({ fiscal_period_id })\` computes them, but it needs inputs only the owner has (\`kapitalunderlag\`, last year's \`prior_year_schablonavdrag\` and \`prior_year_actual_charged\`, an existing expansionsfond): ask for last year's NE-bilaga. The choices go through \`tax-planning\`. No årsredovisning; the NE-bilaga goes with Inkomstdeklaration 1 in early May.
+This skill is filtered to AB, but if you reach it for an EF: readiness, accruals, depreciation and \`gnubok_run_year_end\` work the same way (the close uses the EF equity account, named on the approval card). The K2 accrual limits above are not an EF's: förenklat årsbokslut (BFNAR 2006:1) lists what must be accrued, with its own 5 000 SEK limits, and fullt årsbokslut (BFNAR 2017:3) has its own rules. There are no bokslutsdispositioner and no bolagsskatt to book: \`gnubok_propose_dispositioner\` returns none. Periodiseringsfond, expansionsfond, räntefördelning and egenavgifter exist only in the NE-bilaga and are never booked. \`gnubok_preview_ef_declaration({ fiscal_period_id })\` computes them, but it needs inputs only the owner has (\`kapitalunderlag\`, last year's \`prior_year_schablonavdrag\` and \`prior_year_actual_charged\`, an existing expansionsfond): ask for last year's NE-bilaga. The choices go through \`tax-planning\`. No årsredovisning; the NE-bilaga goes with Inkomstdeklaration 1 in early May.
 
 ## When a tool call fails
 
@@ -203,6 +209,7 @@ In the user's language, short groups:
 
 - \`gnubok_list_companies\`, \`gnubok_get_agent_briefing\`, \`gnubok_list_fiscal_periods\`: orientation
 - \`gnubok_year_end_readiness\`: blockers, warnings, optional closing-entry preview
+- \`gnubok_get_bokslutsbilagor\`: the year-end checklist and every balance account's sign-off (search-only, via \`gnubok_call_tool\`)
 - \`gnubok_get_reconciliation_status\`, \`gnubok_vat_close_check\`, \`gnubok_get_trial_balance\`, \`gnubok_query_journal\`: completeness checks
 - \`gnubok_list_voucher_gaps\`, \`gnubok_explain_voucher_gap\`: BFNAR 2013:2 gaps
 - \`gnubok_post_kontantmetod_cutoff\`: kontantmetoden cut-off, årsomföring per invoice (search-only, via \`gnubok_stage_tool\`)

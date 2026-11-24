@@ -15,6 +15,37 @@ const input = (counts: Partial<Record<WorklistCategory, number>>, extra: Partial
 const keys = (i: CountRowInput) => countRowSpecs(i).map((s) => s.key)
 const spec = (i: CountRowInput, key: string) => countRowSpecs(i).find((s) => s.key === key)
 
+describe('countRowSpecs: with the booking screen switched on', () => {
+  const on = (counts: Partial<Record<WorklistCategory, number>>, extra: Partial<CountRowInput> = {}) => input(counts, { bookingScreen: true, ...extra })
+
+  it('folds the bank rows and the inbox documents into one Att bokföra row', () => {
+    const specs = countRowSpecs(on({ book_transaction: 498, inbox_document: 43 }))
+    expect(specs.map((s) => s.key)).toEqual(['to-book'])
+    expect(specs[0]).toMatchObject({ href: '/att-bokfora', labelKey: 'row_to_book', items: 'to_book', group: 'book', count: 541, things: 541 })
+  })
+
+  it('counts only the bank rows where documents are not read', () => {
+    expect(spec(on({ book_transaction: 5, inbox_document: 9 }, { hasAi: false }), 'to-book')).toMatchObject({ count: 5 })
+  })
+
+  it('counts with the list\'s own figures when it has them: every open bank row, a found receipt once', () => {
+    const spec = countRowSpecs(on({ book_transaction: 498, book_skattekonto: 4, inbox_document: 43 }, { toBook: { bankRows: 510, foundPairs: 1 } }))
+    expect(spec[0]).toMatchObject({ key: 'to-book', count: 510 + 4 + 42 })
+    expect(countRowSpecs(on({ inbox_document: 9 }, { hasAi: false, toBook: { bankRows: 3, foundPairs: 2 } }))[0]).toMatchObject({ count: 3 })
+  })
+
+  it('counts the skattekonto events in the same row', () => {
+    const specs = countRowSpecs(on({ book_transaction: 498, book_skattekonto: 4, inbox_document: 43 }))
+    expect(specs.map((s) => s.key)).toEqual(['to-book'])
+    expect(specs[0]).toMatchObject({ count: 545, things: 545 })
+  })
+
+  it('keeps the suggested matches where they were', () => {
+    const hrefs = Object.fromEntries(countRowSpecs(on({ suggested_match: 3 })).map((s) => [s.key, s.href]))
+    expect(hrefs).toEqual({ 'suggested-matches': '/transactions' })
+  })
+})
+
 describe('countRowSpecs: which count rows Att göra has', () => {
   it('has none when every count is zero', () => {
     expect(countRowSpecs(input({}))).toEqual([])
@@ -79,6 +110,15 @@ describe('countRowSpecs: which count rows Att göra has', () => {
     expect(spec(input({ supplier_invoice_approval: 5 }), 'supplier-approval')).toMatchObject({ count: 5, things: 5 })
     expect(spec(input({ supplier_invoice_approval: 5 }, { personAttestRows: 2 }), 'supplier-approval')).toMatchObject({ count: 3, things: 3 })
     expect(spec(input({ supplier_invoice_approval: 2 }, { personAttestRows: 2 }), 'supplier-approval')).toBeUndefined()
+  })
+
+  it('the question list is one row that opens the list, one thing whatever the number of questions', () => {
+    expect(keys(input({}))).toEqual([])
+    expect(keys(input({}, { openQuestions: 0 }))).toEqual([])
+    expect(countRowSpecs(input({}, { openQuestions: 3 }))).toEqual([
+      { key: 'company-questions', group: 'decide', href: '/questions', labelKey: 'row_company_questions', count: 3, things: 1 },
+    ])
+    expect(spec(input({}, { openQuestions: 1 }), 'company-questions')).toMatchObject({ count: 1, things: 1 })
   })
 
   it('leaves the rows that are not plain counts to the section (pending operations, batches, payments)', () => {

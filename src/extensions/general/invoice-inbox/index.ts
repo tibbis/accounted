@@ -13,6 +13,7 @@ import {
   completePendingDocumentUpload,
 } from '@/lib/core/documents/document-service'
 import { createServiceClient } from '@/lib/supabase/server'
+import { downloadDocumentObject, isDocumentKeyOfCompany } from '@/lib/core/documents/storage-key'
 import { validateBody } from '@/lib/api/validate'
 import { hasErrorEntry } from '@/lib/errors/structured-errors'
 import { dbError } from '@/lib/errors/db-error'
@@ -25,7 +26,7 @@ import { checkNeverCheckedInboxItems, neverChecked, neverCheckedToCheck, propose
 import type { InboxPairing } from '@/lib/inkorg/pairs'
 import { nothingRead } from '@/lib/inkorg/decision'
 import { INBOX_ITEM_DOCUMENT_HOLD, withDocumentHold, type DocumentHoldRow } from '@/lib/documents/inbox-item-state'
-import type { InkorgItem, ReadingRetry } from '@/lib/inkorg/items'
+import { inboxScope, type InkorgItem, type ReadingRetry } from '@/lib/inkorg/items'
 import { readingRetryOf } from './lib/provider-retry'
 import { readInboxPairings, type ListedItem } from '@/lib/operations/inbox-pairings'
 import { sameInvoiceItems, type SameInvoiceItem } from '@/lib/inkorg/same-invoice'
@@ -741,7 +742,25 @@ export const invoiceInboxExtension: Extension = {
 
         // arkiv_section: whether the Dokument section is open for this company, so the
         // "routed to the archive" line links there only when the link leads somewhere.
-        return NextResponse.json({ data: { items: withLogos, count: withLogos.length, arkiv_section: isArkivSectionEnabled(ctx.companyId) } })
+        const arkiv_section = isArkivSectionEnabled(ctx.companyId)
+        // ?scope=inbox (the Inkorg): only the rows it shows, cut after every
+        // reading above was worked out on the whole list, with the doors and
+        // the mailbox provider it reads off the rest (lib/inkorg/items.ts
+        // inboxScope). A company with years of booked underlag sent all of
+        // them, with their readings, on every load and every change.
+        if (url.searchParams.get('scope') === 'inbox') {
+          const scoped = inboxScope(withLogos as unknown as InkorgItem[])
+          return NextResponse.json({
+            data: {
+              items: scoped.items,
+              count: scoped.items.length,
+              doors: scoped.doors,
+              mail_provider: scoped.mailProvider,
+              arkiv_section,
+            },
+          })
+        }
+        return NextResponse.json({ data: { items: withLogos, count: withLogos.length, arkiv_section } })
       },
     },
 
@@ -1086,7 +1105,8 @@ export const invoiceInboxExtension: Extension = {
           .eq('company_id', ctx.companyId)
           .maybeSingle()
 
-        if (!doc) {
+        // A row whose key is not inside the company has no file here (storage-key.ts).
+        if (!doc || !isDocumentKeyOfCompany(doc.storage_path, ctx.companyId)) {
           return NextResponse.json({ error: 'Bilagan kunde inte hittas.' }, { status: 404 })
         }
 
@@ -1094,10 +1114,9 @@ export const invoiceInboxExtension: Extension = {
         // only covers the uploader's own folder, and inbox documents are
         // attributed to the company creator, so ctx.supabase (user-bound)
         // cannot read them for other members. The company-scoped row fetch
-        // above is the authorization.
-        const { data: blob, error: dlError } = await createServiceClient().storage
-          .from('documents')
-          .download(doc.storage_path)
+        // above is the authorization, and only a key inside the company is
+        // read (storage-key.ts).
+        const { blob, error: dlError } = await downloadDocumentObject(createServiceClient(), doc.storage_path, ctx.companyId)
 
         if (dlError || !blob) {
           console.error('[invoice-inbox/retry-extraction] download failed:', dlError)

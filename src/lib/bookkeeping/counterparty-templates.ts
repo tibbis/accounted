@@ -7,17 +7,21 @@ import {
   bankRowVatLines,
   generateReverseChargePurchaseLines,
   DEFAULT_REVERSE_CHARGE_KIND,
+  isImportBasisAccount,
   isReverseChargeBasisAccount,
   isReverseChargeVatAccount,
   outputVatTreatmentOfAccount,
   RC_BASIS_OFFSET_ACCOUNT,
   reverseChargeKindForBasisAccount,
+  reverseChargePurchasesOn,
+  resolveReverseChargeRate,
   vatAccountNature,
   type ReverseChargeKind,
   type ReverseChargePurchase,
 } from './vat-entries'
 import {
   isNotVatRegistered,
+  isRateBearing,
   vatTreatmentForRegistration,
   type VatRegistration,
 } from './vat-registration'
@@ -29,6 +33,7 @@ import {
 } from './dimension-resolver'
 import { DimensionValidationError, type DimensionValidationIssue } from './dimension-errors'
 import { resolveSekAmount } from './currency-utils'
+import { roundOre } from '@/lib/money'
 import { grossVat, treatmentForRate } from '@/lib/bookkeeping/gross-split'
 import { stripBankNoise as stripBankMethodPhrases } from './booking-templates'
 import { bankSideOf, isMoneyLedger, learnableBankPair, settleBankLeg, type BankSide } from './bank-leg'
@@ -36,6 +41,7 @@ import { isCardLedgerAccount } from '@/lib/cash-accounts/card-ledger'
 import { isSkatteverketPayment } from './skatteverket-payment'
 import { createLogger } from '@/lib/logger'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { TRANSACTION_FALLBACK_DESCRIPTION } from '@/types'
 import type {
   CategorizationTemplate,
   CategorizationTemplateSource,
@@ -181,8 +187,15 @@ export function normalizeCounterpartyName(raw: string): string {
  * suppliers (PostHog PH 118). The phrases are the catalog matcher's list
  * (stripBankNoise in ./booking-templates), not a second one; the persisted
  * key (normalizeCounterpartyName) is untouched.
+ *
+ * Nor does the title a row is stored with when the bank sent no text at all
+ * (TRANSACTION_FALLBACK_DESCRIPTION, "Okänd transaktion"): every such row
+ * carries it, whoever was paid, so one booking of it was proposed for all
+ * of them. A template already learned under it (its key is the same text)
+ * is skipped by the matcher like any other key that names no one.
  */
 export function namesCounterparty(raw: string): boolean {
+  if (raw.trim().toLowerCase() === TRANSACTION_FALLBACK_DESCRIPTION.toLowerCase()) return false
   return /\p{L}/u.test(stripBankMethodPhrases(raw.toLowerCase()))
 }
 
@@ -431,9 +444,59 @@ export async function findCounterpartyTemplatesBatch(
   companyId: string,
   transactions: Transaction[]
 ): Promise<Map<string, CounterpartyTemplateMatch>> {
-  const result = new Map<string, CounterpartyTemplateMatch>()
-
   const allTemplates = await fetchActiveTemplates(supabase, companyId)
+  const result = matchCounterpartyTemplates(allTemplates, transactions)
+  if (allTemplates.length === 0) return result
+
+  // Every consumer of a match applies its learned bags (the proposals and
+  // their Bokför, the mapping engine, suggestions), so the codes the
+  // registry no longer accepts are dropped here, once, for the matched
+  // templates only.
+  const matched = [...new Map([...result.values()].map((m) => [m.template.id, m.template])).values()]
+  const pruned = new Map(
+    (await pruneLearnedTemplateDimensions(supabase, companyId, matched)).map((t) => [t.id, t]),
+  )
+  for (const [txId, match] of result) {
+    const template = pruned.get(match.template.id)
+    if (template && template !== match.template) result.set(txId, { ...match, template })
+  }
+
+  return result
+}
+
+/**
+ * The bank rows a counterparty rule the company has switched off (paused, or
+ * removed: is_active false) would match, by the tiers an active rule is
+ * matched by. The row's proposals take nothing from such a rule; a reader
+ * that would otherwise propose from the counterparty's history asks here, so
+ * a switched-off rule silences that proposal too.
+ */
+export async function findSwitchedOffCounterpartyRules(
+  supabase: SupabaseClient,
+  companyId: string,
+  transactions: Transaction[],
+): Promise<Set<string>> {
+  const switchedOff = await fetchAllRows<CategorizationTemplate>(({ from, to }) =>
+    supabase
+      .from('categorization_templates')
+      .select('*')
+      .eq('company_id', companyId)
+      .eq('is_active', false)
+      .order('id')
+      .range(from, to),
+  )
+  return new Set(matchCounterpartyTemplates(switchedOff, transactions).keys())
+}
+
+/**
+ * The four match tiers over templates already read: no query, no pruning of
+ * learned bags. A row that matches none has no entry.
+ */
+function matchCounterpartyTemplates(
+  allTemplates: CategorizationTemplate[],
+  transactions: Transaction[],
+): Map<string, CounterpartyTemplateMatch> {
+  const result = new Map<string, CounterpartyTemplateMatch>()
 
   if (allTemplates.length === 0) return result
 
@@ -613,19 +676,6 @@ export async function findCounterpartyTemplatesBatch(
         confidence: Math.round(Number(bestMatch.confidence) * similarity * 100) / 100,
       })
     }
-  }
-
-  // Every consumer of a match applies its learned bags (the proposals and
-  // their Bokför, the mapping engine, suggestions), so the codes the
-  // registry no longer accepts are dropped here, once, for the matched
-  // templates only.
-  const matched = [...new Map([...result.values()].map((m) => [m.template.id, m.template])).values()]
-  const pruned = new Map(
-    (await pruneLearnedTemplateDimensions(supabase, companyId, matched)).map((t) => [t.id, t]),
-  )
-  for (const [txId, match] of result) {
-    const template = pruned.get(match.template.id)
-    if (template && template !== match.template) result.set(txId, { ...match, template })
   }
 
   return result
@@ -1367,6 +1417,73 @@ export function samePairButBankLedger(
 }
 
 /**
+ * The kind of moms a single pair replays or a booking carries, the rate
+ * aside: none, a rate (input or output), or reverse charge. The rate is not
+ * compared: a 2641 line whose text states no rate (an underlag's moms amount)
+ * reads as 25 % (detectVatTreatment), so a 12 % template would flip on it.
+ */
+export type MomsKind = 'none' | 'rated' | 'reverse_charge'
+
+export function momsKindOfTreatment(treatment: string | null | undefined): MomsKind {
+  if (treatment === 'reverse_charge' || treatment === 'reverse_charge_domestic') return 'reverse_charge'
+  return isRateBearing(treatment) ? 'rated' : 'none'
+}
+
+/**
+ * The kind of moms a counterparty template replays. A single pair replays its
+ * field. A pattern replays its own lines and never the field
+ * (contradictsLearnedMoms): a moms line at a rate is booked whatever the field
+ * or a basis pair beside it says, and only a basis pair books a reverse
+ * charge (patternReplayPlan).
+ */
+export function momsKindOfTemplate(template: Pick<CategorizationTemplate, 'vat_treatment' | 'line_pattern'>): MomsKind {
+  const pattern = template.line_pattern
+  if (!pattern || pattern.length === 0) return momsKindOfTreatment(template.vat_treatment)
+  if (pattern.some((e) => e.type === 'vat' && !!e.vat_rate)) return 'rated'
+  return patternReplayPlan(pattern).rcPair ? 'reverse_charge' : 'none'
+}
+
+function momsKindOfLines(lines: ReadonlyArray<{ account_number: string }>): MomsKind {
+  if (lines.some((l) => REVERSE_CHARGE_VAT_ACCOUNTS.has(l.account_number))) return 'reverse_charge'
+  return lines.some((l) => isVatAccount(l.account_number)) ? 'rated' : 'none'
+}
+
+/**
+ * Whether moms of this kind on a booking contradicts the moms a single-pair
+ * template replays. A booking without moms says nothing against a rate: a
+ * company that is not VAT-registered replays a rated template without moms
+ * (vatTreatmentForRegistration). A pattern template replays the moms in its
+ * line_pattern, so its field is not compared.
+ */
+function contradictsLearnedMoms(
+  template: Pick<CategorizationTemplate, 'vat_treatment' | 'line_pattern'>,
+  booked: MomsKind,
+): boolean {
+  if (template.line_pattern && template.line_pattern.length > 0) return false
+  const held = momsKindOfTreatment(template.vat_treatment)
+  if (booked === held) return false
+  return !(booked === 'none' && held === 'rated')
+}
+
+/**
+ * Whether a booking on a single-pair template's own accounts books another
+ * kind of moms than the template replays (contradictsLearnedMoms): the person
+ * correcting it, as another account is. Counted as a re-approval, a pair
+ * learned without moms kept proposing none, and gained confidence from every
+ * booking that added reverse charge to it. A pattern booking teaches its moms
+ * through its pattern, and an SIE import is history, not a new decision, so
+ * neither corrects the moms here.
+ */
+export function learnsOtherMoms(
+  existing: Pick<CategorizationTemplate, 'vat_treatment' | 'line_pattern'>,
+  params: Pick<TemplateUpsertParams, 'vatTreatment' | 'linePattern' | 'source'>,
+): boolean {
+  if (params.linePattern && params.linePattern.length > 0) return false
+  if (params.source === 'sie_import') return false
+  return contradictsLearnedMoms(existing, momsKindOfTreatment(params.vatTreatment))
+}
+
+/**
  * Low-level insert-or-update for a counterparty template.
  *
  * - existingTemplate undefined → DB lookup by (companyId, counterpartyName)
@@ -1374,7 +1491,8 @@ export function samePairButBankLedger(
  * - existingTemplate object → use directly (batch mode: pre-fetched)
  *
  * Re-approval: accumulates occurrence_count, recalculates confidence from total.
- * Correction: uses params.occurrenceCount/confidence, updates accounts. A
+ * Correction (other accounts, or other moms: learnsOtherMoms): uses
+ * params.occurrenceCount/confidence, updates accounts and moms. A
  * "correction" whose settlement direction opposes the existing template's
  * (a refund shape against an expense-learned template) is skipped: it is a
  * different kind of event, not a correction, and must never flip the
@@ -1409,7 +1527,8 @@ export async function insertOrUpdateTemplate(
   }
 
   if (existing) {
-    const isCorrection = !samePairButBankLedger(existing, params.debitAccount, params.creditAccount, moneyLedgers)
+    const isCorrection = !samePairButBankLedger(existing, params.debitAccount, params.creditAccount, moneyLedgers) ||
+      learnsOtherMoms(existing, params)
 
     // Merge aliases (deduplicated)
     const mergedAliases = [...(existing.counterparty_aliases || [])]
@@ -1599,13 +1718,10 @@ export async function upsertCounterpartyTemplate(
   // (reconcileRcBasisWithChart dropped the pair), and a replay on the same
   // account is settled the same way, so that one is learned.
   const bookedBasis = rcBasisKey(mappingResult.vat_lines)
-  if (
+  const unreplayableBasis =
     detectVatTreatment(mappingResult) === 'reverse_charge' &&
     bookedBasis !== '' &&
     bookedBasis !== rcBasisKey(learnedReverseChargeLines(100))
-  ) {
-    return
-  }
 
   // Learn from the immutable bank original (see findCounterpartyTemplatesBatch):
   // learning and lookup MUST derive the key from the same string, or the
@@ -1637,6 +1753,17 @@ export async function upsertCounterpartyTemplate(
     existing = await findTemplateByReferenceFreeKey(supabase, companyId, referenceFreeKey(rawName))
     if (existing) aliases.unshift(normalized)
   }
+  if (unreplayableBasis) {
+    // The booking teaches no pair, but it says a habit without reverse charge
+    // is wrong: left as it was, a pair learned without moms kept coming back
+    // as the row's proposal after every booking that rejected it. One
+    // occurrence comes off, as a reversal takes one, so a habit with a long
+    // history is not lost to one purchase.
+    if (existing && rejectedByUnlearnableReverseCharge(existing)) {
+      await takeOccurrenceBack(supabase, companyId, existing)
+    }
+    return
+  }
   if (!existing && options.bookedOnTemplateId) {
     const chosen = await bookedOnTemplate(supabase, companyId, options.bookedOnTemplateId)
     if (chosen && samePairButBankLedger(chosen, learned.debit_account, learned.credit_account, moneyLedgers)) {
@@ -1666,6 +1793,22 @@ export async function upsertCounterpartyTemplate(
   }, existing, moneyLedgers)
 }
 
+/**
+ * Whether a reverse-charge purchase the pair cannot replay (its basis is not
+ * the EU-services pair, crm#1028) rejects the template: an active
+ * single-pair expense habit that books no reverse charge. One that books
+ * reverse charge differs at most in an account or a basis it cannot store,
+ * and may be right for the same name's EU purchases; a rule the person set
+ * to book on its own ('auto') or a pattern template is theirs, not a habit.
+ * All three are left alone.
+ */
+function rejectedByUnlearnableReverseCharge(existing: CategorizationTemplate): boolean {
+  if (!existing.is_active || existing.mode === 'auto') return false
+  if (existing.line_pattern && existing.line_pattern.length > 0) return false
+  if (legacyTemplateDirection(existing.debit_account, existing.credit_account) !== 'expense') return false
+  return momsKindOfTreatment(existing.vat_treatment) !== 'reverse_charge'
+}
+
 export type UnlearnOutcome = 'decremented' | 'deactivated'
 
 /**
@@ -1677,7 +1820,9 @@ export type UnlearnOutcome = 'decremented' | 'deactivated'
  *
  * The template is found the way upsertCounterpartyTemplate found it (the same
  * key from the same bank text), and only a template whose pair the verifikat
- * carries is touched: a booking on other accounts never taught it. One
+ * carries, with moms it does not contradict, is touched: a booking on other
+ * accounts or with moms the template was corrected away from never taught
+ * what it holds now. One
  * occurrence comes off; a template left with none is switched off, the same
  * write as "Ta bort mall". A correction cannot be rolled back (the pair it
  * replaced is not kept): it reset the count to one, so reversing it switches
@@ -1698,7 +1843,23 @@ export async function unlearnCounterpartyTemplate(
   const template = await findTemplateByKey(supabase, companyId, normalized)
   if (!template || !template.is_active || template.mode === 'auto') return null
   if (!verifikatCarriesPair(template, lines)) return null
+  // A verifikat whose moms the template has since been corrected away from
+  // (no moms, where it now books reverse charge) is not what it holds now:
+  // taking its occurrence back would switch off the corrected template.
+  const momsLines = lines.filter((l) => l.account_number !== template.debit_account && l.account_number !== template.credit_account)
+  if (contradictsLearnedMoms(template, momsKindOfLines(momsLines))) return null
+  return takeOccurrenceBack(supabase, companyId, template)
+}
 
+/**
+ * One occurrence of a template comes off; a template left with none is
+ * switched off, the same write as "Ta bort mall".
+ */
+async function takeOccurrenceBack(
+  supabase: SupabaseClient,
+  companyId: string,
+  template: Pick<CategorizationTemplate, 'id' | 'occurrence_count'>,
+): Promise<UnlearnOutcome | null> {
   const remaining = (Number(template.occurrence_count) || 0) - 1
   const outcome: UnlearnOutcome = remaining >= 1 ? 'decremented' : 'deactivated'
   const { error } = outcome === 'decremented'
@@ -1832,6 +1993,8 @@ interface VoucherLinePattern {
   settlementAccount: string
   settlementSide: 'debit' | 'credit'
   hasReverseCharge: boolean
+  /** The voucher's fiktiv-moms accounts, sorted and joined; '' for none. */
+  fiktivMoms: string
 }
 
 /**
@@ -1845,7 +2008,7 @@ function extractVoucherLinePattern(
   const settlement: PatternLine[] = []
   const vat: PatternLine[] = []
   const business: PatternLine[] = []
-  let hasReverseCharge = false
+  const fiktivMoms = new Set<string>()
 
   for (const line of lines) {
     if (isSettlementAccount(line.account)) {
@@ -1856,8 +2019,8 @@ function extractVoucherLinePattern(
     } else if (REVERSE_CHARGE_VAT_ACCOUNTS.has(line.account)) {
       // Fiktiv moms nets to zero inside the voucher: exclude it from the VAT
       // total (it must not shrink the base the business ratios use) and only
-      // remember that the counterparty is reverse-charge.
-      hasReverseCharge = true
+      // remember which accounts it was on.
+      fiktivMoms.add(line.account)
       continue
     } else if (isVatAccount(line.account)) {
       vat.push(line)
@@ -1931,8 +2094,78 @@ function extractVoucherLinePattern(
     entries,
     settlementAccount: settlement[0].account,
     settlementSide,
-    hasReverseCharge,
+    hasReverseCharge: fiktivMoms.size > 0,
+    fiktivMoms: [...fiktivMoms].sort().join(','),
   }
+}
+
+/** The amount a replay is simulated on (replayedFiktivMomsKey): large enough that no ratio rounds away. */
+const REPLAY_PROBE_AMOUNT = 10000
+
+/**
+ * The fiktiv-moms accounts a learned shape books when it is replayed, sorted
+ * and joined, '' when it books none. A simple shape replays the legacy set
+ * (learnedReverseChargeLines), and only on a purchase without a deductible
+ * moms line beside it (learnedPairVatLines, templateFieldsFromVoucherPatterns);
+ * a line pattern replays its basis pair's set (patternReverseChargeLines), none
+ * without a pair. Both settled on their cost lines as the booking door settles
+ * them (reverseChargePurchasesOn), with no momskod known: a cost line on a
+ * basis account takes its own sats. null when the replay would book the
+ * purchase's basis twice: a cost line on an import account (4545-4547, ruta
+ * 50) gets a reverse-charge basis pair (ruta 20-24) beside it.
+ */
+function replayedFiktivMomsKey(
+  entries: readonly LinePatternEntry[],
+  settlementSide: 'debit' | 'credit',
+): string | null {
+  let purchase: { base: number; rate: number; kind: ReverseChargeKind }
+  let costLines: { account: string; amount: number }[]
+  if (isSimpleShape(entries)) {
+    const business = entries.find((e) => e.type === 'business')
+    // A business line on the credit side is a sale or a credit note, and so
+    // is a template whose settlement (its first settlement line) is debited:
+    // the simple builder books reverse charge on neither sign of them.
+    if (
+      !business || business.side !== 'debit' || settlementSide !== 'credit' ||
+      entries.some((e) => e.type === 'vat')
+    ) return ''
+    purchase = { base: REPLAY_PROBE_AMOUNT, rate: resolveReverseChargeRate({}), kind: DEFAULT_REVERSE_CHARGE_KIND }
+    costLines = [{ account: business.account, amount: REPLAY_PROBE_AMOUNT }]
+  } else {
+    // As buildMultiLineMappingResult shares a payment with no moms line.
+    const { rcPair, entries: rest, ratioScale } = patternReplayPlan(entries)
+    if (!rcPair) return ''
+    costLines = rest
+      .filter((e) => e.type === 'business' && e.side === rcPair.basis.side && (e.ratio ?? 0) > 0)
+      .map((e) => ({ account: e.account, amount: roundOre(REPLAY_PROBE_AMOUNT * (e.ratio ?? 0) * ratioScale) }))
+    purchase = { base: REPLAY_PROBE_AMOUNT, rate: rcPair.rate, kind: rcPair.kind }
+  }
+  if (costLines.some((line) => isImportBasisAccount(line.account))) return null
+  const accounts = reverseChargePurchasesOn(purchase, costLines, new Map())
+    .flatMap(generateReverseChargePurchaseLines)
+    .map((line) => line.account_number)
+    .filter((account) => REVERSE_CHARGE_VAT_ACCOUNTS.has(account))
+  return [...new Set(accounts)].sort().join(',')
+}
+
+/** Whether an account occurs on more than one of the entries. */
+function repeatsAccount(entries: readonly Pick<LinePatternEntry, 'account'>[]): boolean {
+  return new Set(entries.map((e) => e.account)).size !== entries.length
+}
+
+/**
+ * A shape the simple builder books from the legacy fields: one business line,
+ * at most one VAT line, no tax line. Any other is stored as a line_pattern.
+ */
+function isSimpleShape(entries: readonly LinePatternEntry[]): boolean {
+  let business = 0
+  let vat = 0
+  for (const e of entries) {
+    if (e.type === 'tax') return false
+    if (e.type === 'business') business++
+    if (e.type === 'vat') vat++
+  }
+  return business === 1 && vat <= 1
 }
 
 // ── Counterparty group types ─────────────────────────────────
@@ -2056,18 +2289,45 @@ function averageLinePatterns(voucherPatterns: VoucherLinePattern[]): LinePattern
  */
 function templateFieldsFromVoucherPatterns(
   voucherPatterns: VoucherLinePattern[],
-): Pick<TemplateUpsertParams, 'debitAccount' | 'creditAccount' | 'vatTreatment' | 'vatAccount'> & {
+): (Pick<TemplateUpsertParams, 'debitAccount' | 'creditAccount' | 'vatTreatment' | 'vatAccount'> & {
   linePattern: LinePatternEntry[] | null
-} {
+}) | null {
   // Average the line patterns from all vouchers in the group
   const avgPattern = averageLinePatterns(voucherPatterns)
+
+  // A replay regenerates the fiktiv moms instead of reading it back, so a
+  // group whose fiktiv moms the replay of what it teaches would book on other
+  // accounts teaches nothing (#997): import VAT (2615, ruta 60) came back as
+  // 2614 (ruta 30) beside a 4535 basis (ruta 21), domestic reverse charge's
+  // basis in ruta 21 instead of 24, 12 % as 25 %, and a pattern with an import
+  // pair (4545) lost its moms. Judged on the averaged pattern, which is what
+  // is stored and replayed. Averaging keeps one line per account, so a line
+  // pattern whose voucher books a basis or offset account twice (two basis
+  // pairs on one 4598, one per sats) replays another split of the sats and
+  // teaches nothing either; a cost account booked on several lines merges as
+  // it does without reverse charge. A line pattern with a basis pair replays
+  // fiktiv moms whether or not its vouchers booked any, so it is judged too,
+  // and a replay that would book the basis twice (an import account beside a
+  // generated pair) teaches nothing. A categorize booking whose replay would
+  // land in another ruta teaches nothing too (crm#1028).
   const { settlementAccount, settlementSide } = voucherPatterns[0]
+  const rcPair = isSimpleShape(avgPattern) ? null : patternReplayPlan(avgPattern).rcPair
+  if (rcPair !== null || voucherPatterns.some((vp) => vp.fiktivMoms !== '')) {
+    const replayed = replayedFiktivMomsKey(avgPattern, settlementSide)
+    const isPairLeg = (account: string) =>
+      reverseChargeKindForBasisAccount(account) !== null ||
+      account === rcPair?.basis.account ||
+      account === rcPair?.offset.account
+    if (replayed === null || voucherPatterns.some((vp) =>
+      vp.fiktivMoms !== replayed ||
+      (rcPair !== null && repeatsAccount(vp.entries.filter((e) => isPairLeg(e.account)))),
+    )) return null
+  }
 
   // Decide: simple (1 business + 0-1 VAT) → legacy fields; otherwise → line_pattern
   const businessEntries = avgPattern.filter(e => e.type === 'business')
   const vatEntries = avgPattern.filter(e => e.type === 'vat')
-  const taxEntries = avgPattern.filter(e => e.type === 'tax')
-  const isSimple = businessEntries.length === 1 && taxEntries.length === 0 && vatEntries.length <= 1
+  const isSimple = isSimpleShape(avgPattern)
 
   // Determine primary business account and settlement for debit/credit fields
   const primaryBusiness = businessEntries.sort((a, b) => (b.ratio ?? 0) - (a.ratio ?? 0))[0]
@@ -2115,7 +2375,7 @@ function patternAccountSet(entries: readonly Pick<LinePatternEntry, 'account'>[]
 }
 
 /** A verifikat's template fields plus its shape key (verifikatTemplateShape). */
-export type VerifikatTemplateShape = ReturnType<typeof templateFieldsFromVoucherPatterns> & {
+export type VerifikatTemplateShape = NonNullable<ReturnType<typeof templateFieldsFromVoucherPatterns>> & {
   accountSet: string
 }
 
@@ -2123,17 +2383,21 @@ export type VerifikatTemplateShape = ReturnType<typeof templateFieldsFromVoucher
  * What one posted verifikat teaches as a counterparty template, read the way
  * the SIE learner reads an imported voucher (extractVoucherLinePattern):
  * pension plus särskild löneskatt stays one multi-line template. `lines` are
- * signed like SIE amounts (debit positive). `accountSet` is the shape's key,
- * the same one the SIE learner groups vouchers by. null when the verifikat
+ * signed like SIE amounts (debit positive). `accountSet` is the shape's
+ * account key, the one the SIE learner groups vouchers by beside their
+ * fiktiv-moms accounts (populateTemplatesFromSieVouchers). null when the verifikat
  * cannot be a pattern (no business line, no settlement line, more than five
- * business accounts, nothing left beside the VAT).
+ * business accounts, nothing left beside the VAT), or when its replay would
+ * book its fiktiv moms on other accounts (templateFieldsFromVoucherPatterns).
  */
 export function verifikatTemplateShape(
   lines: { account: string; amount: number; dimensions?: Record<string, string> }[],
 ): VerifikatTemplateShape | null {
   const pattern = extractVoucherLinePattern(lines)
   if (!pattern) return null
-  return { accountSet: patternAccountSet(pattern.entries), ...templateFieldsFromVoucherPatterns([pattern]) }
+  const fields = templateFieldsFromVoucherPatterns([pattern])
+  if (!fields) return null
+  return { accountSet: patternAccountSet(pattern.entries), ...fields }
 }
 
 /**
@@ -2203,9 +2467,12 @@ export async function populateTemplatesFromSieVouchers(
     const linePattern = extractVoucherLinePattern(voucher.lines)
     if (!linePattern) continue
 
-    // Group key: sorted set of non-settlement accounts
+    // Group key: sorted set of non-settlement accounts, and the fiktiv-moms
+    // accounts, which the pattern leaves out: import VAT and EU reverse
+    // charge on the same cost account are two shapes, and the dominant one
+    // decides (#997).
     const accountSet = patternAccountSet(linePattern.entries)
-    const groupKey = `${normalized}|${accountSet}`
+    const groupKey = `${normalized}|${accountSet}|${linePattern.fiktivMoms}`
 
     let group = groups.get(normalized)
     if (!group) {
@@ -2233,6 +2500,7 @@ export async function populateTemplatesFromSieVouchers(
     normalizedName: string
     aliases: string[]
     pattern: MultiLinePatternCount
+    fields: NonNullable<ReturnType<typeof templateFieldsFromVoucherPatterns>>
     confidence: number
   }[] = []
 
@@ -2251,12 +2519,18 @@ export async function populateTemplatesFromSieVouchers(
     const dominance = dominant.count / group.totalCount
     if (dominance < 0.6) continue
 
+    // A dominant shape that teaches nothing leaves the counterparty untaught:
+    // a minority shape never stands in for it.
+    const fields = templateFieldsFromVoucherPatterns(dominant.voucherPatterns)
+    if (!fields) continue
+
     const confidence = Math.round(Math.min(0.95, dominance * (1 - 1 / dominant.count)) * 100) / 100
 
     accepted.push({
       normalizedName: group.normalizedName,
       aliases: [...group.aliases],
       pattern: dominant,
+      fields,
       confidence,
     })
   }
@@ -2286,7 +2560,7 @@ export async function populateTemplatesFromSieVouchers(
     const written = await insertOrUpdateTemplate(supabase, companyId, {
       counterpartyName: item.normalizedName,
       aliases: item.aliases,
-      ...templateFieldsFromVoucherPatterns(item.pattern.voucherPatterns),
+      ...item.fields,
       category: null,
       occurrenceCount: item.pattern.count,
       confidence: item.confidence,

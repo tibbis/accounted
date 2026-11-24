@@ -47,6 +47,8 @@ import {
   payoutFeeTotal,
   payoutFeesWithinInvoices,
 } from '@/lib/bookkeeping/payout-fee-lines'
+import { SUPPLIER_DEBT_DESCRIPTION_MAX, isSupplierDebtAccount } from '@/lib/bookkeeping/supplier-debt-lines'
+import { CUSTOMER_RECEIVABLE_DESCRIPTION_MAX, isCustomerReceivableAccount } from '@/lib/bookkeeping/customer-receivable-lines'
 import {
   isAccruedCostAccount,
   pastPeriodDeferralSuggestion,
@@ -85,7 +87,6 @@ import {
   ARTICLE_HOUSEWORK_TYPE_VALUES,
   DEDUCTION_LINE_ERRORS,
   DEDUCTION_TYPES,
-  HUS_DEDUCTION_TYPES,
   deductionLineIssues,
   normalizeHouseworkType,
   type DeductionType,
@@ -123,6 +124,7 @@ import {
   PERIOD_PLACEHOLDER_REQUIRES_START_MESSAGE,
 } from '@/lib/invoices/recurring-placeholders'
 import { stockholmYearMonth, todayIsoStockholm } from '@/lib/dates/iso'
+import { lineQuantityIssue, LINE_QUANTITY_MESSAGES } from '@/lib/invoices/line-quantity'
 
 export const SIECreateAccountsSchema = z.object({
   accounts: z.array(z.object({ number: accountNumberSchema, name: z.string().max(500) })).min(1).max(10_000),
@@ -714,8 +716,11 @@ export const CreateInvoiceItemSchema = z
     if (item.description.trim().length === 0) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['description'], message: 'Item description is required' })
     }
-    if (item.quantity <= 0) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['quantity'], message: 'Quantity must be positive' })
+    // Zero and negative quantities are allowed, except on a skattereduktion
+    // row or (negative) a sales order row: lib/invoices/line-quantity.ts.
+    const quantityIssue = lineQuantityIssue(item)
+    if (quantityIssue) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['quantity'], message: LINE_QUANTITY_MESSAGES[quantityIssue] })
     }
     if (item.unit.length === 0) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['unit'], message: 'Unit is required' })
@@ -1094,9 +1099,8 @@ export type InvoicePreviewInput = z.infer<typeof InvoicePreviewSchema>
 // ============================================================
 
 export const RotRutPayoutFileSchema = z.object({
-  // The HUS file: ROT and RUT only. Grön teknik is requested in its own
-  // e-tjänst with its own schema, so gron_teknik is a 400 here.
-  deduction_type: z.enum(HUS_DEDUCTION_TYPES),
+  // rot and rut make the HUS file, gron_teknik the grön teknik Begaran file.
+  deduction_type: z.enum(DEDUCTION_TYPES),
   invoice_ids: z.array(uuid).min(1).max(500),
   // NamnPaBegaran: the XSD caps it at 16 chars; omitted → generated.
   name: z.string().min(1).max(16).optional(),
@@ -1842,11 +1846,16 @@ const supplierOrgNumber = z.string().transform((v) => orgNumberKey(v) ?? v.trim(
  * agent's create_supplier used to apply three different rule sets). An empty
  * string passes: on create it means "not set", on update "clear it".
  */
-function paymentRoutingField(max: number, valid: (compact: string) => boolean, message: string) {
+/**
+ * A payment routing number, blank or valid. The refusal is Swedish, for the
+ * person at the form; params.en keeps the English for an agent's field
+ * refusal (lib/errors/refusal.ts fieldIssue).
+ */
+function paymentRoutingField(max: number, valid: (compact: string) => boolean, message: { sv: string; en: string }) {
   return z
     .string()
     .max(max)
-    .refine((v) => v.trim() === '' || valid(v.replace(/\s/g, '').toUpperCase()), message)
+    .refine((v) => v.trim() === '' || valid(v.replace(/\s/g, '').toUpperCase()), { message: message.sv, params: { en: message.en } })
     .optional()
 }
 
@@ -1870,11 +1879,23 @@ export const CreateSupplierSchema = z.object({
   // Free text: a non-EU supplier's tax number has no VIES prefix, and reverse
   // charge never reads it (see lib/bookkeeping/supplier-invoice-entries.ts).
   vat_number: z.string().max(20).optional(),
-  bankgiro: paymentRoutingField(20, validateBankgiroNumber, 'Invalid Bankgiro (must be 7-8 digits with valid Luhn check digit)'),
-  plusgiro: paymentRoutingField(20, (v) => /^\d{1,7}-?\d$/.test(v), 'Invalid Plusgiro (expected 2-8 digits)'),
+  bankgiro: paymentRoutingField(20, validateBankgiroNumber, {
+    sv: 'Bankgironumret stämmer inte: det har 7 eller 8 siffror och en kontrollsiffra. Kontrollera det mot fakturan.',
+    en: 'Invalid Bankgiro (must be 7-8 digits with valid Luhn check digit)',
+  }),
+  plusgiro: paymentRoutingField(20, (v) => /^\d{1,7}-?\d$/.test(v), {
+    sv: 'Plusgironumret stämmer inte: det har 2 till 8 siffror. Kontrollera det mot fakturan.',
+    en: 'Invalid Plusgiro (expected 2-8 digits)',
+  }),
   bank_account: z.string().max(50).optional(),
-  iban: paymentRoutingField(42, (v) => /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(v), 'Invalid IBAN format'),
-  bic: paymentRoutingField(11, (v) => /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(v), 'Invalid BIC/SWIFT format'),
+  iban: paymentRoutingField(42, (v) => /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(v), {
+    sv: 'IBAN stämmer inte: det börjar med två bokstäver för landet, till exempel SE, och två siffror.',
+    en: 'Invalid IBAN format',
+  }),
+  bic: paymentRoutingField(11, (v) => /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(v), {
+    sv: 'BIC/SWIFT stämmer inte: den har 8 eller 11 tecken, till exempel ESSESESS.',
+    en: 'Invalid BIC/SWIFT format',
+  }),
   clearing_number: z.string().optional(),
   account_number: z.string().optional(),
   default_expense_account: emptyStringAsUndefined(accountNumber),
@@ -2781,7 +2802,8 @@ export const CategorizeTransactionSchema = z
     // the seller charged in error: a reverse charge is then booked on the
     // whole amount paid instead of refused (crm#1765,
     // TX_CATEGORIZE_REVERSE_CHARGE_SELLER_VAT). A Swedish seller's VAT is
-    // refused all the same.
+    // refused all the same; a Swedish VAT number beside an address abroad
+    // is no Swedish seller, and the flag then says it is not established here.
     confirm_foreign_seller_vat: z.boolean().optional(),
     // Booking-time duplicate guard (TRANSACTION_BOOK_POSSIBLE_DUPLICATE). force
     // bypasses it after the user reviews the candidate; the bypass is bound to
@@ -2875,7 +2897,7 @@ export const BookTransactionSchema = z
 
 // ── Webshop orders (Orders page) ──────────────────────────────
 
-export const WebshopPlatformSchema = z.enum(['woocommerce', 'shopify', 'zettle'])
+export const WebshopPlatformSchema = z.enum(['woocommerce', 'shopify', 'zettle', 'kustom'])
 
 export const WebshopOrdersListQuerySchema = z.object({
   platform: WebshopPlatformSchema.optional(),
@@ -3434,16 +3456,59 @@ export const MatchBatchSchema = z
     // MatchInvoiceSchema.expected_journal_entry_id).
     expected_journal_entry_ids: z.array(uuid).max(10).optional(),
     // A payment service's fee on the row (lib/bookkeeping/payout-fee-lines.ts):
-    // a debit on a class 6 cost account, no VAT.
+    // a debit on a class 6 cost account, no VAT. The fee and debt rows are
+    // bare in the MCP tool's listed schema (refinements, not regex or bounds,
+    // which pays for supplier_debts in the frozen tools/list budget); the
+    // refusals say the rule. At most five rows of the two together, below.
     fees: z
       .array(
         z.object({
-          account: accountNumber.refine(isPayoutFeeAccount, 'Fee account must be a BAS class 6 cost account, e.g. 6570'),
-          amount: z.number().positive('Fee amount must be greater than 0'),
-          description: z.string().max(PAYOUT_FEE_DESCRIPTION_MAX).optional(),
+          account: z.string().refine(isPayoutFeeAccount, 'Fee account must be a BAS class 6 cost account, e.g. 6570'),
+          amount: z.number().refine((amount) => amount > 0, 'Fee amount must be greater than 0'),
+          description: z
+            .string()
+            .refine((text) => text.length <= PAYOUT_FEE_DESCRIPTION_MAX, `At most ${PAYOUT_FEE_DESCRIPTION_MAX} characters`)
+            .optional(),
         }),
       )
-      .max(MAX_PAYOUT_FEES)
+      .optional(),
+    // A supplier invoice the row also pays that was registered before the
+    // company kept its books here, so it is only in the 2440 balance
+    // (lib/bookkeeping/supplier-debt-lines.ts): a debit on a 244x account, no
+    // VAT. Supplier batches only; not a fee, so it may exceed the invoices.
+    supplier_debts: z
+      .array(
+        z.object({
+          account: z.string().refine(isSupplierDebtAccount, 'Debt account must be a supplier debt account 2440 to 2449, e.g. 2440'),
+          amount: z.number().refine((amount) => amount > 0, 'Debt amount must be greater than 0'),
+          description: z
+            .string()
+            .refine((text) => text.length <= SUPPLIER_DEBT_DESCRIPTION_MAX, `At most ${SUPPLIER_DEBT_DESCRIPTION_MAX} characters`)
+            .optional(),
+        }),
+      )
+      .optional(),
+    // The customer side of supplier_debts: a customer invoice the row also
+    // pays that was issued before the company kept its books here, so it is
+    // only in the 1510 balance (lib/bookkeeping/customer-receivable-lines.ts):
+    // a credit on a 151x account, no VAT. Customer batches only; not a fee,
+    // so it may exceed the invoices.
+    customer_receivables: z
+      .array(
+        z.object({
+          account: z
+            .string()
+            .refine(isCustomerReceivableAccount, 'Receivable account must be a customer receivable account 1510 to 1519, e.g. 1510'),
+          amount: z.number().refine((amount) => amount > 0, 'Receivable amount must be greater than 0'),
+          description: z
+            .string()
+            .refine(
+              (text) => text.length <= CUSTOMER_RECEIVABLE_DESCRIPTION_MAX,
+              `At most ${CUSTOMER_RECEIVABLE_DESCRIPTION_MAX} characters`,
+            )
+            .optional(),
+        }),
+      )
       .optional(),
   })
   .superRefine((data, ctx) => {
@@ -3463,6 +3528,30 @@ export const MatchBatchSchema = z
           message: 'The fees must be smaller than the invoices they settle',
         })
       }
+    }
+    if (data.supplier_debts?.length && data.allocations.some((a) => a.kind !== 'supplier_invoice')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['supplier_debts'],
+        message: 'supplier_debts go with supplier_invoice allocations only (an outgoing payment)',
+      })
+    }
+    if (data.customer_receivables?.length && data.allocations.some((a) => a.kind !== 'customer_invoice')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['customer_receivables'],
+        message: 'customer_receivables go with customer_invoice allocations only (an incoming payment)',
+      })
+    }
+    // At most five extra rows on the verifikat, fees and the rows from before together, as the RPC.
+    const debtRows = data.supplier_debts?.length ?? 0
+    const receivableRows = data.customer_receivables?.length ?? 0
+    if ((data.fees?.length ?? 0) + debtRows + receivableRows > MAX_PAYOUT_FEES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [debtRows > 0 ? 'supplier_debts' : receivableRows > 0 ? 'customer_receivables' : 'fees'],
+        message: `At most ${MAX_PAYOUT_FEES} fee, debt and receivable rows together`,
+      })
     }
     // Reject mixed customer + supplier in a single batch: semantically a
     // single bank transfer settles invoices on one side. The RPC also guards
@@ -4083,6 +4172,10 @@ export const UpdateSettingsSchema = z.object({
   // Invoice PDF settings
   ore_rounding: z.boolean().optional(),
   invoice_show_ocr: z.boolean().optional(),
+  invoice_ocr_length_digit: z
+    .boolean()
+    .optional()
+    .describe("true: the OCR reference on invoices carries Bankgirot's length digit before the check digit (invoice 1042 is paid as 104265, not 10421). For a bankgiro whose OCR control at the bank checks the reference's length; such a bankgiro refuses a reference without it. Default false."),
   invoice_show_bankgiro: z.boolean().optional(),
   invoice_show_plusgiro: z.boolean().optional(),
   invoice_show_swish: z.boolean().optional(),
@@ -4493,6 +4586,27 @@ export const UpdateAccountSchema = z.object({
   sru_code: z.string().nullable().optional(),
 })
 
+/**
+ * Which EU country each OSS account is for (unionsordningen): the request of
+ * every door (accounts.oss-countries). Which account may take what is decided
+ * in lib/vat/oss-account-countries.ts.
+ */
+export const SetOssAccountCountriesSchema = z.object({
+  accounts: z
+    .array(
+      z.object({
+        account_number: z.string().min(1).max(10),
+        country: z
+          .string()
+          .nullable()
+          .describe('ISO 3166-1 alpha-2 of another EU country, e.g. "DE". "EU" on a VAT account shared by every country. null clears the account.'),
+        vat_rate: z.number().nullable().optional().describe('Percent, e.g. 19 or 25.5. Sales accounts only.'),
+      }),
+    )
+    .min(1)
+    .max(200),
+})
+
 // Looser account-number shape than the 4-digit primitive on purpose: imported
 // charts can carry non-standard numbers (sub-accounts like '19301'), and those
 // are exactly the rows the prune flow exists to remove.
@@ -4847,10 +4961,19 @@ export const OpeningBalanceSplitApplySchema = z.object({
 // Register import schemas (customers, suppliers)
 // ============================================================
 
+/** What a register row states of the type: TypeStated in lib/import/shared/stated-fields.ts. */
+const statedTypeField = z.enum(['type', 'business']).nullable().default(null)
+
 const ImportedCustomerRowSchema = z.object({
   row_index: z.number().int(),
   name: z.string().min(1),
   customer_type: CustomerTypeSchema,
+  // What the file (or the review step) states of the type and the country
+  // (lib/import/customers/types.ts): an update writes only that. Nothing
+  // stated for a wizard opened before the fields existed, so its update
+  // leaves both.
+  customer_type_stated: statedTypeField,
+  country_stated: z.boolean().default(false),
   // Defaulted so a wizard opened before the field existed can still submit.
   customer_number: z.string().trim().max(32).nullable().default(null),
   org_number: z.string().nullable(),
@@ -4908,6 +5031,13 @@ const ImportedSupplierRowSchema = z.object({
   row_index: z.number().int(),
   name: z.string().min(1),
   supplier_type: SupplierTypeSchema,
+  // What the file (or the review step) states of the type, the country and
+  // the currency (lib/import/suppliers/types.ts): an update writes only that.
+  // Nothing stated for a wizard opened before the fields existed, so its
+  // update leaves all three.
+  supplier_type_stated: statedTypeField,
+  country_stated: z.boolean().default(false),
+  default_currency_stated: z.boolean().default(false),
   org_number: z.string().nullable(),
   email: z.string().nullable(),
   phone: z.string().nullable(),

@@ -36,6 +36,7 @@ import { netVat } from './gross-split'
 import { roundOre } from '@/lib/money'
 import { creditNatural, debitNatural } from './line-side'
 import { isSupplierInvoiceRoundingItem } from '@/lib/bookkeeping/supplier-invoice-rounding-item'
+import { reverseChargeAccountConflict, type ReverseChargeAccountConflict } from './voucher-line-vat-code'
 import type { CreateJournalEntryLineInput, SupplierInvoice, SupplierInvoiceItem } from '@/types'
 
 /**
@@ -176,6 +177,18 @@ function rowInputVat(item: Pick<SupplierInvoiceBookingItem, 'line_total' | 'vat_
 }
 
 /**
+ * The rate to store on a row whose moms the create path settled on, so that
+ * rowInputVat reads that moms back. A stored 0 reads as "nothing stored", so
+ * a row with a rate above 0 whose moms is truly 0 (an explicit
+ * items[].vat_amount of 0) would be booked at line_total × rate on 2641 while
+ * the invoice says 0 kr moms (#3571). Such a row is stored at rate 0, as
+ * limited-deduction stores a row with no deductible part.
+ */
+export function rateForStoredRowVat(lineTotal: number, rate: number, vatAmount: number): number {
+  return vatAmount === 0 && netVat(lineTotal, rate) !== 0 ? 0 : rate
+}
+
+/**
  * True if any item would produce a non-zero ingående moms line: mirrors the
  * same stored-vs-computed fallback groupVatByRate uses (stored vat_amount,
  * else line_total × rate), whatever the row's sign. Callers must gate the VAT
@@ -292,6 +305,35 @@ export function groupReverseChargeByRate<T extends SupplierInvoiceBookingItem>(
     byRate.set(rate, group)
   }
   return byRate
+}
+
+/**
+ * The first line of a reverse-charge supplier invoice whose cost account
+ * cannot take the reverse charge (reverseChargeAccountConflict, the rule the
+ * utlägg and bank categorization book by), or null. Such an account declares
+ * the purchase in a box of its own (the import basis 4545-4547 in ruta 50,
+ * trepartshandel 4512 in ruta 37, a momskod for either), is the basis pair's
+ * offset 4598, or carries a reverse-charge momskod without a sats of 25, 12
+ * or 6 %: the basis pair beside it would declare the purchase a second time.
+ * Read on the account the line's cost is for: a reverse-charge invoice takes
+ * no periodisering, so that is the account it is booked on. Asked by every
+ * door that stores a line (reverseChargeAccountRefusal), never by the
+ * builders: the review dialog builds the verifikat while it renders.
+ *
+ * No box is compared (no stated kind): the invoice's box is read off the
+ * supplier, and an account with its own ruta 20-24 keeps deciding it
+ * (reverseChargeOnAccount), as bank categorization lets it for a box read
+ * off the underlag.
+ */
+export function supplierInvoiceReverseChargeAccountConflict(
+  items: ReadonlyArray<Pick<SupplierInvoiceBookingItem, 'account_number'>>,
+  chart: ChartVatTreatments,
+): { index: number; account: string; conflict: ReverseChargeAccountConflict } | null {
+  for (const [index, item] of items.entries()) {
+    const conflict = reverseChargeAccountConflict(item.account_number, chart.get(item.account_number))
+    if (conflict) return { index, account: item.account_number, conflict }
+  }
+  return null
 }
 
 /**

@@ -29,6 +29,11 @@ vi.mock('@/lib/expenses/expense-claims-service', async () => {
 })
 
 import { createSupplierInvoice, type CreateSupplierInvoiceInput } from '../create'
+import {
+  supplierInvoiceRegistrationLines,
+  type SupplierInvoiceBookingItem,
+  type SupplierInvoiceRegistrationHeader,
+} from '@/lib/bookkeeping/supplier-invoice-registration-lines'
 
 const { supabase, setTable, reset, calls } = createTableMockSupabase()
 
@@ -335,6 +340,38 @@ describe('createSupplierInvoice: VAT as the document states it', () => {
     expect(result.preview.items.map((i) => i.vat_amount)).toEqual([125, 2.49, 2.5])
     expect(result.preview.vat_amount).toBe(129.99)
   })
+
+  // #3571: an explicit vat_amount of 0 on a 25 % line was stored as 0 kr moms
+  // on the invoice, while the registration verifikat read the stored 0 as
+  // "nothing stored" and booked 250 on 2641 and 1 250 on 2440.
+  it('books an explicit vat_amount of 0 as no moms, the way the invoice stores it', async () => {
+    setTable('company_settings', { data: { accounting_method: 'accrual', vat_registered: true } })
+    const result = await createSupplierInvoice(
+      ctx(),
+      body({
+        items: [
+          { description: 'Test', quantity: 1, unit_price: 1000, amount: 1000, account_number: '5010', vat_rate: 0.25, vat_amount: 0 },
+          { description: 'Material', amount: 1000, account_number: '4010', vat_rate: 0.25 },
+        ],
+      }),
+      { dryRun: true },
+    )
+
+    if (!result.ok || !result.dryRun) throw new Error('expected a dry-run preview')
+    expect(result.preview).toMatchObject({ subtotal: 2000, vat_amount: 250, total: 2250 })
+    expect(result.preview.items.map((i) => [i.vat_rate, i.vat_amount])).toEqual([[0, 0], [0.25, 250]])
+
+    const lines = supplierInvoiceRegistrationLines(
+      result.preview as unknown as SupplierInvoiceRegistrationHeader,
+      result.preview.items as unknown as SupplierInvoiceBookingItem[],
+      'swedish_business',
+      'LF',
+      undefined,
+    )
+    const on = (account: string) => lines.filter((l) => l.account_number === account)
+    expect(on('2641').map((l) => l.debit_amount)).toEqual([250])
+    expect(on('2440').map((l) => l.credit_amount)).toEqual([result.preview.total])
+  })
 })
 
 // Upplupen kostnad (29xx): July-September electricity on an October invoice.
@@ -581,5 +618,87 @@ describe('createSupplierInvoice registerOnly (suppliers:register)', () => {
 
     if (!result.ok || !result.dryRun) throw new Error('expected a dry-run preview')
     expect(result.preview.would_create_registration_journal_entry).toBe(false)
+  })
+})
+
+// A reverse-charge line on an account that declares the purchase in a box of
+// its own (the import basis in ruta 50, trepartshandel in ruta 37, the 4598
+// offset) got the basis pair beside it: one purchase in two boxes. Refused
+// before anything is written, also under kontantmetoden, where the verifikat
+// would only be booked at the payment.
+describe('createSupplierInvoice: a reverse-charge line on an account with a box of its own', () => {
+  const rc = (account: string) =>
+    body({
+      reverse_charge: true,
+      items: [
+        { description: 'Licens', amount: 500, account_number: '6540', vat_rate: 0 },
+        { description: 'Köp', amount: 1000, account_number: account, vat_rate: 0 },
+      ],
+    } as Partial<CreateSupplierInvoiceInput>)
+
+  beforeEach(() => {
+    setTable('suppliers', { data: makeSupplier({ id: SUPPLIER_ID, supplier_type: 'non_eu_business' }) })
+    setTable('company_settings', { data: { accounting_method: 'cash', vat_registered: true } })
+    setTable('chart_of_accounts', { data: [] })
+  })
+
+  for (const dryRun of [true, false]) {
+    it(`refuses the import basis 4545 and writes nothing (dryRun=${dryRun})`, async () => {
+      const result = await createSupplierInvoice(ctx(), rc('4545'), { dryRun })
+
+      expect(result).toEqual({
+        ok: false,
+        code: 'SI_REVERSE_CHARGE_ACCOUNT',
+        details: { field: 'items[1].account_number', account_number: '4545', reason: 'other_box', account_box: 'ruta50' },
+      })
+      expectNothingWritten()
+    })
+  }
+
+  it('refuses trepartshandel 4512 and the 4598 offset', async () => {
+    expect(await createSupplierInvoice(ctx(), rc('4512'), { dryRun: true })).toMatchObject({
+      code: 'SI_REVERSE_CHARGE_ACCOUNT',
+      details: { reason: 'other_box', account_box: 'ruta37' },
+    })
+    expect(await createSupplierInvoice(ctx(), rc('4598'), { dryRun: true })).toMatchObject({
+      code: 'SI_REVERSE_CHARGE_ACCOUNT',
+      details: { reason: 'basis_offset', account_number: '4598' },
+    })
+  })
+
+  it('refuses a cost account whose momskod in the kontoplan is import, or reverse charge without a sats', async () => {
+    setTable('chart_of_accounts', {
+      data: [
+        { account_number: '4010', default_vat_treatment: 'import_goods', default_vat_rate: 0.25 },
+        { account_number: '5420', default_vat_treatment: 'reverse_charge_non_eu_services', default_vat_rate: 0 },
+      ],
+    })
+    expect(await createSupplierInvoice(ctx(), rc('4010'), { dryRun: true })).toMatchObject({
+      code: 'SI_REVERSE_CHARGE_ACCOUNT',
+      details: { reason: 'other_box', account_box: 'ruta50' },
+    })
+    expect(await createSupplierInvoice(ctx(), rc('5420'), { dryRun: true })).toMatchObject({
+      code: 'SI_REVERSE_CHARGE_ACCOUNT',
+      details: { reason: 'no_rate' },
+    })
+  })
+
+  it('registers 4531, which reports ruta 22 itself, and an ordinary cost account as before', async () => {
+    for (const account of ['4531', '6550']) {
+      const result = await createSupplierInvoice(ctx(), rc(account), { dryRun: true })
+      if (!result.ok || !result.dryRun) throw new Error(`expected a dry-run preview for ${account}`)
+      expect(result.preview).toMatchObject({ reverse_charge: true, total: 1500 })
+    }
+    expectNothingWritten()
+  })
+
+  it('leaves an invoice without reverse charge alone', async () => {
+    setTable('suppliers', { data: makeSupplier({ id: SUPPLIER_ID, supplier_type: 'swedish_business' }) })
+    const result = await createSupplierInvoice(
+      ctx(),
+      body({ items: [{ description: 'Köp', amount: 1000, account_number: '4545', vat_rate: 0.25 }] }),
+      { dryRun: true },
+    )
+    expect(result.ok).toBe(true)
   })
 })

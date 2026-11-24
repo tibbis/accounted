@@ -7,7 +7,7 @@
  * fiscal_period_id validation, inactive/missing account rejection, and the
  * source_type-not-staged invariant.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // The filed-momsperiod note (lib/pending-operations/filed-vat-note.ts) reads
 // the filing record at staging: none here, so the stubbed reads stay the
@@ -71,12 +71,14 @@ const balancedLines = [
   { account_number: '1930', debit_amount: 0, credit_amount: 250 },
 ]
 
-// The three reads assertStornoTarget makes for an original dated 2026-05-12
-// in an open, unlocked 2026 with no company lock date: the original's year,
-// then resolvePeriodStatusForDate (company lock date, covering period).
-// gnubok_correct_entry and gnubok_reverse_journal_entry both run it before
-// staging.
+// The four reads assertStornoTarget makes for an original dated 2026-05-12
+// in an open, unlocked 2026 with no company lock date: a posted storno of it
+// (none), the original's year, then resolvePeriodStatusForDate (company lock
+// date, covering period). gnubok_correct_entry and
+// gnubok_reverse_journal_entry both run it before staging.
+const NO_POSTED_STORNO = { data: [], error: null }
 const OPEN_STORNO_TARGET = [
+  NO_POSTED_STORNO,
   { data: { name: '2026', period_start: '2026-01-01', period_end: '2026-12-31' }, error: null },
   { data: { bookkeeping_locked_through: null }, error: null },
   { data: { id: 'fp-1', is_closed: false, locked_at: null }, error: null },
@@ -493,10 +495,9 @@ describe('gnubok_create_voucher: staging gates', () => {
     expect(result.preview.total_credit).toBe(250)
 
     // The momsdeklaration impact (crm#1447) is computed from the lines that
-    // post, in the resolved fiscal period, and carried in the preview.
+    // post, in the period that holds their date, and carried in the preview.
     expect(previewVoucherVatDeclaration).toHaveBeenCalledWith(supabase, 'company-1', {
       entryDate: '2026-05-12',
-      fiscalPeriodId: 'fp-1',
       lines: expect.arrayContaining([
         expect.objectContaining({ account_number: '1010', debit_amount: 250 }),
         expect.objectContaining({ account_number: '1930', credit_amount: 250 }),
@@ -517,6 +518,53 @@ describe('gnubok_create_voucher: staging gates', () => {
     // The executor always hardcodes 'manual'. Look at the insert call.
     const insertCalls = (supabase.from as ReturnType<typeof vi.fn>).mock.calls
     expect(insertCalls.some((args) => args[0] === 'pending_operations')).toBe(true)
+  })
+
+  it('previews each line with the currency, amount in currency and rate it will store (crm#2161)', async () => {
+    const { supabase, enqueue } = createQueuedMockSupabase()
+    enqueue({
+      data: { id: 'fp-1', is_closed: false, period_start: '2026-01-01', period_end: '2026-12-31', name: '2026' },
+      error: null,
+    })
+    enqueue({
+      data: [
+        { account_number: '2999', account_name: 'Övriga upplupna kostnader', is_active: true },
+        { account_number: '1510', account_name: 'Kundfordringar', is_active: true },
+      ],
+      error: null,
+    })
+    enqueue({ data: null, error: null })
+    enqueue({ data: null, error: null })
+    enqueue({ data: { id: 'op-staged' }, error: null })
+
+    const result = (await createVoucher.execute(
+      {
+        entry_date: '2026-05-12',
+        description: 'Kundbetalning i euro',
+        fiscal_period_id: 'fp-1',
+        lines: [
+          { account_number: '2999', debit_amount: 1129, credit_amount: 0 },
+          {
+            account_number: '1510',
+            debit_amount: 0,
+            credit_amount: 1129,
+            currency: 'EUR',
+            amount_in_currency: 100,
+            exchange_rate: 11.29,
+          },
+        ],
+      },
+      'company-1',
+      'user-1',
+      supabase as never,
+    )) as { staged: boolean; preview: { lines: Array<Record<string, unknown>> } }
+
+    expect(result.staged).toBe(true)
+    const byAccount = Object.fromEntries(result.preview.lines.map((l) => [l.account_number, l]))
+    // A line without a currency is previewed as the kronor line it posts as,
+    // so an agent sees a 1510 line that will not match a foreign invoice.
+    expect(byAccount['2999']).toMatchObject({ currency: 'SEK', amount_in_currency: null, exchange_rate: null })
+    expect(byAccount['1510']).toMatchObject({ currency: 'EUR', amount_in_currency: 100, exchange_rate: 11.29 })
   })
 
   it('refuses to stage until the person confirmed the booking-time warnings, handing them to the agent', async () => {
@@ -1423,7 +1471,9 @@ describe('gnubok_correct_entry / gnubok_reverse_journal_entry: chain-depth guard
   it('refuses to stage a storno on a chain 3 levels deep', async () => {
     const { supabase, enqueue, enqueueMany } = createQueuedMockSupabase()
     enqueue({ data: deepTarget, error: null })
-    // The storno target check: the original's open 2026, no company lock date.
+    // The storno target check: no posted storno of it, the original's open
+    // 2026, no company lock date.
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: { name: '2026', period_start: '2026-01-01', period_end: '2026-12-31' }, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null })
     enqueue({ data: { id: 'fp-1', is_closed: false, locked_at: null }, error: null })
@@ -1467,7 +1517,9 @@ describe('gnubok_reverse_journal_entry: the verifikat an invoice owns', () => {
       },
       error: null,
     })
-    // The storno target check: the original's open 2026, no company lock date.
+    // The storno target check: no posted storno of it, the original's open
+    // 2026, no company lock date.
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: { name: '2026', period_start: '2026-01-01', period_end: '2026-12-31' }, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null })
     enqueue({ data: { id: 'fp-1', is_closed: false, locked_at: null }, error: null })
@@ -1571,6 +1623,7 @@ describe('gnubok_reverse_journal_entry: staging gates', () => {
       },
       error: null,
     })
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: { name: '2025', period_start: '2025-01-01', period_end: '2025-12-31' }, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null }) // company lock date
     enqueue({ data: { id: 'fp-closed', is_closed: true, locked_at: '2026-02-01T00:00:00Z' }, error: null })
@@ -1603,6 +1656,7 @@ describe('gnubok_reverse_journal_entry: staging gates', () => {
       },
       error: null,
     })
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: { name: '2025', period_start: '2025-01-01', period_end: '2025-12-31' }, error: null })
 
     await expect(
@@ -1619,9 +1673,10 @@ describe('gnubok_reverse_journal_entry: staging gates', () => {
 
 // crm#1290: a correction of a verifikat in a year closed with a year-end
 // closing was refused with "Unlock the period, or use omprövning", and unlock
-// refuses a closed year. The pre-flight is now the engine's storno target
-// check, so the refusal is the typed one the app gives, with the registry's
-// answer for what to do instead.
+// refuses a closed year. The pre-flight is the engine's storno target check,
+// with the person's option: the storno and the corrected verifikat are dated
+// in the first open period after the original and name it; only an entry
+// type whose date is fixed keeps the typed refusal.
 describe('gnubok_correct_entry: an original in a closed or locked year', () => {
   const original = {
     id: '44444444-4444-4444-8444-444444444444',
@@ -1643,10 +1698,51 @@ describe('gnubok_correct_entry: an original in a closed or locked year', () => {
     { account_number: '1930', debit_amount: 0, credit_amount: 1000 },
   ]
   const year = { name: 'Räkenskapsår 2025/2026', period_start: '2025-05-01', period_end: '2026-04-30' }
+  const years = [
+    { id: 'fp-2025', period_start: '2025-05-01', period_end: '2026-04-30', is_closed: true, locked_at: '2026-09-25T18:02:15Z' },
+    { id: 'fp-2026', period_start: '2026-05-01', period_end: '2027-04-30', is_closed: false, locked_at: null },
+  ]
 
-  it('refuses a year closed with a year-end closing with TARGET_PERIOD_CLOSED and stages nothing', async () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stages a year closed with a year-end closing as a correction dated in the first open year', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-24T10:00:00Z') })
     const { supabase, enqueue, findCall } = createQueuedMockSupabase()
     enqueue({ data: original, error: null })
+    enqueue(NO_POSTED_STORNO)
+    enqueue({ data: year, error: null })
+    enqueue({ data: { bookkeeping_locked_through: null }, error: null })
+    enqueue({ data: { id: 'fp-2025', is_closed: true, locked_at: '2026-09-25T18:02:15Z' }, error: null })
+    // The first open period: the company lock date, then the years after it.
+    enqueue({ data: { bookkeeping_locked_through: null }, error: null })
+    enqueue({ data: years, error: null })
+    // stage(): the period check for the date it lands on, then the insert.
+    enqueue({ data: { bookkeeping_locked_through: null }, error: null })
+    enqueue({ data: { id: 'fp-2026', is_closed: false, locked_at: null }, error: null })
+    enqueue({ data: { id: 'op-closed-year' }, error: null })
+
+    const result = (await correctEntry.execute(
+      { entry_id: original.id, lines },
+      'company-1',
+      'user-1',
+      supabase as never,
+    )) as { preview: { correction: { description: string; entry_date?: string }; will: string } }
+
+    expect(findCall('pending_operations', 'insert')).toBeDefined()
+    expect(result.preview.correction).toMatchObject({
+      entry_date: '2026-11-24',
+      description: 'Rättelse av verifikat A27 (2026-04-21): Utbetald utdelning',
+    })
+    expect(result.preview.will).toMatch(/first open period/)
+    expect(result.preview.will).not.toMatch(/mark the original as reversed/)
+  })
+
+  it('refuses a year-end verifikat in a closed year with TARGET_PERIOD_CLOSED and stages nothing', async () => {
+    const { supabase, enqueue, findCall } = createQueuedMockSupabase()
+    enqueue({ data: { ...original, source_type: 'year_end' }, error: null })
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: year, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null })
     enqueue({ data: { id: 'fp-2025', is_closed: true, locked_at: '2026-09-25T18:02:15Z' }, error: null })
@@ -1661,9 +1757,10 @@ describe('gnubok_correct_entry: an original in a closed or locked year', () => {
     expect(findCall('pending_operations', 'insert')).toBeUndefined()
   })
 
-  it('refuses an original behind the company lock date with TARGET_PERIOD_LOCKED', async () => {
+  it('refuses a VAT settlement behind the company lock date with TARGET_PERIOD_LOCKED', async () => {
     const { supabase, enqueue, findCall } = createQueuedMockSupabase()
-    enqueue({ data: original, error: null })
+    enqueue({ data: { ...original, source_type: 'vat_settlement' }, error: null })
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: year, error: null })
     enqueue({ data: { bookkeeping_locked_through: '2026-04-30' }, error: null })
     enqueue({ data: { id: 'fp-2025' }, error: null })
@@ -1674,9 +1771,21 @@ describe('gnubok_correct_entry: an original in a closed or locked year', () => {
     expect(findCall('pending_operations', 'insert')).toBeUndefined()
   })
 
+  it('refuses an original a posted storno already reverses with ENTRY_ALREADY_REVERSED', async () => {
+    const { supabase, enqueue, findCall } = createQueuedMockSupabase()
+    enqueue({ data: original, error: null })
+    enqueue({ data: [{ id: 'storno-1' }], error: null })
+
+    await expect(
+      correctEntry.execute({ entry_id: original.id, lines }, 'company-1', 'user-1', supabase as never),
+    ).rejects.toMatchObject({ code: 'ENTRY_ALREADY_REVERSED' })
+    expect(findCall('pending_operations', 'insert')).toBeUndefined()
+  })
+
   it('stages when the original year is open', async () => {
     const { supabase, enqueue, findCall } = createQueuedMockSupabase()
     enqueue({ data: original, error: null })
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: year, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null })
     enqueue({ data: { id: 'fp-2025', is_closed: false, locked_at: null }, error: null })
@@ -1710,9 +1819,10 @@ describe('entry_id resolution: voucher refs and hallucinated UUIDs', () => {
       data: [{ id: resolvedId, entry_date: '2026-03-06', description: 'Cursor 2' }],
       error: null,
     })
-    // 2) original journal_entries lookup, but the period is closed so we
-    //    short-circuit before staging. That's enough to confirm the helper
-    //    resolved the ref and passed the UUID through to the next query.
+    // 2) original journal_entries lookup, but it is a year-end verifikat in
+    //    a closed year, so we short-circuit before staging. That's enough to
+    //    confirm the helper resolved the ref and passed the UUID through to
+    //    the next query.
     enqueue({
       data: {
         id: resolvedId,
@@ -1722,11 +1832,13 @@ describe('entry_id resolution: voucher refs and hallucinated UUIDs', () => {
         voucher_number: 113,
         voucher_series: 'A',
         fiscal_period_id: 'fp-closed',
+        source_type: 'year_end',
         lines: [],
       },
       error: null,
     })
-    // 3) the storno target check reads the original's (closed) year.
+    // 3) the storno target check: no posted storno, the original's (closed) year.
+    enqueue(NO_POSTED_STORNO)
     enqueue({ data: { name: '2026', period_start: '2026-01-01', period_end: '2026-12-31' }, error: null })
     enqueue({ data: { bookkeeping_locked_through: null }, error: null })
     enqueue({ data: { id: 'fp-closed', is_closed: true, locked_at: null }, error: null })
@@ -1876,6 +1988,55 @@ describe('gnubok_list_voucher_gaps: a failed check is an error, never 0 gaps', (
       explanation: 'Avbruten bokning',
       created_at: '2026-01-01',
     })
+  })
+
+  // A98 posted, then cancelled: detect_voucher_gaps counts the number as used,
+  // and every journal list hides the verifikat, so it was accounted for nowhere.
+  it('lists a cancelled numbered verifikat as makulerad, apart from the gaps', async () => {
+    const { supabase, enqueue, findCalls } = createQueuedMockSupabase()
+    enqueue({ data: PERIOD, error: null })
+    enqueue({ data: [{ voucher_series: 'A' }], error: null })
+    enqueue({ data: [], error: null }) // detect_voucher_gaps('A'): no gap
+    enqueue({
+      data: [{ id: 'je-98', voucher_series: 'A', voucher_number: 98, entry_date: '2026-05-12', description: 'Betalning leverantörsfaktura 1043' }],
+      error: null,
+    }) // journal_entries: cancelled, numbered
+    enqueue({ data: [], error: null }) // explanations
+
+    const result = (await listGaps.execute({ fiscal_period_id: PERIOD_ID }, 'company-1', 'user-1', supabase as never)) as {
+      total_gaps: number
+      cancelled_vouchers: unknown[]
+      cancelled_note?: string
+    }
+
+    expect(result.total_gaps).toBe(0)
+    expect(result.cancelled_vouchers).toEqual([
+      {
+        kind: 'makulerad',
+        series: 'A',
+        voucher_number: 98,
+        entry_date: '2026-05-12',
+        description: 'Betalning leverantörsfaktura 1043',
+        journal_entry_id: 'je-98',
+        explanation: null,
+      },
+    ])
+    expect(result.cancelled_note).toMatch(/not a gap/)
+    expect(findCalls('journal_entries', 'eq')).toContainEqual(['status', 'cancelled'])
+    expect(findCalls('journal_entries', 'gt')).toContainEqual(['voucher_number', 0])
+  })
+
+  it('answers an empty cancelled_vouchers and no note when no verifikat is cancelled', async () => {
+    const { supabase, enqueue } = createQueuedMockSupabase()
+    enqueue({ data: PERIOD, error: null })
+    enqueue({ data: [{ voucher_series: 'A' }], error: null })
+    enqueue({ data: [], error: null })
+    enqueue({ data: [], error: null }) // journal_entries: none cancelled
+
+    const result = (await listGaps.execute({ fiscal_period_id: PERIOD_ID }, 'company-1', 'user-1', supabase as never)) as Record<string, unknown>
+
+    expect(result.cancelled_vouchers).toEqual([])
+    expect(result).not.toHaveProperty('cancelled_note')
   })
 
   it('throws when gap detection fails', async () => {

@@ -43,7 +43,13 @@ import {
 } from '@/lib/invoices/issue-and-book-invoice'
 import { findCardCashAccount } from '@/lib/cash-accounts/load-card-ledgers'
 import { isCardLedgerAccount } from '@/lib/cash-accounts/card-ledger'
-import { ensureManualCashAccount, resolveDefaultCashAccount } from '@/lib/cash-accounts/service'
+import {
+  ensureManualCashAccount,
+  isCashAccountCurrencyMismatch,
+  isCashAccountDisabledPayee,
+  resolveDefaultCashAccount,
+  type CashAccountCurrencyMismatch,
+} from '@/lib/cash-accounts/service'
 import { ingestTransactions } from '@/lib/transactions/ingest'
 import { findFiscalPeriod, validateBalance } from '@/lib/bookkeeping/engine'
 import { postingPort } from '@/lib/posting/port'
@@ -55,6 +61,7 @@ import { bookDirectDocumentCurrency, bookDirectFxRefusal } from '@/lib/bookkeepi
 import { coerceDimensionsBag } from '@/lib/bookkeeping/dimension-resolver'
 import { ACCOUNT_NUMBER_RE } from '@/lib/invariants/account-number'
 import { isReverseChargeKind } from '@/lib/bookkeeping/vat-entries'
+import { isReverseChargeBoxParam } from '@/lib/vat/reverse-charge-box'
 import { runWithActor } from '@/lib/bookkeeping/actor-context-node'
 import { getActor, type CommitActor } from '@/lib/bookkeeping/actor-context'
 import { createServiceClient } from '@/lib/supabase/server'
@@ -792,10 +799,25 @@ async function commitCategorizeTransaction(
     }
   }
 
+  // Whether the caller named that box at staging (the door's parameter) or
+  // it was read off the underlag: a named box is held against the cost
+  // account's own ruta 20-24 at approval too. A present but unknown value is
+  // drift, as for the kind.
+  const rawReverseChargeBoxParam = params.reverse_charge_box_param
+  if (rawReverseChargeBoxParam != null && !isReverseChargeBoxParam(rawReverseChargeBoxParam)) {
+    return {
+      error:
+        'Ogiltig reverse_charge_box_param i den stagade operationen. ' +
+        'Avvisa operationen och stagea om kategoriseringen.',
+      status: 400,
+    }
+  }
+
   return categorizeMatchedTransaction(supabase, userId, companyId, txId, {
     category,
     vatTreatment,
     reverseChargeKind: rawReverseChargeKind ?? undefined,
+    ...(rawReverseChargeBoxParam ? { reverseChargeBoxParam: rawReverseChargeBoxParam } : {}),
     vatAmount,
     notes,
     allowDuplicate: params.allow_duplicate === true,
@@ -2014,6 +2036,47 @@ async function commitRetagLineDimensions(
 }
 
 /**
+ * CASH_ACCOUNT_CURRENCY_MISMATCH as an approval's answer, naming the ledger
+ * and both currencies. A 409 closes the proposal as one to stage again, as
+ * TX_CREATE_DUPLICATE does: the proposal itself names an account in another
+ * currency, so the same approval can never go through (fixable-refusals.ts
+ * keeps only refusals fixed outside the proposal).
+ */
+function cashAccountCurrencyRefusal(mismatch: CashAccountCurrencyMismatch): ExecutorResult {
+  const { ledger_account, account_currency, currency } = mismatch.details
+  return {
+    error:
+      `Bankkontot på ${ledger_account} är i ${account_currency}, men transaktionen är i ${currency}. ` +
+      `Ett bankkonto har bara en valuta, så inget sparades. Lägg transaktionen på ett bankkonto i ${currency}.`,
+    errorCode: mismatch.code,
+    status: getErrorEntry(mismatch.code)?.httpStatus ?? 409,
+    data: { ...mismatch.details },
+  }
+}
+
+/**
+ * CASH_ACCOUNT_DISABLED_PAYEE as an approval's answer, naming the ledger:
+ * the bank account on ledger_account is turned off and marked to be printed
+ * on invoices, which rows never turn back on (reenableIfUnused). Refused
+ * before anything is stored. What is wrong lies outside the proposal (an
+ * owner or admin turns the account on, or hides it on invoices), so the
+ * app's single approval keeps it pending for the same approval once that is
+ * done (fixable-refusals.ts); every other door closes it, as any 409 does.
+ */
+function cashAccountDisabledPayeeRefusal(ledgerAccount: string): ExecutorResult {
+  const code = 'CASH_ACCOUNT_DISABLED_PAYEE'
+  return {
+    error:
+      `Bankkontot på ${ledgerAccount} är avstängt och markerat att visas på fakturor, så transaktionen sparades inte. ` +
+      'En ägare eller administratör behöver aktivera det under Inställningar → Bokföring (då visas det på fakturor igen) ' +
+      'eller dölja det på fakturor under Inställningar → Fakturering.',
+    errorCode: code,
+    status: getErrorEntry(code)?.httpStatus ?? 409,
+    data: { ledger_account: ledgerAccount },
+  }
+}
+
+/**
  * An approved gnubok_create_transactions row. Stored through
  * ingestTransactions, the pipeline every other door that stores a bank row
  * runs (PSD2 sync, bank-file import, v1 POST /transactions/ingest): its
@@ -2133,11 +2196,25 @@ async function commitCreateTransaction(
   // that currency (crm#1171): a bank-feed or bank-file row is never stored
   // unbound, and an unbound one dropped out of every per-account view.
   // Ingest then settles the batch on the account's ledger number.
-  const cashAccount = card && ledgerAccount
-    ? { id: card.id, ledger_account: ledgerAccount }
-    : ledgerAccount
-      ? { id: await ensureManualCashAccount(supabase, companyId, ledgerAccount, currency), ledger_account: ledgerAccount }
-      : await resolveDefaultCashAccount(supabase, companyId, currency, bankConnectionId)
+  let cashAccount: { id: string; ledger_account: string } | null
+  if (card && ledgerAccount) {
+    cashAccount = { id: card.id, ledger_account: ledgerAccount }
+  } else if (ledgerAccount) {
+    try {
+      cashAccount = { id: await ensureManualCashAccount(supabase, companyId, ledgerAccount, currency), ledger_account: ledgerAccount }
+    } catch (err) {
+      // Two refusals before anything is stored, which used to reach the
+      // dispatcher's catch as a 500 that told the approver to try again: the
+      // kassakonto on ledger_account is in another currency (a ledger holds
+      // one), or it is a turned-off invoice payee that only an owner or admin
+      // turns on.
+      if (isCashAccountCurrencyMismatch(err)) return cashAccountCurrencyRefusal(err)
+      if (isCashAccountDisabledPayee(err)) return cashAccountDisabledPayeeRefusal(ledgerAccount)
+      throw err
+    }
+  } else {
+    cashAccount = await resolveDefaultCashAccount(supabase, companyId, currency, bankConnectionId)
+  }
 
   // Auto-categorization stays off: the row lands uncategorized and the agent
   // books it with gnubok_categorize_transaction, as the staging promised.
@@ -5221,18 +5298,14 @@ async function commitCorrectEntry(
     return { error: 'entry_id and at least two lines are required', status: 400 }
   }
 
-  // Pre-flight: verify the original is posted and its period is not locked.
-  // Falling into correctEntry without this returns a less helpful DB error and
-  // half-creates the storno before rolling back; surfacing the Swedish message
-  // here matches the period_locked UX everywhere else in the app.
-  //
-  // Period lock check is two-layer (matches the DB triggers): per-period
-  // (is_closed / locked_at) AND company-wide (bookkeeping_locked_through).
-  // The staging tool uses resolvePeriodStatusForDate; we reuse it here so the
-  // commit-time gate matches the staging-time signal.
+  // Pre-flight: verify the original is posted. Where the storno and the
+  // corrected verifikat land is correctEntry's own check (assertStornoTarget,
+  // the one the staging tool ran): on the original's date in an open year,
+  // else in the first open, unlocked period after it, refused with a typed
+  // error before anything is written when neither works.
   const { data: original, error: origErr } = await supabase
     .from('journal_entries')
-    .select('id, status, entry_date, fiscal_period_id, fiscal_periods!journal_entries_fiscal_period_id_fkey!inner(is_closed, locked_at)')
+    .select('id, status, entry_date')
     .eq('id', entryId)
     .eq('company_id', companyId)
     .maybeSingle()
@@ -5246,40 +5319,8 @@ async function commitCorrectEntry(
       status: 409,
     }
   }
-  const period = original.fiscal_periods as { is_closed?: boolean; locked_at?: string | null } | { is_closed?: boolean; locked_at?: string | null }[] | null
-  const periodRow = Array.isArray(period) ? period[0] : period
-  if (periodRow?.is_closed || periodRow?.locked_at) {
-    return {
-      error: 'Räkenskapsperioden är låst. Öppna perioden eller använd omprövning för redan inlämnade momsdeklarationer.',
-      status: 409,
-    }
-  }
-  // resolvePeriodStatusForDate also covers the company-wide bookkeeping_locked_through
-  // gate. A DB blip here would otherwise propagate as a 500 with a raw Postgres
-  // message; wrap so the caller sees a clean Swedish 500 instead, consistent with
-  // the staging-side log-and-degrade behaviour in stagePendingOperation.
-  try {
-    const periodStatus = await resolvePeriodStatusForDate(supabase, companyId, original.entry_date)
-    if (periodStatus.status === 'locked' || periodStatus.status === 'closed') {
-      return {
-        error: 'Räkenskapsperioden är låst. Öppna perioden eller använd omprövning för redan inlämnade momsdeklarationer.',
-        status: 409,
-      }
-    }
-  } catch (err) {
-    return {
-      error: `Kunde inte verifiera periodstatus: ${err instanceof Error ? err.message : 'okänt fel'}`,
-      status: 500,
-    }
-  }
 
   try {
-    // correctEntry() posts both the storno and the corrected entry into the
-    // SAME fiscal_period_id and entry_date as the original (see
-    // lib/core/bookkeeping/storno-service.ts:99,102,195,198). So a rättelse
-    // made in May 2026 for a December 2025 voucher correctly lands in 2025,
-    // keeping that period's balances consistent. The is_closed pre-flight
-    // above is what blocks corrections to already-locked periods.
     // Posting port (step 2i): ledger.storno and ledger.correction of the
     // verifikat while POSTING_EVENTS is on, this approval as evidence.
     const result = await postingPort.correctJournalEntry({
@@ -5302,9 +5343,17 @@ async function commitCorrectEntry(
           // credit swapped; without it a correction that negates the
           // original is refused here too (crm#1397).
           ...(params.sides_swapped === true ? { sidesSwapped: true } : {}),
+          // A locked or closed original is corrected in the first open
+          // period, as the staging preview said.
+          inFirstOpenPeriodWhenLocked: true,
         },
       },
     })
+    // The original's date took no write (its period was locked, perhaps
+    // after the proposal was staged): the pair landed in the first open
+    // period, and the answer says so instead of implying the original's date.
+    const moved =
+      !!original.entry_date && !!result.reversal.entry_date && result.reversal.entry_date !== original.entry_date
     return {
       data: {
         original_entry_id: entryId,
@@ -5312,6 +5361,13 @@ async function commitCorrectEntry(
         corrected_entry_id: result.corrected.id,
         storno_voucher_number: result.reversal.voucher_number,
         corrected_voucher_number: result.corrected.voucher_number,
+        ...(moved
+          ? {
+              moved_to_first_open_period: true,
+              entry_date: result.reversal.entry_date,
+              note_sv: `Originalets period var låst: stornot och rättelsen bokfördes ${result.reversal.entry_date} i första öppna period, med hänvisning till originalet.`,
+            }
+          : {}),
       },
     }
   } catch (err) {
@@ -6457,7 +6513,9 @@ async function commitReconciliationSignoff(
     )
     if (!result) return { error: `Unknown account_key ${accountKey}`, status: 404 }
     if (result.dry_run) return { error: 'Unexpected dry-run result', status: 500 }
-    return { data: { account_key: accountKey, signoff: result.signoff } }
+    return {
+      data: { account_key: accountKey, signoff: result.signoff, bank_balance: result.bank_balance, warning: result.warning },
+    }
   } catch (err) {
     const code = (err as { code?: string }).code
     return {

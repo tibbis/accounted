@@ -325,6 +325,9 @@ function createRecordingClient(
     // Faithful to PostgREST: a query resolves to an ARRAY unless the chain
     // asked for one row. Tools that .map() or spread a list need that.
     let single = false
+    // A read for the posted storno of a verifikat (storno-target.ts) finds
+    // none: no verifikat here is corrected yet.
+    let stornoRead = false
     const chain: unknown = new Proxy(
       {},
       {
@@ -332,7 +335,7 @@ function createRecordingClient(
           if (prop === 'then') {
             return (resolve: (value: unknown) => void) =>
               resolve(
-                empty.includes(table)
+                empty.includes(table) || stornoRead
                   ? { data: single ? null : [], error: null, count: 0 }
                   : { data: single ? row : [row], error: null, count: counts[table] ?? 1 },
               )
@@ -352,6 +355,7 @@ function createRecordingClient(
           if (prop === 'eq') {
             // A read by id of a table with per-id rows answers that id's row.
             return (column: string, value: unknown) => {
+              if (column === 'reverses_id') stornoRead = true
               const byId = column === 'id' ? rowsById[table]?.[String(value)] : undefined
               if (byId) row = { ...row, id: value, ...byId }
               return chain
@@ -1387,6 +1391,12 @@ const BRIDGE_TARGET_FIXTURES: Record<string, Fixture> = {
   gnubok_create_dimension_rule: { empty: ['account_dimension_rules'] },
   // An account a budget uses is not deleted as unused (accounted#134).
   gnubok_delete_account: { empty: ['budget_lines'] },
+  // The chart holds the account the call names: a VAT account, which takes a
+  // country and no rate.
+  gnubok_set_oss_account_countries: {
+    args: { accounts: [{ account_number: '2671', country: 'DE' }] },
+    rows: { chart_of_accounts: { account_number: '2671', account_name: 'Utgående moms OSS Tyskland', default_vat_treatment: null, oss_country: null, oss_vat_rate: null } },
+  },
   // Budgets (accounted#134): the amounts' dry run is the STABLE
   // upsert_budget_lines_preview, which answers a jsonb object.
   gnubok_create_budget: { args: { name: 'Budget 2027' }, rows: { budgets: { name: 'Prognos 1' } } },
@@ -1663,6 +1673,19 @@ const BRIDGE_TARGET_FIXTURES: Record<string, Fixture> = {
     args: { item_type: 'net_deduction_union', description: 'Fackavgift', amount: -350, valid_from: '2026-01-01' },
   },
   gnubok_update_employee_recurring_line: { args: { description: 'Fackavgift Unionen' } },
+  // A hand-entered bonus line on a draft run's payslip, given a new amount.
+  gnubok_update_payslip_line: {
+    args: { amount: 1500 },
+    rows: {
+      salary_line_items: {
+        item_type: 'bonus',
+        description: 'Bonus',
+        amount: 1000,
+        salary_run_employee_id: SOME_UUID,
+        salary_run_employee: { salary_run_id: SOME_UUID },
+      },
+    },
+  },
   // An SIE-imported kundfaktura verifikat (Dr 1510 100) registered as an
   // unpaid invoice: the number and the verifikat are unclaimed.
   gnubok_register_booked_invoice: {

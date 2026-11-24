@@ -45,6 +45,8 @@
  *     import): salary runs, invoice flows and the rest have their own door;
  *   - a verifikat whose bank side is not this row: several money ledgers, or
  *     a bank net other than the row's amount.
+ *   - a verifikat with fiktiv moms its replay would book on other accounts
+ *     (import VAT, domestic or 12 % reverse charge without a basis pair: #997).
  *
  * Learning never fails a link: every read or write error is logged and the
  * link stands. Existing links are not replayed (no backfill).
@@ -55,6 +57,7 @@ import {
   findTemplateByKey,
   insertOrUpdateTemplate,
   isRoutineVoucherText,
+  learnsOtherMoms,
   namesCounterparty,
   normalizeCounterpartyName,
   samePairButBankLedger,
@@ -63,7 +66,7 @@ import {
   type TemplateUpsertParams,
   type VerifikatTemplateShape,
 } from '@/lib/bookkeeping/counterparty-templates'
-import { PINNED_JURISDICTION, resolveAccountRole } from '@/lib/bookkeeping/account-roles'
+import { clearsAnInvoice } from '@/lib/bookkeeping/invoice-clearing'
 import { BANK_LEG_PLACEHOLDER, isCashLedger } from '@/lib/bookkeeping/bank-leg'
 import { ledgerLineAmountIn } from '@/lib/bookkeeping/ledger-line-amount'
 import { isSkatteverketPayment } from '@/lib/bookkeeping/skatteverket-payment'
@@ -104,20 +107,6 @@ export type LinkLearningResult =
 
 /** Verifikat a person or an import made: the ones a link may learn from. */
 const LEARNABLE_SOURCES = new Set(['manual', 'import'])
-
-/**
- * The receivables and payables ledgers: the account groups of the
- * company's kundfordringar and leverantörsskulder roles (151x and 244x in
- * BAS). An invoice's clearing, never a counterpart's habit.
- */
-const CLEARING_GROUPS = [
-  resolveAccountRole(PINNED_JURISDICTION, 'accounts_receivable'),
-  resolveAccountRole(PINNED_JURISDICTION, 'accounts_payable'),
-].map((account) => account.slice(0, 3))
-
-function isClearingAccount(account: string): boolean {
-  return account.length === 4 && CLEARING_GROUPS.some((group) => account.startsWith(group))
-}
 
 /** A ledger money moves on: 19xx, or a company card's ledger. */
 function isMoneyAccount(account: string): boolean {
@@ -280,21 +269,18 @@ async function teach(
     // A template already holding this shape is the earlier occurrence; one
     // holding another is the person's or an earlier booking's, and the
     // matcher never overrides it.
-    // The same pair too, so insertOrUpdateTemplate counts it and never reads
-    // it as a correction.
+    // The same pair and the same moms too, so insertOrUpdateTemplate counts
+    // it and never reads it as a correction.
+    // The stored pattern stays: the matcher's link only counts.
+    const counted = { ...upsertParams(link, 1, 'auto_learned'), linePattern: undefined }
     if (
       templateAccountSet(existing) !== link.shape.accountSet ||
-      !samePairButBankLedger(existing, link.shape.debitAccount, link.shape.creditAccount)
+      !samePairButBankLedger(existing, link.shape.debitAccount, link.shape.creditAccount) ||
+      learnsOtherMoms(existing, counted)
     ) {
       return { outcome: 'conflicts_template' }
     }
-    const written = await insertOrUpdateTemplate(
-      supabase,
-      companyId,
-      // The stored pattern stays: the matcher's link only counts.
-      { ...upsertParams(link, 1, 'auto_learned'), linePattern: undefined },
-      existing,
-    )
+    const written = await insertOrUpdateTemplate(supabase, companyId, counted, existing)
     return { outcome: written ? 'reapproved' : 'write_failed' }
   }
 
@@ -448,7 +434,7 @@ function shapeOfLink(
   tx: LinkTxRow,
   lines: LineRow[],
 ): { ok: true; shape: VerifikatTemplateShape } | { ok: false; reason: LinkLearningSkip } {
-  if (lines.some((line) => isClearingAccount(line.account_number))) return { ok: false, reason: 'clearing_account' }
+  if (clearsAnInvoice(lines.map((line) => line.account_number))) return { ok: false, reason: 'clearing_account' }
 
   const money = lines.filter((line) => isMoneyAccount(line.account_number))
   if (new Set(money.map((line) => line.account_number)).size !== 1) return { ok: false, reason: 'bank_leg_mismatch' }

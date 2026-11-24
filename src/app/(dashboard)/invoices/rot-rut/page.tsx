@@ -175,14 +175,16 @@ export default function RotRutOverviewPage() {
     rut: 0,
     gron_teknik: 0,
   })
-  // Paid grön teknik invoices still inside their request window: shown apart
-  // from "Redo att begäras" (see readyTileOf).
-  const [gronTeknikOpen, setGronTeknikOpen] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   // 'initial': nothing loaded yet, the list says so in place of the rows.
   // 'refresh': a reload failed behind the rows already on screen, which stay.
   const [loadError, setLoadError] = useState<{ kind: 'initial' | 'refresh'; description?: string } | null>(null)
   const hasLoaded = useRef(false)
+  // The figures line waits for the first answer: zeros before it read as a
+  // real "nothing at Skatteverket, nothing ready".
+  const [loaded, setLoaded] = useState(false)
+  // A count of invoices ready to request could not be read: never shown as 0.
+  const [eligibleFailed, setEligibleFailed] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [linkingRequest, setLinkingRequest] = useState<PayoutRequest | null>(null)
@@ -220,18 +222,33 @@ export default function RotRutOverviewPage() {
         return
       }
       const body = (await requestsRes.json()) as { data: PayoutRequest[] }
-      const rot = rotRes.ok ? ((await rotRes.json()) as { data: { eligible: unknown[] } }).data.eligible.length : 0
-      const rut = rutRes.ok ? ((await rutRes.json()) as { data: { eligible: unknown[] } }).data.eligible.length : 0
-      const gronTeknikEligible = gronTeknikRes.ok
-        ? ((await gronTeknikRes.json()) as { data: { eligible: Array<{ past_deadline?: boolean }> } }).data
-            .eligible
-        : []
+      // null: that list could not be read (a failed answer or a body that
+      // will not parse), which the page says instead of counting it as 0.
+      const readEligible = async (res: Response): Promise<unknown[] | null> => {
+        if (!res.ok) return null
+        try {
+          const json = (await res.json()) as { data?: { eligible?: unknown[] } }
+          return Array.isArray(json?.data?.eligible) ? json.data.eligible : null
+        } catch {
+          // A body that will not parse is a failed read: null, said on the page.
+          return null
+        }
+      }
+      const [rotEligible, rutEligible, gronTeknikRead] = await Promise.all([
+        readEligible(rotRes),
+        readEligible(rutRes),
+        readEligible(gronTeknikRes),
+      ])
+      const rot = rotEligible?.length ?? 0
+      const rut = rutEligible?.length ?? 0
+      const gronTeknik = gronTeknikRead?.length ?? 0
       if (sequence !== loadSequence.current) return
       hasLoaded.current = true
+      setLoaded(true)
       setLoadError(null)
+      setEligibleFailed(rotEligible === null || rutEligible === null || gronTeknikRead === null)
       setRequests(body.data)
-      setEligibleCounts({ rot, rut, gron_teknik: gronTeknikEligible.length })
-      setGronTeknikOpen(gronTeknikEligible.filter((candidate) => !candidate.past_deadline).length)
+      setEligibleCounts({ rot, rut, gron_teknik: gronTeknik })
     } catch (error) {
       if (sequence !== loadSequence.current) return
       setLoadError({
@@ -429,7 +446,7 @@ export default function RotRutOverviewPage() {
     }
   }
 
-  const readyTile = readyTileOf({ rot: eligibleCounts.rot, rut: eligibleCounts.rut, gronTeknikOpen })
+  const readyTile = readyTileOf(eligibleCounts)
 
   return (
     <div className="space-y-8">
@@ -446,7 +463,6 @@ export default function RotRutOverviewPage() {
               <p>
                 <span className="font-medium">{t('tile_awaiting')}:</span> {t('tile_awaiting_help')}
               </p>
-              <p>{t('gron_teknik_help')}</p>
             </div>
           </HelpPopover>
         }
@@ -473,7 +489,13 @@ export default function RotRutOverviewPage() {
               {!importing && <ArrowUpTrayIcon className="h-4 w-4" />}
               {t('import_beslut')}
             </Button>
-            <Button size="toolbar" type="button" onClick={openNewRequest} disabled={!canWrite}>
+            <Button
+              size="toolbar"
+              type="button"
+              onClick={openNewRequest}
+              disabled={!canWrite}
+              title={!canWrite ? t('viewer_disabled_tooltip') : undefined}
+            >
               <PlusIcon className="h-4 w-4" />
               {t('new_request')}
             </Button>
@@ -481,50 +503,48 @@ export default function RotRutOverviewPage() {
         }
       />
 
-      {loadError?.kind === 'refresh' && (
+      {loadError?.kind === 'refresh' ? (
         <AttnLine action={{ label: tCommon('retry'), onClick: () => void load() }}>{tCommon('refresh_failed')}</AttnLine>
-      )}
+      ) : loaded && eligibleFailed ? (
+        <AttnLine action={{ label: tCommon('retry'), onClick: () => void load() }}>{t('eligible_load_failed')}</AttnLine>
+      ) : null}
 
       {/* Summary line: what sits at Skatteverket, what waits, what came back
           refused. One facts line on the panel, not a strip of number cards
           (Stil v3: no KPI stat strips); the static definitions live behind
           the "?" (convention 7), only figures stay here. */}
-      <dl className="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-[13px]">
-        <div className="flex items-baseline gap-1.5">
-          <dt className="text-muted-foreground">{t('tile_at_skv')}</dt>
-          <dd className="font-medium tabular-nums text-strong">{formatCurrency(summary.atSkv)}</dd>
-        </div>
-        <div className="flex items-baseline gap-1.5">
-          <dt className="text-muted-foreground">{t('tile_awaiting')}</dt>
-          <dd className="font-medium tabular-nums text-strong">{summary.awaitingDecision}</dd>
-        </div>
-        <div className="flex items-baseline gap-1.5">
-          <dt className="text-muted-foreground">{t('tile_refused')}</dt>
-          <dd className="font-medium tabular-nums text-strong">{formatCurrency(summary.refusedOpen)}</dd>
-          <dd className="text-xs text-muted-foreground">
-            {t('tile_refused_help', { count: summary.refusedOpenCount })}
-          </dd>
-        </div>
-        <div className="flex items-baseline gap-1.5">
-          <dt className="text-muted-foreground">{t('tile_ready')}</dt>
-          <dd className="font-medium tabular-nums text-strong">{readyTile.ready}</dd>
-          {readyTile.parts.length > 0 && (
+      {loaded && (
+        <dl className="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-[13px]">
+          <div className="flex items-baseline gap-1.5">
+            <dt className="text-muted-foreground">{t('tile_at_skv')}</dt>
+            <dd className="font-medium tabular-nums text-strong">{formatCurrency(summary.atSkv)}</dd>
+          </div>
+          <div className="flex items-baseline gap-1.5">
+            <dt className="text-muted-foreground">{t('tile_awaiting')}</dt>
+            <dd className="font-medium tabular-nums text-strong">{summary.awaitingDecision}</dd>
+          </div>
+          <div className="flex items-baseline gap-1.5">
+            <dt className="text-muted-foreground">{t('tile_refused')}</dt>
+            <dd className="font-medium tabular-nums text-strong">{formatCurrency(summary.refusedOpen)}</dd>
             <dd className="text-xs text-muted-foreground">
-              {readyTile.parts
-                .map((part) => `${part.count} ${DEDUCTION_TYPE_LABELS[part.kind].short}`)
-                .join(' · ')}
+              {t('tile_refused_help', { count: summary.refusedOpenCount })}
             </dd>
+          </div>
+          {!eligibleFailed && (
+            <div className="flex items-baseline gap-1.5">
+              <dt className="text-muted-foreground">{t('tile_ready')}</dt>
+              <dd className="font-medium tabular-nums text-strong">{readyTile.ready}</dd>
+              {readyTile.parts.length > 0 && (
+                <dd className="text-xs text-muted-foreground">
+                  {readyTile.parts
+                    .map((part) => `${part.count} ${DEDUCTION_TYPE_LABELS[part.kind].short}`)
+                    .join(' · ')}
+                </dd>
+              )}
+            </div>
           )}
-          {/* Grön teknik is requested in Skatteverkets e-tjänst, which we
-              cannot see: never "ready", only what is still inside its
-              request window (the "?" says why). */}
-          {readyTile.gronTeknikOpen > 0 && (
-            <dd className="text-xs text-muted-foreground">
-              {t('tile_ready_gron_teknik', { count: readyTile.gronTeknikOpen })}
-            </dd>
-          )}
-        </div>
-      </dl>
+        </dl>
+      )}
 
       {ENABLED_EXTENSION_IDS.has('arcim-migration') && <MigratedDeductionPointer />}
 

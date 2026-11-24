@@ -3,7 +3,7 @@
  * never a "zero it" card for a company whose payroll lives elsewhere.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { createQueuedMockSupabase } from '@/tests/helpers'
+import { createQueuedMockSupabase, createTableMockSupabase } from '@/tests/helpers'
 import { generateVacationLiability } from '@/lib/reports/vacation-liability'
 import { generateTrialBalance } from '@/lib/reports/trial-balance'
 import {
@@ -156,6 +156,283 @@ describe('assessVacationLiability', () => {
   })
 })
 
+// A reviewer must be able to trace the target per employee and see when a
+// figure rests on an estimate or a part-year employment.
+describe('assessVacationLiability: the workings behind the target', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function employee(over: Record<string, unknown>) {
+    return {
+      employeeId: 'e-1',
+      employeeName: 'Anna Andersson',
+      employmentStart: '2020-01-01',
+      vacationRule: 'procentregeln',
+      vacationDaysEntitled: 25,
+      liabilityDays: 25,
+      dayValue: 2400,
+      dayValueEstimated: false,
+      earningPay: 0,
+      variablePay: 0,
+      computedLiability: 60000,
+      liabilityChangeAccount: '7290',
+      ...over,
+    }
+  }
+
+  function report(rows: Array<Record<string, unknown>>) {
+    const computedLiability = rows.reduce((sum, row) => sum + (row.computedLiability as number), 0)
+    return { rows, totals: { computedLiability }, vacationYearStart: '2026-01-01' }
+  }
+
+  async function assess(rows: Array<Record<string, unknown>>, employeeDetail = true) {
+    vi.mocked(generateVacationLiability).mockResolvedValue(report(rows) as never)
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(40000) as never)
+    const result = await assessVacationLiability({} as never, 'c1', 'p1', { ...OPTIONS, employeeDetail })
+    return result.proposal!
+  }
+
+  function amounts(proposal: Awaited<ReturnType<typeof assess>>) {
+    return {
+      amount: proposal.amount,
+      lines: proposal.lines.map((l) => [l.account_number, l.debit_amount, l.credit_amount]),
+    }
+  }
+
+  const UNCHANGED = {
+    amount: 26284,
+    lines: [
+      ['7290', 20000, 0],
+      ['2920', 0, 20000],
+      ['7519', 6284, 0],
+      ['2940', 0, 6284],
+    ],
+  }
+
+  it('returns each employee: entitled and valued days, day value, estimate flag, employment start and liability', async () => {
+    const proposal = await assess([
+      employee({ liabilityDays: 20, earningPay: 8000, computedLiability: 56000 }),
+      employee({
+        employeeId: 'e-2',
+        employeeName: 'Bo Berg',
+        employmentStart: '2018-03-01',
+        vacationRule: 'sammaloneregeln',
+        liabilityDays: 4,
+        dayValue: 900,
+        variablePay: 400,
+        computedLiability: 4000,
+      }),
+    ])
+
+    expect(proposal.computation).toMatchObject({
+      current_2920: 40000,
+      closing_target: 60000,
+      delta: 20000,
+      vacation_year_start: '2026-01-01',
+      employees: [
+        {
+          employee_id: 'e-1',
+          employee_name: 'Anna Andersson',
+          employment_start: '2020-01-01',
+          vacation_rule: 'procentregeln',
+          entitled_days: 25,
+          valued_days: 20,
+          day_value: 2400,
+          day_value_estimated: false,
+          earning_pay: 8000,
+          variable_pay: 0,
+          liability: 56000,
+        },
+        {
+          employee_id: 'e-2',
+          employee_name: 'Bo Berg',
+          employment_start: '2018-03-01',
+          vacation_rule: 'sammaloneregeln',
+          entitled_days: 25,
+          valued_days: 4,
+          day_value: 900,
+          day_value_estimated: false,
+          earning_pay: 0,
+          variable_pay: 400,
+          liability: 4000,
+        },
+      ],
+    })
+    expect(proposal.warnings).toEqual([])
+    expect(amounts(proposal)).toEqual(UNCHANGED)
+  })
+
+  it('warns when a day value is estimated from today\'s pay, and books the same amounts', async () => {
+    const proposal = await assess([employee({ dayValueEstimated: true })])
+
+    expect(proposal.warnings).toHaveLength(1)
+    expect(proposal.warnings[0]).toContain('Dagvärdet är uppskattat från dagens lön för Anna Andersson')
+    expect(proposal.warnings[0]).toContain('Kontrollera semesterlöneskulden innan du godkänner')
+    expect(amounts(proposal)).toEqual(UNCHANGED)
+  })
+
+  it('warns when an employment started inside the intjänandeår, and books the same amounts', async () => {
+    const proposal = await assess([employee({ employmentStart: '2026-09-01' })])
+
+    expect(proposal.warnings).toHaveLength(1)
+    expect(proposal.warnings[0]).toContain('Anställningen började under intjänandeåret för Anna Andersson (2026-09-01)')
+    expect(proposal.warnings[0]).toContain('innan du godkänner')
+    expect(amounts(proposal)).toEqual(UNCHANGED)
+  })
+
+  it('does not warn for an employment that started on the intjänandeår\'s first day', async () => {
+    const proposal = await assess([employee({ employmentStart: '2026-01-01' })])
+
+    expect(proposal.warnings).toEqual([])
+  })
+
+  // Names, employment start, day value and pay are payroll data: a caller
+  // without employee detail gets the totals and counted warnings only.
+  it('leaves out the employees and names nobody without employee detail', async () => {
+    const proposal = await assess(
+      [
+        employee({ dayValueEstimated: true, employmentStart: '2026-09-01', computedLiability: 30000 }),
+        employee({ employeeId: 'e-2', employeeName: 'Bo Berg', dayValueEstimated: true, computedLiability: 30000 }),
+      ],
+      false,
+    )
+
+    expect(proposal.computation).not.toHaveProperty('employees')
+    expect(proposal.computation).toMatchObject({ current_2920: 40000, closing_target: 60000, employee_rows: 2 })
+    expect(proposal.warnings).toHaveLength(2)
+    expect(proposal.warnings[0]).toContain('Dagvärdet är uppskattat från dagens lön för 2 anställda:')
+    expect(proposal.warnings[1]).toContain('Anställningen började under intjänandeåret för 1 anställd:')
+    const text = proposal.warnings.join(' ')
+    expect(text).not.toContain('Anna Andersson')
+    expect(text).not.toContain('Bo Berg')
+    expect(text).not.toContain('2026-09-01')
+    expect(amounts(proposal)).toEqual(UNCHANGED)
+  })
+
+  it('is off unless asked for', async () => {
+    vi.mocked(generateVacationLiability).mockResolvedValue(report([employee({})]) as never)
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(40000) as never)
+
+    const result = await assessVacationLiability({} as never, 'c1', 'p1', OPTIONS)
+
+    expect(result.proposal!.computation).not.toHaveProperty('employees')
+  })
+})
+
+// The real vacation report and valuation over a per-table mock; only the
+// trial balance (what 2920 holds) is stubbed.
+describe('assessVacationLiability: procentregeln hires during a calendar intjänandeår (Semesterlagen 7 §, 16 b §)', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    const actual = await vi.importActual<typeof import('@/lib/reports/vacation-liability')>('@/lib/reports/vacation-liability')
+    vi.mocked(generateVacationLiability).mockImplementation(actual.generateVacationLiability)
+  })
+
+  const hire = (id: string) => ({
+    id,
+    first_name: id,
+    last_name: 'Hire',
+    personnummer_last4: '0000',
+    personnummer: null,
+    employment_type: 'employee',
+    personnel_category: 'tjansteman',
+    default_dimensions: null,
+    vacation_rule: 'procentregeln',
+    vacation_days_per_year: 25,
+    vacation_days_saved: 0,
+    vacation_pay_rate: null,
+    semestertillagg_rate: 0.0043,
+    salary_type: 'monthly',
+    monthly_salary: 35000,
+    employment_degree: 100,
+    hourly_rate: null,
+    hours_per_week: 40,
+    workdays_per_week: 5,
+    employment_start: '2026-06-01',
+    employment_end: null,
+  })
+
+  /** A booked payslip whose procentregeln step carries 35 000 kr of semesterunderlag, paid the 25th. */
+  const payslip = (employeeId: string, month: number) => {
+    const mm = String(month).padStart(2, '0')
+    return {
+      employee_id: employeeId,
+      calculation_breakdown: { steps: [{ label: 'Semesteravsättning (procentregeln 12 %)', input: { vacation_basis: 35000 } }] },
+      salary_run: { id: `run-${mm}`, payment_date: `2026-${mm}-25`, status: 'booked' },
+    }
+  }
+  const JUNE_TO_DECEMBER = [6, 7, 8, 9, 10, 11, 12]
+
+  function company(payslips: ReturnType<typeof payslip>[]) {
+    const { supabase } = createTableMockSupabase({
+      company_settings: { data: { salary_vacation_year_basis: 'calendar', salary_calculation_policy: {} } },
+      vacation_year_closures: { data: [] },
+      employees: { data: [hire('e-1'), hire('e-2')] },
+      employee_vacation_balances: { data: [] },
+      employee_opening_balances: { data: [] },
+      vacation_liability_remeasurements: { data: [] },
+      // The procentregeln payslips; no vacation was taken and the booked
+      // specification is not what the target reads.
+      salary_run_employees: (chain: Array<{ method: string; args: unknown[] }>) => {
+        const select = String(chain.find((c) => c.method === 'select')?.args[0] ?? '')
+        return { data: select.includes('calculation_breakdown') ? payslips : [] }
+      },
+    })
+    return supabase as never
+  }
+
+  const bothHires = () => [...JUNE_TO_DECEMBER.map((m) => payslip('e-1', m)), ...JUNE_TO_DECEMBER.map((m) => payslip('e-2', m))]
+
+  it('targets 15 days each at 12 % of seven months\' pay: 58 800 kr, and proposes the difference to 2920', async () => {
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(50000) as never)
+
+    const { proposal } = await assessVacationLiability(company(bothHires()), 'c1', 'p1', { ...OPTIONS, employeeDetail: true })
+
+    expect(proposal!.computation).toMatchObject({ current_2920: 50000, closing_target: 58800, delta: 8800 })
+    const employees = (proposal!.computation as { employees: Array<Record<string, unknown>> }).employees
+    expect(employees).toHaveLength(2)
+    for (const employee of employees) {
+      expect(employee).toMatchObject({
+        employment_start: '2026-06-01',
+        entitled_days: 15,
+        valued_days: 15,
+        day_value: 1960,
+        day_value_estimated: false,
+        earning_pay: 0,
+        liability: 29400,
+      })
+    }
+    expect(proposal!.lines.find((l) => l.account_number === '2920')).toMatchObject({ credit_amount: 8800, debit_amount: 0 })
+    expect(proposal!.warnings.some((w) => w.includes('uppskattat'))).toBe(false)
+  })
+
+  it('proposes nothing when 2920 holds what the runs accrued (7 x 4 200 kr each); the flat 25 days proposed +42 000 kr', async () => {
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(58800) as never)
+
+    const { proposal, notice } = await assessVacationLiability(company(bothHires()), 'c1', 'p1', OPTIONS)
+
+    expect(proposal).toBeNull()
+    expect(notice).toBeNull()
+  })
+
+  it('an employee whose payslips are missing still gets today\'s-pay estimate, flagged with the warning', async () => {
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(50000) as never)
+    const withoutAugust = bothHires().filter((p) => !(p.employee_id === 'e-2' && p.salary_run.payment_date === '2026-08-25'))
+
+    const { proposal } = await assessVacationLiability(company(withoutAugust), 'c1', 'p1', { ...OPTIONS, employeeDetail: true })
+
+    const employees = (proposal!.computation as { employees: Array<Record<string, unknown>> }).employees
+    expect(employees.find((e) => e.employee_id === 'e-1')).toMatchObject({ day_value_estimated: false, liability: 29400 })
+    // 15 days (not 25) at 35 000 x 12 x 12 % / 25.
+    expect(employees.find((e) => e.employee_id === 'e-2')).toMatchObject({ day_value_estimated: true, day_value: 2016, liability: 30240 })
+    expect(proposal!.computation).toMatchObject({ closing_target: 59640 })
+    expect(proposal!.warnings).toContain(
+      'Dagvärdet är uppskattat från dagens lön för e-2 Hire: lönebesked för intjänandeåret saknas i Accounted. Kontrollera semesterlöneskulden innan du godkänner.',
+    )
+  })
+})
+
 describe('proposeVacationLiabilityChange', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -202,5 +479,18 @@ describe('buildAccrualsProposal', () => {
 
     expect(snapshot.proposals).toHaveLength(1)
     expect(snapshot.notices).toEqual([])
+    expect(snapshot.proposals[0].computation).not.toHaveProperty('employees')
+  })
+
+  it('lists the employees when asked for employee detail', async () => {
+    mock.enqueue({
+      data: { id: 'p1', name: '2026', period_start: '2026-01-01', period_end: '2026-12-31' },
+    })
+    vi.mocked(generateVacationLiability).mockResolvedValue(vacationReport(1, 100000) as never)
+    vi.mocked(generateTrialBalance).mockResolvedValue(trialBalanceWith2920(80000) as never)
+
+    const snapshot = await buildAccrualsProposal(mock.supabase as never, 'c1', 'p1', { employeeDetail: true })
+
+    expect(snapshot.proposals[0].computation).toMatchObject({ employees: [expect.objectContaining({ employee_id: 'e-0' })] })
   })
 })

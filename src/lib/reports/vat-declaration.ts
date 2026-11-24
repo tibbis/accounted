@@ -6,15 +6,17 @@ import type {
   VatRevenueAccountWithoutRuta,
   VatAccountWithoutRuta,
 } from '@/types'
-import { ORE_ROUNDING_ACCOUNT, roundOre } from '@/lib/money'
+import { multiplyOre, ORE_ROUNDING_ACCOUNT, roundOre } from '@/lib/money'
 import { VAT_ACCOUNT_TABLE } from '@/lib/vat/moms-box-mapping'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import type { VatCheckAccountTotals } from './vat-declaration-checks'
 import { rcBasisTotalsByRate } from './vat-filing-gate'
 import { fetchDynamicVatAccounts, type DynamicVatAccounts } from './vat-revenue-accounts'
 import { createLogger } from '@/lib/logger'
+import { codedRefusal } from '@/lib/errors/refusal'
 import { calculatePeriodDates, fiscalPeriodForVatYear } from './period-dates'
 import { todayIsoStockholm } from '@/lib/dates/iso'
+import { isInterimBalanceAccount } from '@/lib/bookkeeping/accruals/account-suggestions'
 
 const log = createLogger('reports/vat-declaration')
 
@@ -64,8 +66,8 @@ export const VAT_ACCOUNTS = Object.keys(ACCOUNT_RUTA)
 
 /**
  * 26xx output VAT accounts feeding rutor 10/11/12, 30/31/32 and 60/61/62.
- * Derived from ACCOUNT_RUTA so the KPI vatLiability widget can never drift
- * from the momsdeklaration (ruta 49) calculation.
+ * Derived from ACCOUNT_RUTA so the KPI vatLiability widget reads the same
+ * accounts as the momsdeklaration.
  */
 export const VAT_OUTPUT_ACCOUNTS = Object.entries(ACCOUNT_RUTA)
   .filter(([account, mapping]) => account.startsWith('26') && mapping.side === 'credit')
@@ -105,17 +107,44 @@ export const RC_INPUT_VAT_ACCOUNTS = ['2645', '2647'] as const
  * can be extended or shortened (up to 18 months for a first/changed year per
  * BFL 3 kap 3 §), so a calendar Jan-Dec span would silently drop part of an
  * extended year (e.g. a first year 2025-07-03 → 2026-12-31). When the caller
- * supplies the fiscal period we therefore use its actual bounds. If the period
- * can't be resolved we fall back to the calendar span so behaviour degrades
- * gracefully instead of erroring.
+ * supplies the fiscal period we therefore use its actual bounds, and otherwise
+ * the recorded räkenskapsår that ends in `year`, the year that names the
+ * period (the deadline calendar's recorded years, fiscalYearsEndingIn).
  *
- * `source` names the branch that answered. The yearly fallback is silent on
- * purpose (a calendar-FY company with no fiscal_periods row still works), so a
- * caller that puts the range on the wire must be able to tell a resolved
- * räkenskapsår from a guessed Jan-Dec: for a broken fiscal year the guess puts
- * both the figures and the Skatteverket redovisningsperiod on the wrong period.
+ * When the company has recorded räkenskapsår and none ends in `year`, there is
+ * no helårsmoms period `year`, and this refuses (VAT_REPORT_FISCAL_YEAR_NOT_FOUND,
+ * naming the years that exist) instead of computing January to December: an
+ * extended first year starting mid-year once got a period over the calendar
+ * year it started in, which the next year's declaration then counted again.
+ * Only a company with no räkenskapsår recorded at all still gets the calendar
+ * year: it has no verifikat (each one belongs to a fiscal period), so the
+ * figures are zero whatever the range.
+ *
+ * `source` names the branch that answered, so a caller that puts the range on
+ * the wire can tell a resolved räkenskapsår from that calendar year.
  */
 export type VatPeriodSource = 'fiscal_period' | 'calendar' | 'calendar_fallback'
+
+/** The refusal for a helårsmoms year no recorded räkenskapsår ends in. */
+function noFiscalYearEndsIn(
+  year: number,
+  recorded: readonly { period_start: string; period_end: string }[],
+): Error {
+  const named = recorded
+    .map((fy) => `${fy.period_start}..${fy.period_end} (year ${fy.period_end.slice(0, 4)})`)
+    .join(', ')
+  return codedRefusal(
+    'VAT_REPORT_FISCAL_YEAR_NOT_FOUND',
+    `No räkenskapsår ends in ${year}, so there is no helårsmoms period ${year}: helårsmoms is declared per ` +
+      `räkenskapsår (SFL 26 kap. 10-11 §§) and named by the year it ends. The company's räkenskapsår: ${named}.`,
+    {
+      description:
+        'Pass year = the year one of the company\'s räkenskapsår ends (period_type yearly, period 1). ' +
+        'gnubok_list_fiscal_periods lists them.',
+      tool: 'gnubok_list_fiscal_periods',
+    },
+  )
+}
 
 export async function resolvePeriodDates(
   supabase: SupabaseClient,
@@ -136,33 +165,34 @@ export async function resolvePeriodDates(
       if (fp?.period_start && fp?.period_end) {
         return { start: fp.period_start, end: fp.period_end, source: 'fiscal_period' }
       }
-    } else {
-      // No explicit fiscal period: resolve the räkenskapsår ending in `year`
-      // instead of assuming a calendar FY. Helårsmoms is filed per
-      // räkenskapsår (SFL 26 kap 10-11 §§), so for a broken fiscal year the
-      // calendar-year assumption would put both the redovisningsperiod and
-      // the figures on the wrong period. For calendar-FY companies this
-      // resolves to Jan-Dec of `year`, identical to the arithmetic fallback.
-      // The year the picker names (fiscalPeriodForVatYear); one that has not
-      // started only when nothing else ends in `year`.
-      const { data: endingInYear } = await supabase
-        .from('fiscal_periods')
-        .select('period_start, period_end')
-        .eq('company_id', companyId)
-        .gte('period_end', `${year}-01-01`)
-        .lte('period_end', `${year}-12-31`)
-        .order('period_end', { ascending: false })
-      const candidates = (endingInYear ?? []) as { period_start: string; period_end: string }[]
-      const fp = fiscalPeriodForVatYear(candidates, year, todayIsoStockholm()) ?? candidates[0]
-      if (fp?.period_start && fp?.period_end) {
-        return { start: fp.period_start, end: fp.period_end, source: 'fiscal_period' }
-      }
     }
+    // No fiscal period given (or not one of the company's): the räkenskapsår
+    // ending in `year`, never an assumed calendar FY. Helårsmoms is filed per
+    // räkenskapsår (SFL 26 kap 10-11 §§), so for a broken or extended year the
+    // calendar-year assumption would put both the redovisningsperiod and the
+    // figures on the wrong period. For calendar-FY companies this is Jan-Dec
+    // of `year`. The year the picker names (fiscalPeriodForVatYear); one that
+    // has not started only when nothing else ends in `year`.
+    const { data: years, error: yearsError } = await supabase
+      .from('fiscal_periods')
+      .select('period_start, period_end')
+      .eq('company_id', companyId)
+      .order('period_start', { ascending: true })
+    if (yearsError) throw new Error(`fiscal_periods read failed: ${yearsError.message}`)
+    const recorded = (years ?? []) as { period_start: string; period_end: string }[]
+    const candidates = recorded
+      .filter((fy) => fy.period_end?.startsWith(`${year}-`))
+      .sort((a, b) => (a.period_end < b.period_end ? 1 : a.period_end > b.period_end ? -1 : 0))
+    const fp = fiscalPeriodForVatYear(candidates, year, todayIsoStockholm()) ?? candidates[0]
+    if (fp?.period_start && fp?.period_end) {
+      return { start: fp.period_start, end: fp.period_end, source: 'fiscal_period' }
+    }
+    if (recorded.length > 0) throw noFiscalYearEndsIn(year, recorded)
   }
   return {
     ...calculatePeriodDates(periodType, year, period),
     // Monthly and quarterly ARE calendar periods by law; only the yearly
-    // branch landing here means a räkenskapsår was asked for and not found.
+    // branch landing here means the company has no räkenskapsår recorded.
     source: periodType === 'yearly' ? 'calendar_fallback' : 'calendar',
   }
 }
@@ -303,6 +333,11 @@ interface VatTotalsRpcPayload {
  * The shapes cannot tell a settlement from a business verifikat that happens
  * to touch 2650 (a supplier invoice with input VAT booked against 2650, say).
  * No rule separates that tail; it needs an explicit per-entry override.
+ *
+ * Periodiseringar on customer invoices (crm#1919): the totals of a revenue
+ * account hold the sale an invoice deferred to 29xx or accrued on 17xx on
+ * the invoice's date, and the months of its schedules net to nothing. See
+ * fetchInvoiceDeferralShares.
  */
 export async function fetchVatAccountTotals(
   supabase: SupabaseClient,
@@ -353,6 +388,126 @@ export async function fetchVatAccountTotals(
     sourceTypeCounts: payload.source_type_counts ?? {},
     countedOpeningBalances: payload.counted_opening_balances ?? [],
   }
+}
+
+/**
+ * Per verifikat, the revenue accounts its interim lines read as, and at which
+ * part: `share` of its 29xx lines, `accrued_share` of its 17xx lines (none
+ * when absent: a database before 20261122200000 answers 29xx parts only).
+ */
+export type InvoiceDeferralShares = ReadonlyMap<
+  string,
+  ReadonlyArray<{ target_account: string; share: number; accrued_share?: number }>
+>
+
+/**
+ * Which verifikat's interim lines the momsdeklaration reads as a sale, and on
+ * which revenue account (crm#1919). A periodiserad invoice line credits an
+ * interim account instead of its revenue account, with its whole moms on
+ * 26xx the same day: 29xx for a förutbetald intäkt, which the schedule
+ * releases to the revenue account in the months after, and 17xx for an
+ * upplupen intäkt, whose months before the invoice credited the revenue
+ * account already; neither month carries moms. The beskattningsunderlag is
+ * the ersättning (ML 2023:200 8 kap. 2 §) and ruta 05 is the underlag of the
+ * moms in rutorna 10 to 12, so the sale is reported in the period that
+ * carries its moms: the invoice's (7 kap. 14 §, the invoice date under
+ * faktureringsmetoden).
+ *
+ * The SQL decides (vat_invoice_deferral_shares, migrations 20261122140000
+ * and 20261122200000), for a periodisering whose line carries Swedish moms:
+ * every interim line of the invoice's verifikat and its kreditfaktura (at the
+ * invoice's parts), of each month of its schedules (whole, on its schedule's
+ * revenue account), of the months of a manual periodisering spread out of
+ * what a rättelse added to the invoice's lines of the plan's interim class
+ * (up to that part) and of every storno and rättelse down from any of them
+ * is read as the sale, with its own sign. So a month (Dr 29xx or 17xx / Cr
+ * the revenue account) nets to nothing, and a rättelse that moves the
+ * periodisering to another account of its class still reads it. The parts
+ * are per interim class, each taken of what the invoice booked on that
+ * class, so a rättelse of one row of an invoice that both defers and accrues
+ * moves only that row's sale; a month's part reads its lines of both.
+ * The figure and the drill-down apply it in SQL; a fold over one verifikat's
+ * own lines (the changes to a filed period) reads it here and applies it with
+ * readDeferredSaleLines.
+ *
+ * A database that has not run the migration yet (the deploy window) has no
+ * such function: no verifikat reads that way there, so the answer is empty.
+ * One that has run 20261122140000 only answers no accrued_share: its 17xx
+ * lines read as they always did.
+ */
+export async function fetchInvoiceDeferralShares(
+  supabase: SupabaseClient,
+  companyId: string,
+): Promise<InvoiceDeferralShares> {
+  type ShareRow = {
+    journal_entry_id: string
+    target_account: string
+    share: number | string
+    accrued_share?: number | string | null
+  }
+  let rows: ShareRow[]
+  try {
+    // Paged in a total order: the answer covers the company's whole history,
+    // and PostgREST cuts an unpaged one at 1000 rows.
+    rows = await fetchAllRows<ShareRow>(({ from, to }) =>
+      supabase
+        .rpc('vat_invoice_deferral_shares', { p_company_id: companyId })
+        .order('journal_entry_id')
+        .order('target_account')
+        .range(from, to),
+    )
+  } catch (err) {
+    const code = (err as { code?: unknown }).code
+    if (code === 'PGRST202' || code === '42883') {
+      log.warn('vat_invoice_deferral_shares is not deployed yet: no deferred sale is read', { companyId })
+      return new Map()
+    }
+    throw new Error(`vat_invoice_deferral_shares failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  const shares = new Map<string, Array<{ target_account: string; share: number; accrued_share: number }>>()
+  for (const row of rows) {
+    const ofEntry = shares.get(row.journal_entry_id) ?? []
+    ofEntry.push({
+      target_account: row.target_account,
+      share: Number(row.share),
+      accrued_share: Number(row.accrued_share ?? 0),
+    })
+    shares.set(row.journal_entry_id, ofEntry)
+  }
+  return shares
+}
+
+/**
+ * One verifikat's lines as the momsdeklaration reads them: on a verifikat the
+ * SQL reads as booking a deferred or accrued sale (fetchInvoiceDeferralShares),
+ * every interim line (isInterimBalanceAccount: the SQL's ^(17|29)[0-9]{2}$)
+ * adds that sale on each revenue account at the part of its class, `share`
+ * for a 29xx line and `accrued_share` for a 17xx line, rounded to öre per
+ * line and part as the SQL's round(amount * share, 2) rounds it
+ * (multiplyOre). The interim line itself stays; it reaches no ruta.
+ */
+export function readDeferredSaleLines(
+  entryId: string,
+  lines: ReadonlyArray<{ account_number: string; debit_amount: number; credit_amount: number }>,
+  shares: InvoiceDeferralShares,
+): Array<{ account_number: string; debit_amount: number; credit_amount: number }> {
+  const read = [...lines]
+  const ofEntry = shares.get(entryId)
+  if (!ofEntry) return read
+  for (const line of lines) {
+    if (!isInterimBalanceAccount(line.account_number)) continue
+    const accrued = line.account_number.startsWith('17')
+    for (const part of ofEntry) {
+      const share = accrued ? (part.accrued_share ?? 0) : part.share
+      if (share === 0) continue
+      read.push({
+        account_number: part.target_account,
+        debit_amount: multiplyOre(Number(line.debit_amount) || 0, share),
+        credit_amount: multiplyOre(Number(line.credit_amount) || 0, share),
+      })
+    }
+  }
+  return read
 }
 
 /**

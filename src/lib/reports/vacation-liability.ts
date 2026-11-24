@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { remainingSavedDays, sumDays } from '@/lib/salary/vacation-category'
-import { getVacationYearBasis } from '@/lib/salary/vacation-ledger'
+import { computeEntitledDays, getVacationYearBasis } from '@/lib/salary/vacation-ledger'
 import { getVacationYearBounds, getVacationYearStart } from '@/lib/salary/vacation-year'
 import { paidDaysAsDaysOff, paidDaysPerDayOff, storedPaidDaysPerDayOff } from '@/lib/salary/vacation-net-days'
 import {
@@ -48,6 +48,8 @@ export interface VacationLiabilityRow {
   employeeName: string
   personnummerLast4: string
   vacationRule: string
+  /** First day of employment (employees.employment_start), which the computed liability's days start from. */
+  employmentStart: string
   /** Paid semesterdagar (Semesterlagen 4 §), as are taken, remaining and saved. */
   vacationDaysEntitled: number
   vacationDaysTaken: number
@@ -243,7 +245,7 @@ export async function generateBookedVacationSpec(
   const employees = await fetchAllRows(({ from, to }) =>
     supabase
       .from('employees')
-      .select('id, first_name, last_name, personnummer_last4, employment_type, personnel_category, vacation_rule, vacation_days_per_year, vacation_days_saved, workdays_per_week')
+      .select('id, first_name, last_name, personnummer_last4, employment_type, personnel_category, employment_start, vacation_rule, vacation_days_per_year, vacation_days_saved, workdays_per_week')
       .eq('company_id', companyId)
       .eq('is_active', true)
       .not('vacation_rule', 'in', '(none,semesterersattning)')
@@ -461,13 +463,14 @@ export async function generateBookedVacationSpec(
       daysSaved = sumDays(remainingSavedDays(ledger.saved_days ?? {}, ledger.saved_days_taken ?? {}))
     } else {
       daysTaken = accruals?.totalDaysTaken || 0
-      daysEntitled = emp.vacation_days_per_year
+      // The year's paid days per Semesterlagen 7 §, as the ledger derives them.
+      daysEntitled = computeEntitledDays(basis, vacationYearStart, emp.vacation_days_per_year, emp.employment_start)
       // With an opening row, remaining days start from the imported balance
       // rather than the full annual entitlement (the previous system already
       // consumed part of the year).
       daysRemaining = opening
         ? opening.paidDaysRemaining - daysTaken
-        : emp.vacation_days_per_year - daysTaken
+        : daysEntitled - daysTaken
       daysSaved = emp.vacation_days_saved + (opening?.savedDays || 0)
     }
 
@@ -481,6 +484,7 @@ export async function generateBookedVacationSpec(
       employeeName: `${emp.first_name} ${emp.last_name}`,
       personnummerLast4: emp.personnummer_last4,
       vacationRule: emp.vacation_rule,
+      employmentStart: emp.employment_start,
       vacationDaysEntitled: daysEntitled,
       vacationDaysTaken: daysTaken,
       vacationDaysRemaining: daysRemaining,

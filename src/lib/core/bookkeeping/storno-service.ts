@@ -16,16 +16,18 @@ import {
 import { linkBusinessEventToDraft, type BusinessEventLink } from '@/lib/bookkeeping/business-event-link'
 import { buildStornoLines } from '@/lib/bookkeeping/line-side'
 import { storedLineValues } from '@/lib/bookkeeping/line-balance'
+import { isKronorCurrency } from '@/lib/bookkeeping/currency-utils'
 import { roundOre } from '@/lib/money'
-import {
-  dimensionsBagKey,
-  normalizeLineDimensions,
-  type DimensionAliasInput,
-} from '@/lib/bookkeeping/dimension-resolver'
+import { dimensionsBagKey, normalizeLineDimensions } from '@/lib/bookkeeping/dimension-resolver'
 import { backfillStandardBASAccounts } from '@/lib/bookkeeping/account-backfill'
 import { assertLinesWithinUnattendedCeiling } from '@/lib/bookkeeping/unattended-ceiling'
 import { resolvePeriodStatusForDate } from '@/lib/core/bookkeeping/period-service'
-import { assertStornoTarget } from '@/lib/core/bookkeeping/storno-target'
+import {
+  assertStornoTarget,
+  isStandingStorno,
+  movedCorrectionDescription,
+  movedStornoDescription,
+} from '@/lib/core/bookkeeping/storno-target'
 import { negatesOriginal } from '@/lib/core/bookkeeping/correction-shape'
 import { postedLineAsInput } from '@/lib/core/bookkeeping/posted-line-input'
 import { findKontantmetodCarry } from '@/lib/bookkeeping/kontantmetod-carry-guard'
@@ -69,34 +71,123 @@ function netsToZeroPerAccount(lines: CreateJournalEntryLineInput[]): boolean {
   return Array.from(nets.values()).every((n) => Math.abs(n) < 0.005)
 }
 
+type StoredLine = ReturnType<typeof storedLineValues>[number]
+
+/** A line's account, amounts and dimensions bag, as stored. */
+const amountsKey = (l: StoredLine) =>
+  JSON.stringify([l.account_number, l.debit_amount, l.credit_amount, dimensionsBagKey(l.dimensions)])
+
+/** Whether a stored line is in kronor, whatever the case of its code. */
+const inKronor = (l: StoredLine) => isKronorCurrency(l.currency.trim())
+
+/**
+ * amountsKey plus the line's currency facts, as stored: a kronor line is
+ * just SEK (a rate or an amount in currency on it means nothing), a foreign
+ * one its code, amount in currency and rate.
+ */
+const fullKey = (l: StoredLine) =>
+  JSON.stringify([
+    amountsKey(l),
+    inKronor(l) ? 'SEK' : [l.currency.trim().toUpperCase(), l.amount_in_currency, l.exchange_rate],
+  ])
+
+/**
+ * Whether a proposed line names its currency. The dialog never does, and an
+ * amount in currency or a rate without a code is not a currency: the MCP
+ * doors turn a null into 0, so counting those would read every agent line as
+ * stated.
+ */
+const namesCurrency = (l: CreateJournalEntryLineInput) => !!l.currency?.trim()
+
+/** Both sides as journal_entry_lines stores them (storedLineValues). */
+function storedSides(proposed: CreateJournalEntryLineInput[], original: JournalEntryLine[]) {
+  const noAccountIds = new Map<string, string>()
+  return {
+    storedProposed: storedLineValues(proposed, noAccountIds),
+    storedOriginal: storedLineValues(original.map(postedLineAsInput), noAccountIds),
+  }
+}
+
 /**
  * True when proposed lines are the same multiset as the original lines
- * (account_number + debit + credit + dimensions bag). A rättelse must actually
- * change something, and a changed tag is a change: in a locked period storno
- * plus correction is the only way to fix a wrong project or cost center (the
- * retag path is open-period only). The bag is compared normalized, so key
- * order, '01' vs '1', the cost_center/project aliases and '' vs a missing key
- * are not differences.
+ * (account_number + debit + credit + dimensions bag, and the currency, amount
+ * in currency and rate). A rättelse must actually change something, and a
+ * changed tag is a change: in a locked period storno plus correction is the
+ * only way to fix a wrong project or cost center (the retag path is
+ * open-period only). So is a line's currency: a 1510 line without the
+ * invoice's currency cannot be linked to a foreign-currency invoice, and this
+ * is how it gets one (crm#2161).
+ *
+ * Both sides are compared as journal_entry_lines stores them
+ * (storedLineValues), so key order, '01' vs '1', the cost_center/project
+ * aliases, '' vs a missing key, an omitted SEK and numeric strings are not
+ * differences, nor is 'eur' against 'EUR' or a rate on a kronor line. A
+ * proposed line that names no currency (the correction dialog sends none)
+ * matches the original line whatever its currency: restating the amounts is
+ * not a request to drop the currency, and must not pass as a change that
+ * does.
  */
 function isIdenticalToOriginal(
   proposed: CreateJournalEntryLineInput[],
   original: JournalEntryLine[]
 ): boolean {
   if (proposed.length !== original.length) return false
-  const key = (line: DimensionAliasInput & { account_number: string }, d: number, c: number) =>
-    JSON.stringify([
-      line.account_number,
-      roundOre(d),
-      roundOre(c),
-      dimensionsBagKey(normalizeLineDimensions(line)),
-    ])
-  const proposedKeys = proposed
-    .map((l) => key(l, l.debit_amount || 0, l.credit_amount || 0))
-    .sort()
-  const originalKeys = original
-    .map((l) => key(l, Number(l.debit_amount) || 0, Number(l.credit_amount) || 0))
-    .sort()
-  return proposedKeys.every((k, i) => k === originalKeys[i])
+  const { storedProposed, storedOriginal: remaining } = storedSides(proposed, original)
+  // Lines that name a currency need their exact match; the rest take any
+  // original with the same amounts, so they are matched last.
+  const order = proposed
+    .map((line, index) => ({ index, explicit: namesCurrency(line) }))
+    .sort((a, b) => Number(b.explicit) - Number(a.explicit))
+  for (const { index, explicit } of order) {
+    const line = storedProposed[index]
+    const key = explicit ? fullKey : amountsKey
+    const match = remaining.findIndex((o) => key(o) === key(line))
+    if (match < 0) return false
+    remaining.splice(match, 1)
+  }
+  return true
+}
+
+/**
+ * True when a rättelse that changes only currency facts (every line keeps its
+ * account, amounts and dimensions) leaves a line's currency incomplete. Every
+ * such correction was refused as identical before crm#2161, so this one is
+ * strict:
+ *
+ * - A line that names no currency is stored in kronor (storedLineValues). If
+ *   an original line with the same account, amounts and dimensions is in a
+ *   foreign currency, that currency would go without anyone asking for it.
+ *   With several such lines it cannot be told which original a bare line
+ *   restates, so any foreign one refuses it.
+ * - A line in a foreign currency needs its amount in currency and its rate:
+ *   without them it cannot be linked to a foreign-currency invoice, which is
+ *   what a currency-only correction is for. A line restated exactly as its
+ *   original stored it is not judged (a revaluation leg carries amount 0).
+ *
+ * Refused before anything is written; the caller states the line's currency,
+ * amount in currency and rate, or currency 'SEK' to post it in kronor. A
+ * correction that changes amounts is not judged here.
+ */
+function incompleteCurrencyChange(
+  proposed: CreateJournalEntryLineInput[],
+  original: JournalEntryLine[]
+): boolean {
+  if (proposed.length !== original.length) return false
+  const { storedProposed, storedOriginal } = storedSides(proposed, original)
+  const proposedAmounts = storedProposed.map(amountsKey).sort()
+  const originalAmounts = storedOriginal.map(amountsKey).sort()
+  if (!proposedAmounts.every((k, i) => k === originalAmounts[i])) return false
+  const foreignAmounts = new Set(storedOriginal.filter((l) => !inKronor(l)).map(amountsKey))
+  const unrestated = [...storedOriginal]
+  return storedProposed.some((line, index) => {
+    if (!namesCurrency(proposed[index])) return foreignAmounts.has(amountsKey(line))
+    if (inKronor(line)) return false
+    if (line.amount_in_currency && Number(line.exchange_rate) > 0) return false
+    const restated = unrestated.findIndex((o) => fullKey(o) === fullKey(line))
+    if (restated < 0) return true
+    unrestated.splice(restated, 1)
+    return false
+  })
 }
 
 /**
@@ -199,8 +290,8 @@ async function resolveCorrectionPeriod(
 /**
  * Correct an existing posted journal entry using the storno method.
  *
- * The storno (reversal) is always created in the original entry's period and
- * date, so the original nets to zero where it was booked. The corrected entry
+ * The storno (reversal) is created in the original entry's period and date,
+ * so the original nets to zero where it was booked. The corrected entry
  * defaults to the original's date/period too, but `options.newEntryDate` /
  * `options.newFiscalPeriodId` let a caller re-book it elsewhere: used to move
  * a verifikation booked on the wrong year to its correct period (see
@@ -214,6 +305,15 @@ async function resolveCorrectionPeriod(
  * the original itself was booked the wrong way round: the storno already
  * reverses the original, so the same reversal again as the rättelse leaves
  * every account at minus the original (crm#1397).
+ *
+ * An original whose own date takes no write (its year closed or locked, or
+ * on or before the company lock date) is refused, unless
+ * `inFirstOpenPeriodWhenLocked` is set (the person's correction doors): then
+ * the storno and the corrected verifikat are rättelseposter dated in the
+ * first open, unlocked period after it (assertStornoTarget), their texts name
+ * the original's voucher and date, and nothing is written to the original or
+ * its year: it stays 'posted' with its bank rows, payments and underlag, and
+ * the links run from the new verifikat (reverses_id, correction_of_id).
  *
  * Returns: { reversal, corrected } - the two new entries created
  */
@@ -261,6 +361,14 @@ export async function correctEntry(
      * occurrence (unlearn-on-reversal, crm#1858).
      */
     keepLearnedTemplates?: boolean
+    /**
+     * The original's own date takes no write: book the storno and the
+     * corrected verifikat in the first open, unlocked period instead of
+     * refusing. Set by the person's correction doors (the app, v1 and MCP);
+     * the system corrections (a VAT basis fix, the kontantmetod cut-off) and
+     * recordateEntry leave it unset and keep the refusal.
+     */
+    inFirstOpenPeriodWhenLocked?: boolean
     /** Posting port: the events of the two new verifikat (CorrectionBusinessEvents). */
     businessEvents?: CorrectionBusinessEvents
   }
@@ -345,24 +453,48 @@ export async function correctEntry(
     throw new MeaninglessCorrectionError('negates_original')
   }
 
+  // Where the storno lands: on the original's date in the original's year,
+  // which must be open, or (inFirstOpenPeriodWhenLocked, when that date takes
+  // no write) in the first open, unlocked period after it. Refused before
+  // anything is written, so a correction that cannot land leaves no draft
+  // behind (the period-lock trigger would only refuse the insert).
+  const stornoTarget = await assertStornoTarget(
+    supabase,
+    companyId,
+    original,
+    undefined,
+    options?.inFirstOpenPeriodWhenLocked ? { inFirstOpenPeriodWhenLocked: true } : undefined,
+  )
+  const moved = stornoTarget.moved
+
   // Resolve where the corrected entry lands. Defaults to the original's own
-  // date/period (a plain line-correction). A caller may override either to
-  // re-book the entry in another period (recordate / wrong-year fix); a date
-  // alone finds its own period.
-  const correctedDate = options?.newEntryDate ?? original.entry_date
+  // date/period (a plain line-correction), or to the storno's when the storno
+  // was moved out of a locked year. A caller may override either to re-book
+  // the entry in another period (recordate / wrong-year fix); a date alone
+  // finds its own period, and is always checked when the storno was moved.
+  const correctedDate = options?.newEntryDate ?? (moved ? stornoTarget.date : original.entry_date)
   const correctedPeriodId =
     options?.newFiscalPeriodId ??
-    (correctedDate !== original.entry_date
-      ? await resolveCorrectionPeriod(supabase, companyId, correctedDate)
-      : original.fiscal_period_id)
+    (options?.newEntryDate && (moved || options.newEntryDate !== original.entry_date)
+      ? await resolveCorrectionPeriod(supabase, companyId, options.newEntryDate)
+      : moved
+        ? stornoTarget.fiscal_period_id
+        : original.fiscal_period_id)
   const dateOrPeriodChanged =
     correctedDate !== original.entry_date || correctedPeriodId !== original.fiscal_period_id
+  // A move is the rättelse only when the original leaves its year with it
+  // (recordate). A storno moved out of a locked year leaves the original
+  // standing there, so the same lines again in the open year change nothing.
+  const moveIsTheChange = dateOrPeriodChanged && !moved
 
   // Reject when the proposed lines are identical to the original entry: a
   // rättelse must actually change something. Skip this when the date/period is
   // the change (moving a verifikation to the right year keeps the same lines).
-  if (!dateOrPeriodChanged && isIdenticalToOriginal(correctedLines, originalLines)) {
+  if (!moveIsTheChange && isIdenticalToOriginal(correctedLines, originalLines)) {
     throw new MeaninglessCorrectionError('identical_to_original')
+  }
+  if (!moveIsTheChange && incompleteCurrencyChange(correctedLines, originalLines)) {
+    throw new MeaninglessCorrectionError('currency_incomplete')
   }
 
   // Importmoms keeps its ruta 50 base in the corrected verifikat (#94), as at
@@ -370,7 +502,7 @@ export async function correctEntry(
   // account (correction-bank-leg.ts). A pure move (recordate: the same lines
   // on another date) writes no new line and is not judged. Refused before
   // anything is written.
-  if (!(dateOrPeriodChanged && isIdenticalToOriginal(correctedLines, originalLines))) {
+  if (!(moveIsTheChange && isIdenticalToOriginal(correctedLines, originalLines))) {
     await assertCorrectedImportVatBase(supabase, companyId, original.source_type, correctedLines)
     await assertCorrectionKeepsBankAccount(supabase, companyId, original.id, originalLines, correctedLines)
   }
@@ -443,29 +575,24 @@ export async function correctEntry(
     }
   }
 
-  // The storno lands on the original's date in the original's year, which
-  // must be open: refused before anything is written, so a correction in a
-  // locked or closed year leaves no draft behind (the period-lock trigger
-  // would only refuse the insert).
-  await assertStornoTarget(supabase, companyId, original)
-
   // ===== Step 1: Create storno (reversal) entry =====
   // No note on the storno: the note describes the affärshändelse, which the
   // correction now represents (correction-column-policy.ts). Both new
   // verifikat are inserted as drafts without a number (voucher_number 0) and
   // posted through commit_journal_entry, which draws the next number in the
   // series and stamps WHO (the acting user, key, OAuth client or cron job)
-  // and HOW in the same transaction (commitStornoOrCorrectionDraft).
+  // and HOW in the same transaction (commitStornoOrCorrectionDraft). A moved
+  // storno is numbered in its own year's series and names the original.
   const { data: reversalEntry, error: reversalError } = await supabase
     .from('journal_entries')
     .insert({
       company_id: companyId,
       user_id: userId,
-      fiscal_period_id: original.fiscal_period_id,
+      fiscal_period_id: stornoTarget.fiscal_period_id,
       voucher_number: 0,
       voucher_series: original.voucher_series || 'A',
-      entry_date: original.entry_date,
-      description: `Storno: ${original.description}`,
+      entry_date: stornoTarget.date,
+      description: moved ? movedStornoDescription(original) : `Storno: ${original.description}`,
       source_type: 'storno',
       reverses_id: originalEntryId,
       status: 'draft',
@@ -525,6 +652,33 @@ export async function correctEntry(
     throw new BookkeepingDatabaseError('post_reversal_entry', postReversalError.message)
   }
 
+  // A moved storno leaves the original 'posted', so no compare-and-set on it
+  // keeps a concurrent second correction out: the one whose storno does not
+  // stand (isStandingStorno) is cancelled here, before its corrected
+  // verifikat exists.
+  if (moved) {
+    // A storno the cleanup door cannot cancel stands without its corrected
+    // verifikat and nets the original out of the open year: never a refusal
+    // that reads as nothing happened.
+    const dropStorno = async (refusal: Error): Promise<never> => {
+      if (await cancelEntry(supabase, companyId, userId, reversalEntry.id)) throw refusal
+      console.error(
+        `[storno] correctEntry: moved storno ${reversalEntry.id} of ${originalEntryId} could not be cancelled; it stands without a corrected verifikat`,
+      )
+      throw new BookkeepingDatabaseError(
+        'post_reversal_entry',
+        `storno ${reversalEntry.id} could not be cancelled after: ${refusal.message}`,
+      )
+    }
+    let standing = false
+    try {
+      standing = await isStandingStorno(supabase, companyId, originalEntryId, reversalEntry.id)
+    } catch (err) {
+      await dropStorno(err instanceof Error ? err : new Error(String(err)))
+    }
+    if (!standing) await dropStorno(new EntryAlreadyReversedError())
+  }
+
   // NOTE: Original entry is NOT marked as 'reversed' here. We defer that
   // until both the reversal and corrected entries are successfully posted.
   // This avoids the impossible reversed→posted rollback if step 2 fails.
@@ -552,8 +706,12 @@ export async function correctEntry(
         voucher_series: original.voucher_series || 'A',
         entry_date: correctedDate,
         // A caller-supplied verifikationstext wins; blank falls back to the
-        // canonical auto text so the header never ends up empty.
-        description: options?.description?.trim() || `Rättelse: ${original.description}`,
+        // canonical auto text so the header never ends up empty. Moved out of
+        // a locked year, the text names the original's voucher and date either
+        // way.
+        description: moved
+          ? movedCorrectionDescription(original, options?.description)
+          : options?.description?.trim() || `Rättelse: ${original.description}`,
         source_type: 'correction',
         correction_of_id: originalEntryId,
         status: 'draft',
@@ -612,82 +770,91 @@ export async function correctEntry(
     throw err
   }
 
-  // ===== Mark original as reversed (CAS guard: only if still 'posted') =====
-  const { data: updatedOriginal, error: casError } = await supabase
-    .from('journal_entries')
-    .update({
-      status: 'reversed',
-      reversed_by_id: reversalEntry.id,
-    })
-    .eq('id', originalEntryId)
-    .eq('status', 'posted')
-    .select('id')
-
-  if (casError || !updatedOriginal || updatedOriginal.length === 0) {
-    // Concurrent reversal beat us: cancel both our entries, the reversal
-    // first. The replacement is only cancelled once the reversal is gone:
-    // cancelling it while the reversal stays posted would leave the original
-    // netted to zero with no replacement, erasing the affärshändelse.
-    const reversalCancelled = await cancelEntry(supabase, companyId, userId, reversalEntry.id)
-    if (reversalCancelled) {
-      await cancelEntry(supabase, companyId, userId, correctedEntry!.id)
-      throw new EntryAlreadyReversedError()
-    }
-
-    // The cleanup door refuses a reversal the original points at, which is
-    // what an ambiguous CAS error that did land looks like. Then the chain is
-    // complete (original reversed, reversal and replacement posted) and this
-    // is a successful correction.
-    const { data: originalNow } = await supabase
+  // A moved storno writes nothing to the original or its locked stretch (the
+  // period-lock trigger refuses any write to a locked or closed year, and
+  // what lies on or before the lock date stands as it was locked): the
+  // original keeps its status, bank rows, payment rows and underlag, and the
+  // chain is read from the new verifikat (reverses_id, correction_of_id).
+  let transactionRelinkError: string | undefined
+  let documentRelinkError: string | undefined
+  if (!moved) {
+    // ===== Mark original as reversed (CAS guard: only if still 'posted') =====
+    const { data: updatedOriginal, error: casError } = await supabase
       .from('journal_entries')
-      .select('status, reversed_by_id')
+      .update({
+        status: 'reversed',
+        reversed_by_id: reversalEntry.id,
+      })
       .eq('id', originalEntryId)
-      .eq('company_id', companyId)
-      .single()
-    if (originalNow?.status !== 'reversed' || originalNow.reversed_by_id !== reversalEntry.id) {
-      // Anything else keeps the replacement posted beside the surviving
-      // reversal, so the amounts stay right; the links need a manual look.
-      console.error(
-        `[storno] correctEntry: reversal ${reversalEntry.id} could not be cancelled after a failed CAS on ${originalEntryId}; replacement ${correctedEntry!.id} kept posted`,
-      )
-      throw new EntryAlreadyReversedError()
-    }
-  }
+      .eq('status', 'posted')
+      .select('id')
 
-  // Re-point bank transactions and underlag from the original to the corrected
-  // entry. The original is now status 'reversed'; the corrected entry is the
-  // live representation of the affärshändelse, so the transaction row should
-  // keep reading as booked against it (and stay correctable/uncategorizable),
-  // and the underlag should travel with it. Best-effort: the correction_of_id
-  // chain preserves traceability even if either relink fails, but a relink
-  // failure is surfaced on the result so the caller can warn instead of
-  // silently stranding a bank row or underlag on the reversed entry.
-  const transactionRelinkError = await relinkTransactionsToEntry(
-    supabase,
-    companyId,
-    originalEntryId,
-    correctedEntry!.id
-  )
-  // A correction that takes the bank leg out (to 2440 for a purchase rebooked
-  // as a supplier invoice) leaves the bank row nothing to anchor:
-  // guard_cash_transaction_binding refuses the move. Left on the reversed
-  // original, the row read as booked and could be neither unlinked nor
-  // stornoed (crm#1433). It is released the way a storno releases it, back to
-  // Att bokföra, to be matched to the verifikat that now books the payment.
-  // A correction that moves the leg to another bank account never gets here
-  // (assertCorrectionKeepsBankAccount refuses it up front).
-  if (transactionRelinkError) {
-    await releaseBankRowsOfReversedEntry(supabase, companyId, originalEntryId)
+    if (casError || !updatedOriginal || updatedOriginal.length === 0) {
+      // Concurrent reversal beat us: cancel both our entries, the reversal
+      // first. The replacement is only cancelled once the reversal is gone:
+      // cancelling it while the reversal stays posted would leave the original
+      // netted to zero with no replacement, erasing the affärshändelse.
+      const reversalCancelled = await cancelEntry(supabase, companyId, userId, reversalEntry.id)
+      if (reversalCancelled) {
+        await cancelEntry(supabase, companyId, userId, correctedEntry!.id)
+        throw new EntryAlreadyReversedError()
+      }
+
+      // The cleanup door refuses a reversal the original points at, which is
+      // what an ambiguous CAS error that did land looks like. Then the chain is
+      // complete (original reversed, reversal and replacement posted) and this
+      // is a successful correction.
+      const { data: originalNow } = await supabase
+        .from('journal_entries')
+        .select('status, reversed_by_id')
+        .eq('id', originalEntryId)
+        .eq('company_id', companyId)
+        .single()
+      if (originalNow?.status !== 'reversed' || originalNow.reversed_by_id !== reversalEntry.id) {
+        // Anything else keeps the replacement posted beside the surviving
+        // reversal, so the amounts stay right; the links need a manual look.
+        console.error(
+          `[storno] correctEntry: reversal ${reversalEntry.id} could not be cancelled after a failed CAS on ${originalEntryId}; replacement ${correctedEntry!.id} kept posted`,
+        )
+        throw new EntryAlreadyReversedError()
+      }
+    }
+
+    // Re-point bank transactions and underlag from the original to the corrected
+    // entry. The original is now status 'reversed'; the corrected entry is the
+    // live representation of the affärshändelse, so the transaction row should
+    // keep reading as booked against it (and stay correctable/uncategorizable),
+    // and the underlag should travel with it. Best-effort: the correction_of_id
+    // chain preserves traceability even if either relink fails, but a relink
+    // failure is surfaced on the result so the caller can warn instead of
+    // silently stranding a bank row or underlag on the reversed entry.
+    transactionRelinkError = await relinkTransactionsToEntry(
+      supabase,
+      companyId,
+      originalEntryId,
+      correctedEntry!.id
+    )
+    // A correction that takes the bank leg out (to 2440 for a purchase rebooked
+    // as a supplier invoice) leaves the bank row nothing to anchor:
+    // guard_cash_transaction_binding refuses the move. Left on the reversed
+    // original, the row read as booked and could be neither unlinked nor
+    // stornoed (crm#1433). It is released the way a storno releases it, back to
+    // Att bokföra, to be matched to the verifikat that now books the payment.
+    // A correction that moves the leg to another bank account never gets here
+    // (assertCorrectionKeepsBankAccount refuses it up front).
+    if (transactionRelinkError) {
+      await releaseBankRowsOfReversedEntry(supabase, companyId, originalEntryId)
+    }
+    // The invoice payment rows follow too, so the invoice reads as paid by the
+    // verifikat that stands, not by the reversed original (PH 227).
+    await relinkPaymentRowsToEntry(supabase, companyId, original, correctedEntry!.id)
+    documentRelinkError = await relinkDocumentsToEntry(
+      supabase,
+      userId,
+      originalEntryId,
+      correctedEntry!.id
+    )
   }
-  // The invoice payment rows follow too, so the invoice reads as paid by the
-  // verifikat that stands, not by the reversed original (PH 227).
-  await relinkPaymentRowsToEntry(supabase, companyId, original, correctedEntry!.id)
-  const documentRelinkError = await relinkDocumentsToEntry(
-    supabase,
-    userId,
-    originalEntryId,
-    correctedEntry!.id
-  )
 
   // ===== Step 3: Fetch complete entries =====
   const { data: finalReversal } = await supabase

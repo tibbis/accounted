@@ -1,4 +1,5 @@
-import type { PostHog } from 'posthog-js'
+import type { CaptureResult, PostHog } from 'posthog-js'
+import { redact } from '@/lib/observability/redact'
 import { drainEarlyErrors } from './early-errors'
 import { isAnalyticsEnabled } from './enabled'
 import { replayMaskText } from './replay-masking'
@@ -59,6 +60,13 @@ import { replayMaskText } from './replay-masking'
  *    A message the person writes to us is a service they asked for; it never
  *    needed the analytics SDK, so the SDK is not started for it.
  *
+ * 6. What is recorded fits the free plan's 1,000,000 events a month: from
+ *    2026-11-19 the month ran out and PostHog dropped every page view until
+ *    it renewed. Clicks are recorded only in the menu, the top bar and on
+ *    primary actions (ANALYTICS_CLICK_SCOPE; 57% of the events were clicks
+ *    anywhere), no page-leave events, and 70% of sessions are recorded for
+ *    replay (the plan's 5,000 recordings).
+ *
  * 5. The SDK is loaded when analytics starts, not with the page. It is about
  *    62 kB compressed (222 kB of script), and it sat in the first load of
  *    every page, the login page and every page of a person who switched
@@ -70,6 +78,17 @@ import { replayMaskText } from './replay-masking'
  *    A person who never consents never downloads it: the one-definition
  *    rule above keeps every other module from importing it.
  */
+
+/**
+ * Where a click is recorded (autocapture's css_selector_allowlist, matched on
+ * the clicked element or any parent): the menu and the rail (nav, aside), the
+ * top bar (PageHeader's .page-header) and primary actions (Button's default
+ * variant carries data-ph-capture). Choice 6 above.
+ */
+export const ANALYTICS_CLICK_SCOPE = ['nav', 'aside', '.page-header', '[data-ph-capture]'] as const
+
+/** The share of sessions recorded for replay. Choice 6 above. */
+export const REPLAY_SAMPLE_RATE = 0.7
 
 /**
  * Hostnames that get the X-POSTHOG-DISTINCT-ID / X-POSTHOG-SESSION-ID headers,
@@ -131,6 +150,15 @@ export function initAnalytics(): boolean {
           person_profiles: 'identified_only',
           persistence: 'memory',
           capture_exceptions: true,
+          autocapture: {
+            dom_event_allowlist: ['click'],
+            element_allowlist: ['a', 'button'],
+            css_selector_allowlist: [...ANALYTICS_CLICK_SCOPE],
+          },
+          capture_pageleave: false,
+          // Every exception event is redacted before it leaves the browser,
+          // whichever path raised it (redactExceptionEvent below).
+          before_send: redactExceptionEvent,
           // Masks these query parameters in $current_url and the initial-URL person
           // properties: a sole trader's org number is the owner's personnummer
           // (#58). The flag also masks ad click ids (gclid, fbclid, ...).
@@ -138,6 +166,7 @@ export function initAnalytics(): boolean {
           custom_personal_data_properties: ['org_number', 'personnummer', 'personal_number'],
           tracing_headers: tracingHosts(),
           session_recording: {
+            sampleRate: REPLAY_SAMPLE_RATE,
             maskAllInputs: true,
             maskTextSelector: '*',
             maskTextFn: replayMaskText,
@@ -214,6 +243,86 @@ export function captureAnalyticsEvent(event: string, properties?: Record<string,
       // Telemetry must never affect the flow that reported it.
     }
   })
+}
+
+/**
+ * Report an error that a React error boundary caught (AppErrorBoundary under
+ * app/error.tsx, app/(dashboard)/error.tsx, app/global-error.tsx) to PostHog
+ * Error Tracking, when analytics runs.
+ *
+ * Without this such an error reached no one: in production Next.js hands an
+ * error caught by an explicit boundary to console.error only (onCaughtError
+ * in next/dist/client/react-client-callbacks), and capture_exceptions above
+ * captures uncaught errors and rejections, not console output.
+ *
+ * The error itself goes to the SDK, which parses its frames, and before_send
+ * (redactExceptionEvent below) redacts the message and the frames, as for
+ * every exception from the browser. Redacting it here first replaced the
+ * whole stack with [REDACTED] whenever the message held a number shaped like
+ * a personnummer, an organisationsnummer included. An error with a digest is
+ * left out: it was thrown in a server render, onRequestError
+ * (instrumentation.ts) already captured it on the server with its real
+ * message, and the browser holds only a generic copy.
+ *
+ * `autoReload` is true when the boundary reloads the page at once (its
+ * one-shot recovery), so the person never saw the fallback; an error that
+ * healed that way reads differently from one that stayed on screen.
+ * Never throws and never affects the boundary that reported it.
+ */
+export function captureBoundaryError(error: unknown, boundary: string, autoReload = false): void {
+  if (!isAnalyticsActive()) return
+  try {
+    if (hasServerDigest(error)) return
+  } catch {
+    // A value whose digest cannot be read is not sent; the boundary has
+    // already logged it to the console.
+    return
+  }
+  void analyticsReady().then((posthog) => {
+    try {
+      posthog?.captureException(error, { error_boundary: boundary, auto_reload: autoReload })
+    } catch {
+      // Telemetry must never affect the boundary that reported it.
+    }
+  })
+}
+
+/** Next.js sets `digest` on an error from a server render, which the server has captured. */
+function hasServerDigest(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && typeof (error as { digest?: unknown }).digest === 'string'
+}
+
+/**
+ * The properties of an exception event that carry what the error said: each
+ * error's type, message, frames and mechanism ($exception_list), the steps
+ * the SDK may record before it ($exception_steps), and the message copy some
+ * capture paths add ($exception_message).
+ */
+const EXCEPTION_PAYLOAD_PROPERTIES = ['$exception_list', '$exception_steps', '$exception_message'] as const
+
+/**
+ * posthog.init's before_send. An exception event leaves the browser only
+ * redacted with lib/observability/redact.ts, whichever path raised it: the
+ * SDK's own capture of uncaught errors and rejections (capture_exceptions),
+ * the errors held before the start (early-errors.ts) and captureBoundaryError.
+ * All three end in the SDK's capture('$exception') after it has turned the
+ * thrown value into $exception_list, so this hook is the one place each of
+ * them passes. redact() is idempotent, so an error captureBoundaryError has
+ * already redacted comes out the same. An exception that cannot be redacted
+ * is dropped rather than sent; every other event passes unchanged.
+ */
+export function redactExceptionEvent(event: CaptureResult | null): CaptureResult | null {
+  if (!event || event.event !== '$exception') return event
+  try {
+    const properties = { ...event.properties }
+    for (const key of EXCEPTION_PAYLOAD_PROPERTIES) {
+      if (properties[key] !== undefined) properties[key] = redact(properties[key])
+    }
+    return { ...event, properties }
+  } catch {
+    // Nothing of an exception that could not be redacted leaves the browser.
+    return null
+  }
 }
 
 /**

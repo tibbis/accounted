@@ -2,10 +2,9 @@
 
 import { UUID_RE } from '@/lib/invariants/uuid'
 import { useState, useEffect, useMemo, useRef, useCallback, type ComponentProps } from 'react'
-import type { SupabaseDataClient } from '@/lib/supabase/data-client'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useTranslations, useLocale } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { FLOATING_BULK_BAR_CLASS } from '@/components/ui/floating-bulk-bar'
@@ -21,7 +20,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { ToolbarSearch, TOOLBAR_SEARCH_END_CLASS } from '@/components/ui/toolbar-search'
 import { CreateDrawer } from '@/components/ui/create-drawer'
 import { OpenOnParam } from '@/components/ui/open-on-param'
-import { useCanWrite } from '@/lib/hooks/use-can-write'
+import { useViewerLock } from '@/components/ui/viewer-lock'
 import { TH_CLASS, QUIET_LINK_CLASS } from '@/components/ui/dry-table'
 import { AdjustmentsHorizontalIcon, CheckIcon, CreditCardIcon, SpinnerIcon } from '@/components/icons'
 import { useUiState } from '@/lib/hooks/use-ui-state'
@@ -44,6 +43,7 @@ import { ContextPicker, type ContextPickerItem } from '@/components/common/Conte
 import { useFiscalScope } from '@/components/providers/FiscalScopeProvider'
 import { AttnLine } from '@/components/ui/attn-line'
 import { useBankLedgerSuggestionNotice } from '@/components/transactions/BankLedgerSuggestionNotice'
+import { usePreviousSystemRowsNotice } from '@/components/transactions/PreviousSystemRowsNotice'
 import TransactionInboxCard from '@/components/transactions/TransactionInboxCard'
 import TransactionHistoryList from '@/components/transactions/TransactionHistoryList'
 import InboxZeroState from '@/components/transactions/InboxZeroState'
@@ -75,21 +75,16 @@ import type {
   HistoryFilter,
   SourceFilter,
   CategorizeHandler,
-  PotentialVoucher,
-  PotentialRotRutPayout,
   PotentialRotRutPayoutRequest,
 } from '@/components/transactions/transaction-types'
 import type { BatchAllocationPrefill } from '@/lib/transactions/parts-read'
 import { readGiroCounterparty, type GiroCounterparty, type GiroRegister } from '@/lib/transactions/giro-counterparty'
 import { loadGiroRegister } from '@/lib/transactions/giro-register'
-import { loadOpenRotRutPayoutRequests } from '@/lib/invoices/open-rot-rut-payout-requests'
-import { matchTransactionsToRotRutPayoutSets } from '@/lib/invoices/rot-rut-payout-set-matching'
 import {
-  groupExpenseClaimsByPerson,
-  matchTransactionsToExpensePayouts,
-} from '@/lib/expenses/expense-payout-candidates'
-import { listExpenseClaimsAwaitingPayout } from '@/lib/salary/expense-claim-payout-state'
-import type { ExpensePayoutDue } from '@/lib/worklist/types'
+  fetchExpensePayoutMatches,
+  fetchPotentialMatches,
+  suggestedMatchDialog,
+} from '@/components/transactions/potential-matches'
 import type { SalaryRunPayout } from '@/lib/transactions/salary-run-payouts'
 import { SuggestionReviewList } from '@/components/transactions/SuggestionReviewList'
 import {
@@ -112,11 +107,9 @@ import type {
 import { formatVoucher } from '@/lib/bookkeeping/voucher-series-resolver'
 import { findBankSkvCounterparts } from '@/lib/skatteverket/bank-counterpart'
 import { skvStatusNeedsReconnect, type SkvStatusLike } from '@/lib/notices/predicates'
-import {
-  MATCHABLE_INVOICE_STATUSES,
-  MATCHABLE_SUPPLIER_INVOICE_STATUSES,
-} from '@/lib/bookkeeping/matchable-statuses'
-import { useAssistantReadsAvailable, useCompany } from '@/contexts/CompanyContext'
+import { useAssistantReadsAvailable, useBookingScreenEnabled, useCompany } from '@/contexts/CompanyContext'
+import { bookingScreenHref } from '@/lib/bookkeeping/booking-screen'
+import { stagePickedProposal } from '@/lib/bookkeeping/booking-screen-pick'
 import { useCashAccounts } from '@/lib/reference-data/hooks'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { collectPages } from '@/lib/lists/collect-pages'
@@ -125,6 +118,7 @@ import { refreshWorklistBadges } from '@/lib/hooks/use-worklist-badges'
 import { subscribeAsUser } from '@/lib/supabase/realtime-subscribe'
 import { useBulkSelection } from '@/lib/hooks/use-bulk-selection'
 import { getErrorMessage, type ErrorLocale } from '@/lib/errors/get-error-message'
+import { getCountryName } from '@/lib/vat/country-codes'
 import { resolveDetachErrorMessage } from '@/components/transactions/detach-underlag'
 import { cn, formatCurrency, formatDate } from '@/lib/utils'
 import { roundOre } from '@/lib/money'
@@ -241,9 +235,6 @@ const TemplatePicker = dynamic(
   { loading: InlineDialogContentLoading },
 )
 
-type InvoiceWithCustomer = Invoice & { customer?: Customer }
-type SupplierInvoiceWithSupplier = SupplierInvoice & { supplier?: Supplier }
-
 // Journal-entry ids get interpolated into the supplier-invoice .or() filter
 // string in the underlag-badge effect below. They come from journal_entries.id
 // (DB-sourced), but this guard keeps the interpolated list UUID-only, matching
@@ -274,194 +265,6 @@ function isSkvSelectable(row: SkattekontoTransactionWithSuggestion): boolean {
   return !row.journal_entry_id && !row.is_ignored
 }
 
-function buildInvoiceMap(rows: InvoiceWithCustomer[] | null): Record<string, InvoiceWithCustomer> {
-  if (!rows) return {}
-  return rows.reduce<Record<string, InvoiceWithCustomer>>((acc, inv) => {
-    acc[inv.id] = inv
-    return acc
-  }, {})
-}
-
-function buildSupplierInvoiceMap(
-  rows: SupplierInvoiceWithSupplier[] | null,
-): Record<string, SupplierInvoiceWithSupplier> {
-  if (!rows) return {}
-  return rows.reduce<Record<string, SupplierInvoiceWithSupplier>>((acc, inv) => {
-    acc[inv.id] = inv
-    return acc
-  }, {})
-}
-
-// Pair unbooked outflows with the person whose utlägg they repay in full
-// (lib/expenses/expense-payout-candidates). Read-time: the claims that wait
-// for a payout are the candidate pool (a claim on a salary run is not one),
-// so this is one small query and nothing for the companies without any.
-// Non-fatal like fetchPotentialMatches.
-async function fetchExpensePayoutMatches(
-  supabase: SupabaseDataClient,
-  companyId: string | null,
-  rows: { id: string; amount: number; currency: string | null; is_business: boolean | null; journal_entry_id: string | null }[],
-): Promise<{ byTransaction: Map<string, ExpensePayoutDue>; people: ExpensePayoutDue[] }> {
-  const out = new Map<string, ExpensePayoutDue>()
-  if (!companyId || rows.length === 0) return { byTransaction: out, people: [] }
-  let claimRows: Parameters<typeof groupExpenseClaimsByPerson>[0]
-  try {
-    claimRows = await listExpenseClaimsAwaitingPayout(supabase, companyId)
-  } catch (error) {
-    console.error('[fetchExpensePayoutMatches] expense_claims query failed', error)
-    return { byTransaction: out, people: [] }
-  }
-  const people = groupExpenseClaimsByPerson(claimRows)
-  for (const [txId, m] of matchTransactionsToExpensePayouts(rows, people)) out.set(txId, m.person)
-  return { byTransaction: out, people }
-}
-
-// Fetch the potential invoice/supplier-invoice matches referenced by a page
-// of transactions in one parallel round trip. A single-query PostgREST embed
-// on potential_supplier_invoice_id is blocked until that FK exists in the
-// prod schema cache (see DECISIONS.md archive 2026-07-06).
-async function fetchPotentialMatches(
-  supabase: SupabaseDataClient,
-  companyId: string | null,
-  rows: {
-    id: string
-    amount: number
-    currency: string | null
-    description?: string | null
-    merchant_name?: string | null
-    is_business: boolean | null
-    journal_entry_id: string | null
-    potential_invoice_id: string | null
-    potential_supplier_invoice_id: string | null
-    potential_rot_rut_payout_request_id?: string | null
-    potential_journal_entry_id?: string | null
-  }[],
-) {
-  const potentialInvoiceIds = Array.from(
-    new Set(rows.flatMap((t) => (t.potential_invoice_id ? [t.potential_invoice_id] : []))),
-  )
-  const potentialSupplierInvoiceIds = Array.from(
-    new Set(rows.flatMap((t) => (t.potential_supplier_invoice_id ? [t.potential_supplier_invoice_id] : []))),
-  )
-  const potentialJournalEntryIds = Array.from(
-    new Set(rows.flatMap((t) => (t.potential_journal_entry_id ? [t.potential_journal_entry_id] : []))),
-  )
-
-  // Chunked .in() lists (PostgREST .in() URL-length convention, same 150 as
-  // the underlag-status effect below): the caller may pass the full pending
-  // backlog, not just one page.
-  const IN_CLAUSE_CHUNK = 150
-  const chunks = <T,>(ids: T[]) => {
-    const out: T[][] = []
-    for (let i = 0; i < ids.length; i += IN_CLAUSE_CHUNK) out.push(ids.slice(i, i + IN_CLAUSE_CHUNK))
-    return out
-  }
-
-  // The hint columns are never revisited once written, so an invoice settled
-  // by a different transaction leaves a stale pointer behind. Revalidate here:
-  // an unmatchable candidate must not reach the row or the match dialog, which
-  // would otherwise compare the transaction against a 0 kr remaining balance
-  // and call it a partial payment.
-  const [invoiceResults, supplierInvoiceResults, voucherResults, rotRutResult] = await Promise.all([
-    Promise.all(
-      chunks(potentialInvoiceIds).map((ids) =>
-        supabase
-          .from('invoices')
-          .select('*, customer:customers(*)')
-          .in('id', ids)
-          .in('status', [...MATCHABLE_INVOICE_STATUSES])
-          .gt('remaining_amount', 0),
-      ),
-    ),
-    Promise.all(
-      chunks(potentialSupplierInvoiceIds).map((ids) =>
-        supabase
-          .from('supplier_invoices')
-          .select('*, supplier:suppliers(*)')
-          .in('id', ids)
-          .in('status', [...MATCHABLE_SUPPLIER_INVOICE_STATUSES])
-          .gt('remaining_amount', 0),
-      ),
-    ),
-    // Journal-entry match suggestions (the sweep's 0.75-0.89 band). DB
-    // triggers clear the pointer when the entry is consumed or reversed, but
-    // the posted-status filter revalidates anyway: a suggestion that no
-    // longer resolves to a live verifikat must not reach the review surface.
-    Promise.all(
-      chunks(potentialJournalEntryIds).map((ids) =>
-        supabase
-          .from('journal_entries')
-          .select('id, voucher_series, voucher_number, entry_date, description')
-          .in('id', ids)
-          .eq('status', 'posted'),
-      ),
-    ),
-    // Open ROT/RUT begäran (Skatteverkets utbetalning): the company's whole
-    // open pool, not the hinted ids. It serves both the persisted 1:1 hint
-    // (revalidated: a request settled by another row must not reach the
-    // dialog) and the read-time covering set for a row Skatteverket paid
-    // together with other beslut (#2239). Items ride along so the dialog can
-    // list the covered invoices. A handful of rows per company.
-    companyId
-      ? loadOpenRotRutPayoutRequests(supabase, companyId)
-      : Promise.resolve({ requests: [], error: null }),
-  ])
-
-  // Non-fatal: the transaction list still renders without match hints, but
-  // log so a DB failure isn't mistaken for "no potential match".
-  for (const r of invoiceResults) {
-    if (r.error) console.error('[fetchPotentialMatches] invoices query failed', r.error)
-  }
-  for (const r of supplierInvoiceResults) {
-    if (r.error) console.error('[fetchPotentialMatches] supplier_invoices query failed', r.error)
-  }
-  for (const r of voucherResults) {
-    if (r.error) console.error('[fetchPotentialMatches] journal_entries query failed', r.error)
-  }
-  if (rotRutResult.error) {
-    console.error('[fetchPotentialMatches] rot_rut_payout_requests query failed', rotRutResult.error)
-  }
-
-  const rotRutRequests: PotentialRotRutPayoutRequest[] = rotRutResult.requests
-  const rotRutById = new Map(rotRutRequests.map((req) => [req.id, req] as const))
-  // Per row: the persisted 1:1 hint when its begäran is still open, else the
-  // exact covering set over the open pool (several begäran in one transfer).
-  const rotRutByTransaction = new Map<string, PotentialRotRutPayout>()
-  for (const row of rows) {
-    const hinted = row.potential_rot_rut_payout_request_id
-      ? rotRutById.get(row.potential_rot_rut_payout_request_id)
-      : undefined
-    if (hinted) rotRutByTransaction.set(row.id, { requests: [hinted] })
-  }
-  for (const [txId, match] of matchTransactionsToRotRutPayoutSets(rows, rotRutRequests)) {
-    rotRutByTransaction.set(txId, { requests: match.requests })
-  }
-
-  const voucherMap: Record<string, PotentialVoucher> = {}
-  for (const je of voucherResults.flatMap((r) => (r.data ?? []) as Array<{
-    id: string
-    voucher_series: string
-    voucher_number: number
-    entry_date: string
-    description: string | null
-  }>)) {
-    voucherMap[je.id] = {
-      journal_entry_id: je.id,
-      voucher_series: je.voucher_series,
-      voucher_number: je.voucher_number,
-      entry_date: je.entry_date,
-      description: je.description,
-    }
-  }
-
-  return {
-    invoiceMap: buildInvoiceMap(invoiceResults.flatMap((r) => r.data ?? [])),
-    supplierInvoiceMap: buildSupplierInvoiceMap(supplierInvoiceResults.flatMap((r) => r.data ?? [])),
-    voucherMap,
-    rotRutByTransaction,
-  }
-}
-
 interface QuickReviewState {
   transaction: TransactionWithInvoice
   /** What will be booked and why: one object whoever proposed it (lib/bookkeeping/proposal.ts). */
@@ -476,6 +279,8 @@ export default function TransactionsPage() {
   const { company } = useCompany()
   const companyId = company?.id ?? null
   const canAskAssistant = useAssistantReadsAvailable()
+  const bookingScreen = useBookingScreenEnabled()
+  const router = useRouter()
   const searchParams = useSearchParams()
   const t = useTranslations('transactions')
   const errorLocale = useLocale() as ErrorLocale
@@ -499,7 +304,7 @@ export default function TransactionsPage() {
   }
   const tDetach = useTranslations('tx_detach')
   const tCommon = useTranslations('common')
-  const { canWrite } = useCanWrite()
+  const { canWrite, lockedTitle } = useViewerLock()
   const [transactions, setTransactions] = useState<TransactionWithInvoice[]>([])
   const [isLoading, setIsLoading] = useState(true)
   // The last list fetch failed (failed) or loaded only the window, without the
@@ -739,6 +544,9 @@ export default function TransactionsPage() {
   // Pagination
   const [hasMore, setHasMore] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  // The last "Ladda fler" page could not be read: said by the button, which
+  // turns into the retry, instead of a spinner that just stops.
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false)
 
   // The history view pages through ALL transactions newest-first, while the
   // inbox needs every pending row regardless of age. Both live in the single
@@ -1525,6 +1333,7 @@ export default function TransactionsPage() {
       pagedCountRef.current = rows.length
       setPagedThroughDate(rows.length >= windowSize ? rows[rows.length - 1].date : null)
       setHasMore(rows.length >= windowSize)
+      setLoadMoreFailed(false)
 
     } finally {
       // Only the newest request may touch the skeleton: a stale one must not
@@ -1560,68 +1369,75 @@ export default function TransactionsPage() {
     // instead of appending old-scope rows and corrupting the paging offsets.
     const generation = ++fetchGenerationRef.current
     setIsLoadingMore(true)
-    // Offset counts only the contiguous newest-first window, not the older
-    // pending rows merged into state for the inbox.
-    const offset = pagedCountRef.current
-    let pageQuery = supabase
-      .from('transactions')
-      .select(TRANSACTION_WINDOW_SELECT)
-      .eq('company_id', companyId)
-    // Same period scope as the initial window fetch: mixed-scope pages would
-    // corrupt the offset bookkeeping.
-    if (periodBounds) {
-      pageQuery = pageQuery.gte('date', periodBounds.start).lte('date', periodBounds.end)
-    }
-    const { data: txData, error: txError } = await pageQuery
-      // Same stable order as the initial window fetch: offset paging over a
-      // date-only order can skip or repeat same-date rows between pages.
-      .order('date', { ascending: false })
-      .order('id', { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1)
+    setLoadMoreFailed(false)
+    try {
+      // Offset counts only the contiguous newest-first window, not the older
+      // pending rows merged into state for the inbox.
+      const offset = pagedCountRef.current
+      let pageQuery = supabase
+        .from('transactions')
+        .select(TRANSACTION_WINDOW_SELECT)
+        .eq('company_id', companyId)
+      // Same period scope as the initial window fetch: mixed-scope pages would
+      // corrupt the offset bookkeeping.
+      if (periodBounds) {
+        pageQuery = pageQuery.gte('date', periodBounds.start).lte('date', periodBounds.end)
+      }
+      const { data: txData, error: txError } = await pageQuery
+        // Same stable order as the initial window fetch: offset paging over a
+        // date-only order can skip or repeat same-date rows between pages.
+        .order('date', { ascending: false })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1)
 
-    if (fetchGenerationRef.current !== generation || txError || !txData) {
+      if (fetchGenerationRef.current !== generation) return
+      if (txError || !txData) {
+        setLoadMoreFailed(true)
+        return
+      }
+
+      const pageRows = (txData as TransactionWithInvoice[]).map(withLivePointer)
+
+      const [{ invoiceMap, supplierInvoiceMap, voucherMap, rotRutByTransaction }, expensePayouts] = await Promise.all([
+        fetchPotentialMatches(supabase, companyId, pageRows),
+        fetchExpensePayoutMatches(supabase, companyId, pageRows),
+      ])
+      const expensePayoutMap = expensePayouts.byTransaction
+
+      // Same staleness rule after the enrichment await: a newer fetch has
+      // already reset the offsets.
+      if (fetchGenerationRef.current !== generation) return
+
+      // The offsets move only once the page is sure to land, so a failed
+      // read or enrichment leaves "Ladda fler" asking for the same page.
+      pagedCountRef.current += txData.length
+      setPagedThroughDate(txData.length >= PAGE_SIZE ? txData[txData.length - 1].date : null)
+      setHasMore(txData.length >= PAGE_SIZE)
+
+      const newTransactions: TransactionWithInvoice[] = pageRows.map((t) => ({
+        ...t,
+        potential_expense_payout: expensePayoutMap.get(t.id),
+        potential_invoice: t.potential_invoice_id ? invoiceMap[t.potential_invoice_id] : undefined,
+        potential_supplier_invoice: t.potential_supplier_invoice_id
+          ? supplierInvoiceMap[t.potential_supplier_invoice_id]
+          : undefined,
+        potential_rot_rut_payout: rotRutByTransaction.get(t.id),
+        potential_voucher: t.potential_journal_entry_id
+          ? voucherMap[t.potential_journal_entry_id]
+          : undefined,
+      }))
+
+      // The page may overlap pending rows already merged into state: keep the
+      // existing row (it may carry local edits) and drop the duplicate.
+      setTransactions((prev) => {
+        const prevIds = new Set(prev.map((t) => t.id))
+        return [...prev, ...newTransactions.filter((t) => !prevIds.has(t.id))]
+      })
+    } catch {
+      if (fetchGenerationRef.current === generation) setLoadMoreFailed(true)
+    } finally {
       setIsLoadingMore(false)
-      return
     }
-
-    pagedCountRef.current += txData.length
-    setPagedThroughDate(txData.length >= PAGE_SIZE ? txData[txData.length - 1].date : null)
-    setHasMore(txData.length >= PAGE_SIZE)
-    const pageRows = (txData as TransactionWithInvoice[]).map(withLivePointer)
-
-    const [{ invoiceMap, supplierInvoiceMap, voucherMap, rotRutByTransaction }, expensePayouts] = await Promise.all([
-      fetchPotentialMatches(supabase, companyId, pageRows),
-      fetchExpensePayoutMatches(supabase, companyId, pageRows),
-    ])
-    const expensePayoutMap = expensePayouts.byTransaction
-
-    // Same staleness rule after the enrichment await: the offsets above were
-    // written under this generation, but a newer fetch has already reset them.
-    if (fetchGenerationRef.current !== generation) {
-      setIsLoadingMore(false)
-      return
-    }
-
-    const newTransactions: TransactionWithInvoice[] = pageRows.map((t) => ({
-      ...t,
-      potential_expense_payout: expensePayoutMap.get(t.id),
-      potential_invoice: t.potential_invoice_id ? invoiceMap[t.potential_invoice_id] : undefined,
-      potential_supplier_invoice: t.potential_supplier_invoice_id
-        ? supplierInvoiceMap[t.potential_supplier_invoice_id]
-        : undefined,
-      potential_rot_rut_payout: rotRutByTransaction.get(t.id),
-      potential_voucher: t.potential_journal_entry_id
-        ? voucherMap[t.potential_journal_entry_id]
-        : undefined,
-    }))
-
-    // The page may overlap pending rows already merged into state: keep the
-    // existing row (it may carry local edits) and drop the duplicate.
-    setTransactions((prev) => {
-      const prevIds = new Set(prev.map((t) => t.id))
-      return [...prev, ...newTransactions.filter((t) => !prevIds.has(t.id))]
-    })
-    setIsLoadingMore(false)
   }
 
   // Underlag-status enrichment for booked rows. Five RLS-scoped reads per
@@ -2009,9 +1825,14 @@ export default function TransactionsPage() {
       })
     })
 
-    if (openMatchOnHighlight && tx?.potential_invoice) {
+    // The row's suggested match, whichever kind it is, in the dialog its own
+    // button opens (Att bokföra sends its suggested rows here).
+    const dialog = openMatchOnHighlight && tx ? suggestedMatchDialog(tx) : null
+    if (tx && dialog) {
       setSelectedTransaction(tx)
-      setMatchDialogOpen(true)
+      if (dialog === 'rot_rut') setRotRutMatchDialogOpen(true)
+      else if (dialog === 'expense_payout') setExpensePayoutDialogOpen(true)
+      else setMatchDialogOpen(true)
     }
   }, [highlightId, mode, openMatchOnHighlight, skvRows, sourceFilter, transactions])
 
@@ -2467,16 +2288,20 @@ export default function TransactionsPage() {
           // crm#1765: the underlag shows the seller's VAT. Foreign VAT charged
           // in error still books as reverse charge, on the whole amount paid,
           // once the person says that is what it is; a Swedish seller's VAT
-          // (reason seller_vat_swedish) keeps the plain refusal below.
+          // (reason seller_vat_swedish) keeps the plain refusal below. A
+          // Swedish VAT number beside an address abroad (address_country)
+          // asks whether the seller is established in Sweden for the sale.
+          const addressCountry = result.error.details?.address_country
+          const abroad = typeof addressCountry === 'string' && addressCountry !== ''
+          const confirmLabel = abroad ? t('rc_seller_vat_se_abroad_confirm_action') : t('rc_seller_vat_confirm_action')
           toast({
             title: t('rc_seller_vat_title'),
-            description: t('rc_seller_vat_description'),
+            description: abroad
+              ? t('rc_seller_vat_se_abroad_description', { country: getCountryName(addressCountry, errorLocale) })
+              : t('rc_seller_vat_description'),
             action: (
-              <ToastAction
-                altText={t('rc_seller_vat_confirm_action')}
-                onClick={() => void runCategorize({ ...args, confirmForeignSellerVat: true })}
-              >
-                {t('rc_seller_vat_confirm_action')}
+              <ToastAction altText={confirmLabel} onClick={() => void runCategorize({ ...args, confirmForeignSellerVat: true })}>
+                {confirmLabel}
               </ToastAction>
             ),
           })
@@ -3224,6 +3049,27 @@ export default function TransactionsPage() {
   // say (crm#1066): one sentence with the button that changes it, or null.
   // Read after the first render; applying it relinks, so the list is refetched.
   const ledgerSuggestionNotice = useBankLedgerSuggestionNotice({ onApplied: refreshTransactions })
+
+  // Bank rows from before the SIE import's last verifikat that the previous
+  // system already booked (crm#1954): one sentence, and the confirm that sets
+  // the ignore flag on them. The marked rows fold out like an ignored row.
+  const handlePreviousSystemMarked = useCallback((ids: string[]) => {
+    const marked = new Set(ids)
+    setExitingIds((prev) => new Set([...prev, ...marked]))
+    setTimeout(() => {
+      setTransactions((prev) => prev.map((t) => (marked.has(t.id) ? { ...t, is_ignored: true } : t)))
+      setExitingIds((prev) => new Set([...prev].filter((id) => !marked.has(id))))
+    }, 350)
+  }, [])
+  const showIgnoredRows = useCallback(() => {
+    setHistoryFilter('ignored')
+    setMode('history')
+  }, [])
+  const previousSystemNotice = usePreviousSystemRowsNotice({
+    openRowCount: pendingRowCount,
+    onMarked: handlePreviousSystemMarked,
+    onShowIgnored: showIgnoredRows,
+  })
 
   function handleSelectInvoiceFromPicker(invoice: Invoice & { customer?: Customer }) {
     if (!invoicePickerTransaction) return
@@ -4413,20 +4259,14 @@ export default function TransactionsPage() {
   function openMatchDialog(transaction: TransactionWithInvoice) {
     setSelectedTransaction(transaction)
     // An invoice hint wins when both are present (mirrors the inbox card's
-    // label precedence); the ROT/RUT payout has its own confirm dialog.
-    if (
-      !transaction.potential_invoice &&
-      !transaction.potential_supplier_invoice &&
-      transaction.potential_rot_rut_payout
-    ) {
+    // label precedence); the ROT/RUT payout and the utlägg repayment have
+    // their own confirm dialogs.
+    const dialog = suggestedMatchDialog(transaction)
+    if (dialog === 'rot_rut') {
       setRotRutMatchDialogOpen(true)
       return
     }
-    if (
-      !transaction.potential_invoice &&
-      !transaction.potential_supplier_invoice &&
-      transaction.potential_expense_payout
-    ) {
+    if (dialog === 'expense_payout') {
       setExpensePayoutDialogOpen(true)
       return
     }
@@ -4445,6 +4285,17 @@ export default function TransactionsPage() {
   // Opened from the picker "Byt" opened, it gets the underlag the closed
   // review held; every other way in starts without one.
   function openReview(transaction: TransactionWithInvoice, proposal: BookingProposal, picked: boolean) {
+    // With the booking screen switched on, the row opens there with the
+    // proposal used (a pick, or one the server would not book unreviewed).
+    if (bookingScreen) {
+      setTemplatePickerOpen(false)
+      setTemplatePickerUnderlag(null)
+      stagePickedProposal(transaction.id, proposal)
+      router.push(
+        bookingScreenHref({ kind: 'transaction', transactionId: transaction.id, account: null, picked: true }, `/transactions${window.location.search}`),
+      )
+      return
+    }
     const underlag = underlagForReview(templatePickerUnderlag, {
       transactionId: transaction.id,
       fromPicker: templatePickerOpen,
@@ -4461,16 +4312,23 @@ export default function TransactionsPage() {
     openReview(tx, proposalFromTemplate(template, 'manual'), true)
   }
 
+  // With the booking screen switched on, Bokför on a row opens the row there,
+  // as from Att bokföra and Hem: the screen offers the row's suggestion.
+  function openRowOnBookingScreen(transaction: TransactionWithInvoice) {
+    router.push(bookingScreenHref({ kind: 'transaction', transactionId: transaction.id, account: null }, `/transactions${window.location.search}`))
+  }
+
   // Bokför on a row that carries a proposal goes straight to the
   // review with that template set; no picker in between.
   function bookProposal(transaction: TransactionWithInvoice) {
     const s = rowProposalFor(transaction)
-    if (!s) return openCategoryDialog(transaction)
+    if (!s) return bookingScreen ? openRowOnBookingScreen(transaction) : openCategoryDialog(transaction)
     // A decision the company already made (a rule, a settled counterpart, a
     // sure read of a receipt) books from the row; Ångra sits on the toast.
     // The company's switch and the rule's own say come first
     // (lib/transactions/direct-booking.ts), and the server judges it again.
     if (directBooking && !reviewRequired(s, directBooking)) return void bookDirect(transaction, s)
+    if (bookingScreen) return openRowOnBookingScreen(transaction)
     openReview(transaction, s, false)
   }
 
@@ -4546,6 +4404,13 @@ export default function TransactionsPage() {
 
   function handleManualBooking() {
     setTemplatePickerOpen(false)
+    // With the booking screen switched on, "Bokför manuellt" opens the row
+    // there (betalning, underlag and kontering on one page) instead of the
+    // dialog.
+    if (templatePickerTransaction && bookingScreen) {
+      router.push(bookingScreenHref({ kind: 'transaction', transactionId: templatePickerTransaction.id, account: null }, `/transactions${window.location.search}`))
+      return
+    }
     if (templatePickerTransaction) {
       setBookingDialogTransaction(templatePickerTransaction)
       setBookingDialogTemplate(null)
@@ -4579,6 +4444,11 @@ export default function TransactionsPage() {
   // prefilled on the counter line of the journal entry form.
   function handlePickAccount(accountNumber: string) {
     if (!templatePickerTransaction) return
+    if (bookingScreen) {
+      setTemplatePickerOpen(false)
+      router.push(bookingScreenHref({ kind: 'transaction', transactionId: templatePickerTransaction.id, account: accountNumber }, `/transactions${window.location.search}`))
+      return
+    }
     setBookingDialogTransaction(templatePickerTransaction)
     setBookingDialogTemplate(null)
     setBookingDialogProposalLines(null)
@@ -4741,6 +4611,12 @@ export default function TransactionsPage() {
         >
           {t('review_attn_body', { count: suggestionItems.length })}
         </AttnLine>
+      ) : previousSystemNotice && effectiveSourceFilter !== 'skatteverket' ? (
+        // Rows the previous system booked split, so no single imported bank
+        // line pairs with them (crm#1954). After the review nudge: a row with
+        // a proposed verifikat is better linked than marked, and is not
+        // counted here.
+        previousSystemNotice
       ) : null}
 
       {/* Toolbar: [Att bokföra/Alla-seg] [source ContextPicker] ... [sök] */}
@@ -4749,7 +4625,8 @@ export default function TransactionsPage() {
           value={mode}
           onChange={handleModeChange}
           options={[
-            { value: 'inbox', label: t('mode_inbox'), count: inboxScope.inScope },
+            // With Att bokföra in the menu the name means that list: this tab is the register's unbooked rows.
+            { value: 'inbox', label: t(bookingScreen ? 'mode_inbox_unbooked' : 'mode_inbox'), count: inboxScope.inScope },
             { value: 'history', label: t('mode_all') },
             // Review tab exists only while suggestions do (or while the user is
             // standing in it after emptying the list): a permanent third tab
@@ -4872,7 +4749,7 @@ export default function TransactionsPage() {
                     </span>
                     {selectedIds.size > 0 && (
                       <>
-                        <Button onClick={() => setShowBatchSelector(true)} disabled={!canWrite}>
+                        <Button onClick={() => setShowBatchSelector(true)} disabled={!canWrite} title={lockedTitle}>
                           {t('batch_book')}
                         </Button>
                         {/* Bulk-book (samlingsverifikation): only when ≥2 selected
@@ -4882,7 +4759,7 @@ export default function TransactionsPage() {
                           variant="outline"
                           onClick={() => setBulkBookOpen(true)}
                           disabled={!canWrite || !bulkBookEligible}
-                          title={!bulkBookEligible ? t('batch_bulk_book_hint') : undefined}
+                          title={lockedTitle ?? (!bulkBookEligible ? t('batch_bulk_book_hint') : undefined)}
                         >
                           {t('batch_bulk_book')}
                         </Button>
@@ -4891,6 +4768,7 @@ export default function TransactionsPage() {
                           className={cn(QUIET_LINK_CLASS, 'hover:text-destructive')}
                           onClick={handleBatchDelete}
                           disabled={!canWrite}
+                          title={lockedTitle}
                         >
                           {t('batch_delete')}
                         </button>
@@ -4901,13 +4779,13 @@ export default function TransactionsPage() {
                         the deterministic subset of the selection is bookable;
                         the rest is still ignorable below. */}
                     {skvBookableSelectedRows.length > 0 && (
-                      <Button onClick={() => setSkvBulkConfirmOpen(true)} disabled={!canWrite}>
+                      <Button onClick={() => setSkvBulkConfirmOpen(true)} disabled={!canWrite} title={lockedTitle}>
                         {t('batch_skv_book', { count: skvBookableSelectedRows.length })}
                       </Button>
                     )}
                     {/* Ignorera spans both selections (bank + skattekonto):
                         one confirmation, one progress counter, one toast. */}
-                    <button type="button" className={QUIET_LINK_CLASS} onClick={handleBatchIgnore} disabled={!canWrite}>
+                    <button type="button" className={QUIET_LINK_CLASS} onClick={handleBatchIgnore} disabled={!canWrite} title={lockedTitle}>
                       {t('batch_ignore')}
                     </button>
                     {(selectedIds.size < selectableInboxIds.length ||
@@ -5023,6 +4901,7 @@ export default function TransactionsPage() {
                         accountLogo={accountLogoFor(item.data)}
                         proposal={proposalFor(item.data)}
                         onBookProposal={bookProposal}
+                        onOpenBookingScreen={bookingScreen ? openRowOnBookingScreen : undefined}
                         salaryRunPeriod={salaryPayoutFor(item.data)?.period ?? null}
                         giroCounterparty={giroCounterpartyFor(item.data)}
                       />
@@ -5072,6 +4951,7 @@ export default function TransactionsPage() {
           onSkvMatch={r => setSkvMatchTarget(r)}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}
+          loadMoreFailed={loadMoreFailed}
           onLoadMore={loadMoreTransactions}
           giroCounterpartyFor={giroCounterpartyFor}
         />

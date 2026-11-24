@@ -20,6 +20,8 @@ import { insertAuthUser, insertCompany, insertCompanyMember, insertFiscalPeriod 
 
 /** Removed, or revoked and shredded, by public.erase_user_personal_data. */
 const ERASED = new Set([
+  // Company formation drafts (personnummer sealed), before the company exists
+  'company_formations.user_id',
   // Access and credentials
   'api_keys.user_id',
   'calendar_feeds.user_id',
@@ -88,6 +90,7 @@ const RETAINED = new Set([
   'payment_signing_links.created_by', // Who asked the firmatecknare to sign a basket of payments; the company keeps the record.
   'signing_requests.created_by', // Who sent a document for BankID signing; the company keeps the record with the signatures.
   'share_register_events.created_by', // Who entered an aktiebok entry; the aktiebok is kept 10 years after dissolution (ABL 5:3).
+  'share_register_settings.setup_completed_by', // Who said every share was entered and took the aktiebok into use; kept with the register.
   'company_roles.created_by', // Who registered a role; the company keeps the roles over time.
   'company_signatory_rules.created_by', // Who registered the firmateckning; the company keeps it over time.
   'beneficial_owner_assessments.assessed_by', // Who made the LRVH 2:1 assessment; kept five years after a change.
@@ -148,9 +151,11 @@ const RETAINED = new Set([
   'event_log.user_id',
   'fiscal_period_tax_adjustments.user_id',
   'ink3_underlag_inputs.updated_by', // Who last saved a förening's INK3 inputs; the company keeps the record.
+  'ne_declaration_inputs.updated_by', // Who last saved an enskild firma's NE-bilaga inputs; the company keeps the record.
   'tax_loss_carryforwards.updated_by', // Who last saved a year of the underskottsregister; the company keeps the record.
   'fiscal_periods.user_id',
   'journal_entries.user_id',
+  'rattelse_actor_names.user_id', // The name of who corrected an entry, kept until that year's bevarandetid ends (BFL 5 kap. 5 §), then deleted daily.
   'journal_entry_no_doc_required.user_id',
   'operations.user_id',
   'payment_match_log.user_id',
@@ -237,6 +242,9 @@ const RETAINED = new Set([
   'bolagsverket_subscriptions.user_id',
   // Company, team and configuration
   'agent_memory.created_by_user_id',
+  // Who filed and who answered a question put to the company: the company keeps its question list.
+  'company_questions.answered_by',
+  'company_questions.created_by_user_id',
   'agent_profiles.verified_by_user_id',
   'company_skills.created_by',
   'community_feedback.user_id', // An upvote on a shared item: one count among others, no personal content.

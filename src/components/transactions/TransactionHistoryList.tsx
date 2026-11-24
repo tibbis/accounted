@@ -1,7 +1,6 @@
 'use client'
 
 import { useTranslations } from 'next-intl'
-import Link from 'next/link'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useViewerLock } from '@/components/ui/viewer-lock'
@@ -36,6 +35,7 @@ import {
 } from '@/components/icons'
 import { TransactionAttachmentIndicator } from './TransactionAttachmentIndicator'
 import { WithCorrection } from '@/components/bookkeeping/WithCorrection'
+import { VoucherPeekLink } from '@/components/bookkeeping/VoucherPeekLink'
 import { useCanWrite } from '@/lib/hooks/use-can-write'
 import { canDetachDocument } from './detach-underlag'
 import type { JeUnderlagStatus } from '@/lib/transactions/underlag-status'
@@ -89,6 +89,8 @@ interface TransactionHistoryListProps {
   onSkvMatch?: (row: StoredSkattekontoTransaction) => void
   hasMore?: boolean
   isLoadingMore?: boolean
+  /** The last page could not be read: the button says so and becomes the retry. */
+  loadMoreFailed?: boolean
   onLoadMore?: () => void
   /** Whose giro number a row that names nobody shows (lib/transactions/giro-counterparty, crm#1204). */
   giroCounterpartyFor?: (transaction: TransactionWithInvoice) => GiroCounterparty | null
@@ -122,6 +124,7 @@ export default function TransactionHistoryList({
   onSkvMatch,
   hasMore,
   isLoadingMore,
+  loadMoreFailed = false,
   onLoadMore,
   giroCounterpartyFor,
 }: TransactionHistoryListProps) {
@@ -252,9 +255,14 @@ export default function TransactionHistoryList({
           loads every ignored row of the period) where it cannot change the
           visible list. */}
       {hasMore && onLoadMore && !searchTerm && sourceFilter !== 'skatteverket' && filter !== 'ignored' && (
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-2">
+          {loadMoreFailed && !isLoadingMore && (
+            <p role="alert" className="text-[13px] text-muted-foreground">
+              {t('load_more_failed')}
+            </p>
+          )}
           <Button variant="outline" onClick={onLoadMore} loading={isLoadingMore}>
-            {isLoadingMore ? t('loading_more') : t('load_more')}
+            {isLoadingMore ? t('loading_more') : loadMoreFailed ? tCommon('retry') : t('load_more')}
           </Button>
         </div>
       )}
@@ -431,14 +439,14 @@ function BankHistoryRow({
               {linkedEntryIds.map((entryId, index) => {
                 const link = voucherLinks.find((l) => l.journal_entry_id === entryId)
                 return (
-                  <Link
+                  <VoucherPeekLink
                     key={entryId}
-                    href={`/bookkeeping/${entryId}`}
+                    entryId={entryId}
                     className={QUIET_LINK_CLASS}
                   >
                     {(link ? embeddedVoucherLabel(link) : null) ??
                       (index === 0 ? t('view_voucher_short') : `+${index}`)}
-                  </Link>
+                  </VoucherPeekLink>
                 )
               })}
             </>
@@ -592,12 +600,12 @@ function SkattekontoHistoryRow({
       </td>
       <td className={cn(TD_CLASS, 'whitespace-nowrap text-right !pr-0 py-[9px]')}>
         <span className="inline-flex items-center justify-end gap-2">
-          {isBooked ? (
+          {row.journal_entry_id ? (
             <>
               <span className="text-muted-foreground">{t('posted')}</span>
-              <Link href={`/bookkeeping/${row.journal_entry_id}`} className={QUIET_LINK_CLASS}>
+              <VoucherPeekLink entryId={row.journal_entry_id} className={QUIET_LINK_CLASS}>
                 {t('view_voucher_short')}
-              </Link>
+              </VoucherPeekLink>
             </>
           ) : (
             // The actions say the row is not booked: no chip beside them.

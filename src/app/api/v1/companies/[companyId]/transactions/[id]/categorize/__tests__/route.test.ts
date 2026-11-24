@@ -236,7 +236,7 @@ describe('POST /api/v1/.../transactions/{id}/categorize underlag propagation', (
     const body = await res.json()
     expect(res.status).toBe(409)
     expect(body.error.code).toBe('TX_CATEGORIZE_JOURNAL_ENTRY_FAILED')
-    expect(body.error.details.cause).toBe('BOOKKEEPING_DATABASE_ERROR')
+    expect(body.error.details.cause).toBe('PERIOD_LOCKED')
     expect(body.error.details.message).toBe(
       'Perioden är låst. Verifikationen kan inte skapas i en stängd eller låst period.',
     )
@@ -667,6 +667,33 @@ describe('reverse-charge basis pair (#2919)', () => {
     expect(res.status).toBe(200)
     const mapping = createTxJE.mock.calls[0][4] as { vat_lines: Array<{ account_number: string }> }
     expect(mapping.vat_lines.map((l) => l.account_number)).toEqual(expected)
+  })
+
+  // The utlägg's rule (reverseChargeAccountConflict): an account that declares
+  // another box itself, or its own ruta 20-24 for another box than the one
+  // named, takes no reverse charge.
+  it.each([
+    { account_override: '4545', reverse_charge_kind: 'non_eu_services', details: { reason: 'other_box', account_number: '4545' } },
+    { account_override: '4512', reverse_charge_kind: 'eu_services', details: { reason: 'other_box', account_number: '4512' } },
+    {
+      account_override: '4531',
+      reverse_charge_kind: 'eu_services',
+      details: { reason: 'other_kind', account_box: 'ruta22', requested_box: 'ruta21', parameter: 'reverse_charge_kind' },
+    },
+  ])('400 TX_CATEGORIZE_REVERSE_CHARGE_ACCOUNT for $reverse_charge_kind on $account_override, nothing posted', async ({ account_override, reverse_charge_kind, details }) => {
+    const { supabase } = rcSupabase({ account_number: account_override, account_class: 4, is_active: true })
+    mockServiceClient.mockReturnValue(supabase)
+
+    const res = await POST(
+      makeRequest({ is_business: true, category: 'expense_software', vat_treatment: 'reverse_charge', account_override, reverse_charge_kind }),
+      routeParams(),
+    )
+
+    const body = await res.json()
+    expect(res.status).toBe(400)
+    expect(body.error.code).toBe('TX_CATEGORIZE_REVERSE_CHARGE_ACCOUNT')
+    expect(body.error.details).toMatchObject(details)
+    expect(createTxJE).not.toHaveBeenCalled()
   })
 })
 

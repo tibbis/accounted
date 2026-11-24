@@ -18,6 +18,7 @@ import { generateINK2Declaration } from '@/lib/reports/ink2/ink2-engine'
 import {
   generateSRUSubmission as generateInk2SruSubmission,
   getZipFilename as getInk2ZipFilename,
+  Ink2SruBlockedError,
 } from '@/lib/reports/ink2/sru-generator'
 import type { INK2Declaration } from '@/lib/reports/ink2/types'
 import { generateNEDeclaration } from '@/lib/reports/ne-bilaga/ne-engine'
@@ -59,6 +60,7 @@ import {
 import { parseReportDateRange } from '@/lib/reports/date-range'
 import { filesIncomeReturn, resolveCompanyEntityType, usesPersonnummerAsOrgNumber } from '@/lib/company/entity-type'
 import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
+import type { StructuredErrorRemediation } from '@/lib/errors/structured-errors'
 import type { OperationContext, OperationOutcome } from '@/lib/operations/types'
 import type { DimensionCrossLinesPage, DimensionCrossReport, DimensionPnlReport, VatPeriodType } from '@/types'
 
@@ -173,6 +175,9 @@ export async function getInk2SruFile(ctx: OperationContext, periodId: string): P
       data: { filename: getInk2ZipFilename(declaration.data), contentType: 'application/zip', bytes },
     }
   } catch (err) {
+    if (err instanceof Ink2SruBlockedError) {
+      return { ok: false, code: 'TAX_DECL_INK2_SRU_BLOCKED', details: { reason: getUserErrorMessage(err) } }
+    }
     return declarationFailure(ctx, err, 'ink2 sru')
   }
 }
@@ -347,6 +352,25 @@ export interface VatPeriodInput {
 }
 
 /**
+ * The failure for a yearly `year` no recorded räkenskapsår ends in, as
+ * resolvePeriodDates (lib/reports/vat-declaration.ts) refuses it: there is no
+ * helårsmoms period to file or settle, so it is the caller's to change, under
+ * its own code (404) with the sentence naming the räkenskapsår that exist,
+ * never a failed generation. Null for any other error.
+ */
+export function noHelarsmomsPeriodFailure(err: unknown): Failure | null {
+  const refusal = err as { code?: unknown; remediation?: StructuredErrorRemediation } | null
+  if (!(err instanceof Error) || refusal?.code !== 'VAT_REPORT_FISCAL_YEAR_NOT_FOUND') return null
+  return {
+    ok: false,
+    code: 'VAT_REPORT_FISCAL_YEAR_NOT_FOUND',
+    messageSv: getUserErrorMessage(err),
+    messageEn: err.message,
+    ...(refusal.remediation ? { remediation: refusal.remediation } : {}),
+  }
+}
+
+/**
  * The eSKDUpload (v6.0) XML the user uploads at skatteverket.se ("Deklarera
  * via fil"), computed purely from the bookkeeping. Refused without a valid
  * 10- or 12-digit org number: the header would be an "avvisande fel".
@@ -390,6 +414,8 @@ export async function getVatEskdFile(
       },
     }
   } catch (err) {
+    const noPeriod = noHelarsmomsPeriodFailure(err)
+    if (noPeriod) return noPeriod
     ctx.log.error('eSKD file generation failed', err as Error, { ...input })
     return {
       ok: false,
@@ -439,7 +465,7 @@ export async function getBokslutsbilagor(
   try {
     const report = await generateBokslutsbilagor(ctx.supabase, ctx.companyId, periodId, {
       userId: ctx.userId,
-      resolveUserLabels: (ids) => resolveUserLabelsFromProfiles(ctx.supabase, ids),
+      resolveUserLabels: (ids) => resolveUserLabelsFromProfiles(ctx.supabase, ids, ctx.companyId),
       appVersion: currentAppVersion(),
     })
     if (!report) return { ok: false, code: 'FISCAL_PERIOD_NOT_FOUND', details: { period_id: periodId } }
@@ -486,7 +512,7 @@ export async function getBehandlingshistorik(
         categories: input.category ? [input.category] : undefined,
       },
       {
-        resolveUserLabels: (ids) => resolveUserLabelsFromProfiles(ctx.supabase, ids),
+        resolveUserLabels: (ids) => resolveUserLabelsFromProfiles(ctx.supabase, ids, ctx.companyId),
         appVersion: currentAppVersion(),
         globalClient: ctx.supabase,
       },

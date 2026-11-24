@@ -63,6 +63,11 @@ import {
   treatmentDeductsInputVat,
 } from '@/lib/vat/supplier-invoice-line-checks'
 import { allocateDocumentVat, type DocumentRateVat } from '@/lib/vat/document-vat'
+import {
+  rateForStoredRowVat,
+  supplierInvoiceReverseChargeAccountConflict,
+} from '@/lib/bookkeeping/supplier-invoice-registration-lines'
+import type { ChartVatTreatments } from '@/lib/bookkeeping/vat-entries'
 import { linkToJournalEntry } from '@/lib/core/documents/document-service'
 import { parseEntityType } from '@/lib/company/entity-type'
 import { getErrorMessage as getUserErrorMessage } from '@/lib/errors/get-error-message'
@@ -295,6 +300,36 @@ export function reverseChargeLineRateRefusal(
         'reverse_charge invoices must have vat_rate=0 on every line item: the buyer self-assesses VAT.',
       attempted_rate: items[offending].vat_rate,
       reverse_charge: true,
+    },
+  }
+}
+
+/**
+ * The refusal of a reverse-charge invoice with a line on a cost account that
+ * cannot take the reverse charge (supplierInvoiceReverseChargeAccountConflict:
+ * the basis pair beside it would declare the purchase in two boxes), by the
+ * company's momskoder (`chart`). Null when no line is on such an account or
+ * the invoice is not reverse charge. Every door that stores lines asks it,
+ * before anything is written, also where the verifikat is booked later
+ * (kontantmetoden, deferred booking): the builders never refuse.
+ */
+export function reverseChargeAccountRefusal(
+  reverseCharge: boolean,
+  items: ReadonlyArray<{ account_number: string }>,
+  chart: ChartVatTreatments | null,
+): CreateSupplierInvoiceFailure | null {
+  if (!reverseCharge || !chart) return null
+  const refused = supplierInvoiceReverseChargeAccountConflict(items, chart)
+  if (!refused) return null
+  const { conflict } = refused
+  return {
+    ok: false,
+    code: 'SI_REVERSE_CHARGE_ACCOUNT',
+    details: {
+      field: `items[${refused.index}].account_number`,
+      account_number: refused.account,
+      reason: conflict.reason,
+      ...(conflict.reason === 'other_box' ? { account_box: conflict.box } : {}),
     },
   }
 }
@@ -598,6 +633,10 @@ export async function createSupplierInvoice(
 
   const reverseChargeRefusal = reverseChargeLineRateRefusal(reverseCharge, items)
   if (reverseChargeRefusal) return reverseChargeRefusal
+  const accountRefusal = reverseChargeAccountRefusal(
+    reverseCharge, items, reverseCharge ? await fetchChartVatTreatments(supabase, companyId) : null,
+  )
+  if (accountRefusal) return accountRefusal
 
   // Exempt (ML 10 kap) and export purchases carry no Swedish moms, so there
   // is no debiterad ingående moms to deduct: a line claiming a rate or an
@@ -636,6 +675,7 @@ export async function createSupplierInvoice(
   }
   documentVat.lineVat.forEach((lineVat, index) => {
     items[index].vat_amount = lineVat
+    items[index].vat_rate = rateForStoredRowVat(items[index].line_total, items[index].vat_rate, lineVat)
   })
 
   const subtotal = roundOre(items.reduce((sum, i) => sum + i.line_total, 0))

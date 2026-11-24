@@ -78,14 +78,20 @@ export function payoutFeeTotal(fees: readonly PayoutFee[] | null | undefined): n
 /**
  * What the bank row must carry for invoices settled for `allocatedTotal`
  * with `feeTotal` in fees: the customer's provider withheld the fees, the
- * supplier's bank added them.
+ * supplier's bank added them. The row also carries `debtTotal`, the rows
+ * from before that it pays beside the invoices: the supplier debt
+ * (lib/bookkeeping/supplier-debt-lines.ts) or the customer receivable
+ * (lib/bookkeeping/customer-receivable-lines.ts).
  */
 export function payoutBankAmount(
   kind: 'customer_invoice' | 'supplier_invoice',
   allocatedTotal: number,
   feeTotal: number,
+  debtTotal = 0,
 ): number {
-  return kind === 'customer_invoice' ? roundOre(allocatedTotal - feeTotal) : roundOre(allocatedTotal + feeTotal)
+  return kind === 'customer_invoice'
+    ? roundOre(allocatedTotal - feeTotal + debtTotal)
+    : roundOre(allocatedTotal + feeTotal + debtTotal)
 }
 
 /**

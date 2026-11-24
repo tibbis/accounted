@@ -74,12 +74,12 @@ const GENERIC: Record<string, StructuredErrorEntry> = {
   },
   INTERNAL_ERROR: {
     httpStatus: 500,
-    message_sv: 'Ett oväntat serverfel uppstod. Försök igen senare.',
+    message_sv: 'Ett oväntat fel uppstod. Försök igen om en stund, och kontakta support om det fortsätter.',
     message_en: 'Internal server error.',
   },
   VALIDATION_ERROR: {
     httpStatus: 400,
-    message_sv: 'Förfrågan innehåller ogiltiga uppgifter.',
+    message_sv: 'Några uppgifter stämmer inte. Kontrollera fälten och försök igen.',
     message_en: 'Validation error.',
   },
   // A typed handle (lib/handles: je_..., inv_...) sent in a field or path
@@ -102,7 +102,7 @@ const GENERIC: Record<string, StructuredErrorEntry> = {
   },
   FORBIDDEN: {
     httpStatus: 403,
-    message_sv: 'Du har inte behörighet att utföra denna åtgärd.',
+    message_sv: 'Du har inte behörighet att göra det här i företaget. Be en ägare eller administratör om behörighet.',
     message_en: 'Insufficient permissions.',
   },
   // A Postgres privilege/RLS denial (42501) on a write the application
@@ -117,7 +117,7 @@ const GENERIC: Record<string, StructuredErrorEntry> = {
   },
   NOT_FOUND: {
     httpStatus: 404,
-    message_sv: 'Resursen kunde inte hittas.',
+    message_sv: 'Det gick inte att hitta. Det kan ha tagits bort: ladda om sidan.',
     message_en: 'Resource not found.',
   },
   CONFLICT: {
@@ -512,8 +512,9 @@ const BOOKKEEPING: Record<string, StructuredErrorEntry> = {
   ENTRY_ALREADY_REVERSED: {
     httpStatus: 409,
     message_sv:
-      'Verifikationen har redan stornats av en annan användare. Ladda om sidan och försök igen.',
-    message_en: 'Entry was already reversed by a concurrent operation.',
+      'Verifikationen har redan stornats. Ladda om sidan och försök igen.',
+    message_en:
+      'Entry was already reversed: by a concurrent operation, or by a storno posted in a later open period (a posted storno links to it through reverses_id).',
   },
   MIGRATED_DEDUCTION_HELD_BY_REQUEST: {
     httpStatus: 409,
@@ -835,12 +836,13 @@ const BOOKKEEPING: Record<string, StructuredErrorEntry> = {
   },
   JOURNAL_RATTELSE_PERIOD_LOCKED: {
     httpStatus: 409,
-    message_sv: 'Perioden är stängd eller låst: använd rättelseverifikat (storno).',
+    message_sv:
+      'Perioden är stängd eller låst: använd rättelseverifikat (storno). Stornot och det rättade verifikatet bokförs i första öppna period.',
     message_en:
-      'Inline rättelse is only allowed in an open, unlocked period after the company lock date. Past a lock or close, storno is the only lawful correction (BFL 5 kap 5 §).',
+      'Inline rättelse is only allowed in an open, unlocked period after the company lock date. Past a lock or close, storno is the only lawful correction (BFL 5 kap 5 §): the storno and the corrected verifikat are dated in the first open, unlocked period and name the original.',
     remediation: {
       description:
-        'Correct the verifikat with storno (gnubok_correct_entry, POST /journal-entries/{id}/correct). Unlock the period only if the user explicitly asks for it.',
+        'Correct the verifikat with storno (gnubok_correct_entry, POST /journal-entries/{id}/correct): it books the storno and the corrected verifikat in the first open, unlocked period, naming the original, and leaves the original as booked. Unlock the period only if the user explicitly asks for it.',
       tool: 'gnubok_correct_entry',
     },
     thrown_message_sv: true,
@@ -908,13 +910,13 @@ const BOOKKEEPING: Record<string, StructuredErrorEntry> = {
   TARGET_PERIOD_CLOSED: {
     httpStatus: 409,
     message_sv:
-      'Räkenskapsåret som täcker datumet är stängt med bokslut, så inget kan bokföras eller stornas där. Är årsredovisningen för året inte undertecknad, fastställd eller inskickad kan företagets ägare öppna året igen under Inställningar → Bokföring → Räkenskapsår. Annars bokför du rättelsen som ett nytt verifikat i det öppna räkenskapsåret, med hänvisning till originalverifikatet.',
+      'Räkenskapsåret som täcker datumet är stängt med bokslut, så inget kan bokföras eller stornas där. Är årsredovisningen för året inte undertecknad, fastställd eller inskickad kan företagets ägare öppna året igen under Inställningar → Bokföring → Räkenskapsår. Annars rättar du verifikatet med Rätta rader: stornot och det rättade verifikatet bokförs då i första öppna period, med hänvisning till originalet.',
     message_en:
-      'The fiscal year covering the date is closed with a year-end closing, so nothing can be posted or reversed in it. If the annual report for that year has not been signed, adopted or filed, the company owner can reopen the year under Settings → Bookkeeping → Fiscal years. Otherwise, post the correction as a new voucher in the open fiscal year, referring to the original voucher.',
+      'The fiscal year covering the date is closed with a year-end closing, so nothing can be posted or reversed in it. If the annual report for that year has not been signed, adopted or filed, the company owner can reopen the year under Settings → Bookkeeping → Fiscal years. Otherwise, correct the voucher with Correct lines: the storno and the corrected voucher are then posted in the first open period, referring to the original.',
     remediation: {
       description:
-        'Do not retry and do not unlock: a closed year cannot be unlocked. Ask the user whether the årsredovisning for that year has been signed, adopted or filed. Not signed, adopted or filed: the company owner reopens the year in the app under Inställningar → Bokföring → Räkenskapsår (owner only, typed confirmation; there is no API or MCP door), which reverses the year-end closing by storno; the user then books the correction in that year and runs the year-end again. Signed, adopted or filed: book the correction as a new verifikation dated in the open fiscal year (rättelse av fel, K2 punkt 2.12), naming the original voucher in the description.',
-      tool: 'gnubok_create_voucher',
+        'Do not retry and do not unlock: a closed year cannot be unlocked. Ask the user whether the årsredovisning for that year has been signed, adopted or filed. Not signed, adopted or filed: the company owner reopens the year in the app under Inställningar → Bokföring → Räkenskapsår (owner only, typed confirmation; there is no API or MCP door), which reverses the year-end closing by storno; the user then books the correction in that year and runs the year-end again. Signed, adopted or filed: correct it with gnubok_correct_entry, which books the storno and the corrected verifikat dated in the first open, unlocked period, naming the original (rättelse av fel through the open year, K2 punkt 2.12). A reversal or a date move cannot leave the closed year; an opening balance, year-end or VAT settlement verifikat keeps its date, so book a new verifikation in the open year for it instead.',
+      tool: 'gnubok_correct_entry',
     },
   },
   TARGET_PERIOD_LOCKED: {
@@ -923,7 +925,7 @@ const BOOKKEEPING: Record<string, StructuredErrorEntry> = {
     message_en: 'The fiscal period covering the date is locked.',
     remediation: {
       description:
-        'Unlock the period (if status is "locked", not "closed") or use a date inside an open period.',
+        'Unlock the period (if status is "locked", not "closed") or use a date inside an open period. To correct a posted verifikat in it without unlocking, use gnubok_correct_entry: the storno and the corrected verifikat are booked in the first open period.',
       tool: 'gnubok_unlock_period',
     },
   },
@@ -1179,6 +1181,25 @@ const TRANSACTIONS: Record<string, StructuredErrorEntry> = {
         'Resend with reverse_charge_kind eu_services, non_eu_services or eu_goods (MCP: vat_treatment reverse_charge_eu_services, reverse_charge_non_eu_services or reverse_charge_eu_goods), read off the seller country on the invoice. details.reason says why the box could not be read.',
     },
   },
+  // A reverse charge on a cost account that cannot take it
+  // (reverseChargeAccountConflict, the rule the utlägg books by): one that
+  // declares a box of its own, where the basis pair would declare the
+  // purchase twice, or one whose own ruta 20-24 is another than the box the
+  // caller stated. The service names the account, the boxes and the remedy;
+  // this is the fallback.
+  TX_CATEGORIZE_REVERSE_CHARGE_ACCOUNT: {
+    httpStatus: 400,
+    message_sv:
+      'Omvänd betalningsskyldighet kan inte bokföras på det valda kostnadskontot: kontot redovisar själv en momsruta som köpet då också skulle deklareras i, eller en annan ruta än den angivna. Redovisar kontot trepartshandel (ruta 37) eller import (ruta 50) ska köpet bokföras utan omvänd betalningsskyldighet.',
+    message_en:
+      'Reverse charge cannot be booked on the chosen cost account: the account reports a VAT box of its own that the purchase would then also be declared in, or another box than the one stated. If the account reports triangulation (box 37) or import (box 50), book the purchase without reverse charge.',
+    thrown_message_sv: true,
+    remediation: {
+      description:
+        'details.reason "other_box": details.account_number reports details.account_box itself (ruta37 trepartshandel, ruta50 import); such a purchase is not reverse charge, so book it without reverse charge (trepartshandel without VAT, an import with its import VAT). "basis_offset": 4598 is the basis offset, book the purchase on its cost account. "no_rate": the account\'s reverse-charge momskod has no rate of 25, 12 or 6 %; correct the rate in the chart of accounts or book on an ordinary cost account. "other_kind": the account reports details.account_box itself, not details.requested_box; resend with no box (or with that box when it is ruta20, ruta21 or ruta22, the boxes a caller can name), or book the purchase on an ordinary cost account.',
+      resource: 'Accounted://chart-of-accounts',
+    },
+  },
   TX_CATEGORIZE_REVERSE_CHARGE_SELLER_VAT: {
     httpStatus: 400,
     message_sv:
@@ -1187,7 +1208,7 @@ const TRANSACTIONS: Record<string, StructuredErrorEntry> = {
       'Reverse charge refused: the attached document shows the seller charged VAT. If it is foreign VAT the seller charged in error, confirm it (confirm_foreign_seller_vat): the purchase is then booked as reverse charge on the whole amount paid and the foreign VAT is not deducted. Swedish VAT is booked at its rate.',
     remediation: {
       description:
-        'details.reason "not_confirmed": if the VAT on the document is another country\'s VAT the seller charged in error, resend with confirm_foreign_seller_vat=true. That states the VAT is foreign: the reverse charge is booked on the whole amount paid (the foreign VAT included, never deducted), and the user should ask the seller for a credit note. If it is Swedish VAT, resend with the rate (standard_25) and no reverse charge. details.reason "seller_vat_swedish": the document names a Swedish seller, so the flag is not honoured; book with the rate.',
+        'details.reason "not_confirmed" with details.address_country: the document\'s VAT number is Swedish but its address is in that country. Ask the user. If the purchase is a service taxed in Sweden under the main rule and the seller is not established in Sweden for the sale (ML 16 kap. 4 and 9 §§), resend with confirm_foreign_seller_vat=true: the reverse charge is booked on the whole amount paid and the VAT the seller charged is never deducted. If the seller\'s establishment in Sweden takes part in the sale, resend with the rate (standard_25). details.reason "not_confirmed" without it: if the VAT on the document is another country\'s VAT the seller charged in error, resend with confirm_foreign_seller_vat=true. That states the VAT is foreign: the reverse charge is booked on the whole amount paid (the foreign VAT included, never deducted), and the user should ask the seller for a credit note. If it is Swedish VAT, resend with the rate (standard_25) and no reverse charge. details.reason "seller_vat_swedish": the document names a Swedish seller, so the flag is not honoured; book with the rate.',
     },
   },
   // The row's one click (review_shown false) on a proposal the direct-booking
@@ -2090,6 +2111,13 @@ const INVOICE: Record<string, StructuredErrorEntry> = {
     message_sv: 'Begäran om utbetalning hittades inte.',
     message_en: 'Payout request not found.',
   },
+  ROT_RUT_COMPANY_ORG_NUMBER_INVALID: {
+    httpStatus: 400,
+    message_sv:
+      'Företagets organisationsnummer saknas eller är ogiltigt. Filen för grön teknik anger företaget som utförare: komplettera organisationsnumret i företagsinställningarna.',
+    message_en:
+      "The company's organisation number is missing or invalid. The green technology file names the company as the installer: complete the organisation number in the company settings.",
+  },
   ROT_RUT_NO_ELIGIBLE_INVOICES: {
     httpStatus: 400,
     message_sv: 'Ingen av de valda fakturorna kan ingå i filen. Se blockeringarna per faktura.',
@@ -2794,10 +2822,41 @@ const INVOICE: Record<string, StructuredErrorEntry> = {
     message_sv: 'Det här är företagets primära bankkonto och kan inte stängas av. Välj "Gör primärt" på ett annat bankkonto först.',
     message_en: 'This is the company’s primary bank account and cannot be disabled. Choose "Make primary" on another bank account first.',
   },
+  // reenableIfUnused: rows were put on a turned-off account marked to be
+  // printed on invoices, which rows never turn back on (its payment details
+  // may be stale). A turned-off account is printed on no invoice, so the
+  // sentence says "marked". Either fix lets the rows land: turning it on
+  // prints it on invoices again, hiding it on invoices lets the rows turn it
+  // on as an ordinary account.
   CASH_ACCOUNT_DISABLED_PAYEE: {
     httpStatus: 409,
-    message_sv: 'Bankkontot är avstängt och visas på fakturor. En ägare eller administratör behöver aktivera det under Inställningar innan transaktioner kan läggas på det.',
-    message_en: 'This bank account is turned off and is printed on invoices. An owner or admin needs to turn it on in Settings before transactions can be put on it.',
+    message_sv:
+      'Bankkontot är avstängt och markerat att visas på fakturor. En ägare eller administratör behöver aktivera det under Inställningar → Bokföring (då visas det på fakturor igen) eller dölja det på fakturor under Inställningar → Fakturering innan transaktioner kan läggas på det.',
+    message_en:
+      'This bank account is turned off and marked to be printed on invoices. An owner or admin needs to turn it on under Inställningar → Bokföring (Settings → Bookkeeping; it is then printed on invoices again) or hide it on invoices under Inställningar → Fakturering (Settings → Invoicing) before transactions can be put on it.',
+    remediation: {
+      description:
+        'Retrying does not help until an owner or admin turns the account on (it is then printed on invoices again) or hides it on invoices: gnubok_update_cash_account stages either (enabled or invoice_payee). Or send the row with the ledger_account of another bank account (gnubok_list_cash_accounts).',
+    },
+    retryable: false,
+  },
+  // ensureManualCashAccount: the kassakonto already on the row's ledger
+  // account is in another currency, and a ledger holds one (cash_accounts is
+  // UNIQUE on company and ledger). details: ledger_account, account_currency,
+  // currency. The sentence names only the cause: the bank-file import and the
+  // Stripe sync read it through getErrorMessage too, and each caller says its
+  // own next step (the create_transactions approval in commit.ts).
+  CASH_ACCOUNT_CURRENCY_MISMATCH: {
+    httpStatus: 409,
+    message_sv:
+      'Bankkontot på det bokföringskontot har en annan valuta än transaktionen, och ett bankkonto har bara en valuta.',
+    message_en:
+      'The bank account on that ledger account is in another currency than the transaction, and a bank account holds one currency.',
+    remediation: {
+      description:
+        'Retrying does not help. Send the row again with ledger_account set to the bank account in its currency (gnubok_list_cash_accounts), or to a free BAS 19xx account: a missing kassakonto is created in the row\'s currency.',
+    },
+    retryable: false,
   },
   CASH_ACCOUNT_PRIMARY_INELIGIBLE: {
     httpStatus: 400,
@@ -3530,6 +3589,28 @@ const INVOICE: Record<string, StructuredErrorEntry> = {
     message_sv: 'Billo behöver en företrädare som har loggat in med BankID. Logga in med BankID och försök igen.',
     message_en: 'Billo needs a representative who has signed in with BankID. Sign in with BankID and try again.',
   },
+  // Kivra receive: lib/digital-mailboxes/connect.ts, kivraOwnershipRefusal.
+  DIGITAL_MAILBOX_SIGNATORY_BANKID_REQUIRED: {
+    httpStatus: 403,
+    message_sv:
+      'Kivra-brevlådan får bara kopplas av en firmatecknare för företaget, och det ser vi när du loggar in med BankID. Koppla BankID under Inställningar om du inte har gjort det, logga sedan in med BankID och försök igen.',
+    message_en:
+      'Only a signatory of the company may connect the Kivra mailbox, and we see that when you sign in with BankID. Link BankID under Settings if you have not, then sign in with BankID and try again.',
+  },
+  DIGITAL_MAILBOX_NOT_SIGNATORY: {
+    httpStatus: 403,
+    message_sv:
+      'Enligt Bolagsverket, som vi läste när du senast loggade in med BankID, är du inte firmatecknare för företaget. Be en styrelseledamot, vd eller annan firmatecknare att koppla Kivra-brevlådan. Har du nyss blivit firmatecknare: logga in med BankID igen.',
+    message_en:
+      'The companies register, read at your last BankID sign-in, does not list you as a signatory of the company. Ask a board member, the managing director or another signatory to connect the Kivra mailbox. Just became one: sign in with BankID again.',
+  },
+  DIGITAL_MAILBOX_ORG_NUMBER_SHARED: {
+    httpStatus: 409,
+    message_sv:
+      'Ett annat företag i Accounted har samma organisationsnummer, så Kivra-brevlådan kan inte kopplas. Arkivera det företag ni inte använder, eller kontakta oss så hjälper vi till.',
+    message_en:
+      'Another company in Accounted has the same organisation number, so the Kivra mailbox cannot be connected. Archive the company you do not use, or contact us and we will help.',
+  },
   DIGITAL_MAILBOX_ALREADY_CONNECTED: {
     httpStatus: 409,
     message_sv: 'Brevlådan är redan kopplad till Accounted.',
@@ -3539,6 +3620,16 @@ const INVOICE: Record<string, StructuredErrorEntry> = {
     httpStatus: 409,
     message_sv: 'Företagets Billo-brevlåda är redan kopplad till en annan tjänst. Koppla bort den där först.',
     message_en: 'The company\'s Billo mailbox is already connected to another partner. Disconnect it there first.',
+  },
+  DIGITAL_MAILBOX_SENDER_ELSEWHERE: {
+    httpStatus: 409,
+    message_sv: 'Företaget skickar redan via Kivra genom en annan tjänst, och Kivra tog inte emot vår förfrågan om att Accounted också får skicka. Kontakta oss så löser vi det.',
+    message_en: 'The company already sends through Kivra via another service, and Kivra did not take our request for Accounted to send too. Contact us and we will sort it out.',
+  },
+  DIGITAL_MAILBOX_SENDER_REQUEST_REJECTED: {
+    httpStatus: 409,
+    message_sv: 'Kivra nekade att Accounted skickar för företaget, eftersom det redan skickar via en annan tjänst. Kontakta oss så hjälper vi till.',
+    message_en: 'Kivra declined to let Accounted send for the company, since it already sends through another service. Contact us and we will help.',
   },
   DIGITAL_MAILBOX_PROVIDER_FAILED: {
     httpStatus: 502,
@@ -4740,6 +4831,23 @@ const VAT_REPORT: Record<string, StructuredErrorEntry> = {
     message_sv: 'Momsdeklarationen kunde inte beräknas.',
     message_en: 'Failed to calculate VAT declaration.',
   },
+  // Helårsmoms is named by the year its räkenskapsår ends; a year no recorded
+  // räkenskapsår ends in has no helårsmoms period (resolvePeriodDates). The
+  // thrown message_en names the räkenskapsår the company has.
+  VAT_REPORT_FISCAL_YEAR_NOT_FOUND: {
+    httpStatus: 404,
+    message_sv:
+      'Inget räkenskapsår slutar det året, så det finns ingen helårsmoms för det. Helårsmoms redovisas per ' +
+      'räkenskapsår och anges med året då räkenskapsåret slutar.',
+    message_en:
+      'No räkenskapsår ends in that year, so there is no helårsmoms period for it. Helårsmoms is declared per ' +
+      'räkenskapsår and named by the year it ends.',
+    remediation: {
+      description: 'Pass year = the year one of the company\'s räkenskapsår ends (period_type yearly, period 1).',
+      tool: 'gnubok_list_fiscal_periods',
+    },
+    retryable: false,
+  },
   // Korrigera on the reverse-charge basis worklist (crm#1096): the route reads
   // the verifikat again at correction time and refuses rather than add a basis
   // the declaration would count twice.
@@ -5023,6 +5131,11 @@ const TAX_DECL: Record<string, StructuredErrorEntry> = {
     message_sv: 'SRU-filen kan inte laddas ner förrän bokföringen är rättad. Orsaken står i NE-bilagans varningar.',
     message_en: 'The NE-bilaga SRU file is refused until the books are corrected. details.reason and the NE-bilaga warnings name the cause.',
   },
+  TAX_DECL_INK2_SRU_BLOCKED: {
+    httpStatus: 422,
+    message_sv: 'SRU-filen kan inte laddas ner förrän deklarationen stämmer med bokföringen. Orsaken står i INK2-deklarationens varningar.',
+    message_en: 'The INK2 SRU file is refused until the declaration ties to the books. details.reason and the INK2 warnings name the cause.',
+  },
   // INK3 underlag for ideell förening (lib/reports/ink3, product decisions on #47).
   TAX_DECL_INK3_WRONG_LEGAL_FORM: {
     httpStatus: 400,
@@ -5053,9 +5166,9 @@ const TAX_DECL: Record<string, StructuredErrorEntry> = {
   VAT_SETTLEMENT_ALREADY_BOOKED: {
     httpStatus: 409,
     message_sv:
-      'Momsen för perioden är redan bokförd. Annullera det verifikatet först om perioden behöver bokföras om.',
+      'Momsen för perioden är redan bokförd. Om perioden behöver bokföras om, återför först varje momsredovisning som är bokförd för den.',
     message_en:
-      'The VAT for this period is already booked. Reverse that journal entry first if the period needs to be booked again.',
+      'The VAT for this period is already booked. If the period needs to be booked again, first reverse every VAT settlement booked for it.',
   },
   VAT_SETTLEMENT_EMPTY: {
     httpStatus: 400,
@@ -5373,14 +5486,14 @@ const BANK_FILE: Record<string, StructuredErrorEntry> = {
   BANK_FILE_DEPOSIT_SPEC_DETECTED: {
     httpStatus: 400,
     message_sv:
-      'Filen är Bankgirots insättningsuppgifter (BG Max), inte ett kontoutdrag. Den kopplar inbetalningarna till bankrader som redan finns.',
+      'Filen är insättningsuppgifter (BG Max eller camt.054), inte ett kontoutdrag. Den kopplar inbetalningarna till bankrader som redan finns.',
     message_en:
-      'This file is a Bankgirot deposit specification (BG Max), not a bank statement. It attaches the payments to bank rows that already exist.',
+      'This file is a deposit specification (BG Max or camt.054), not a bank statement. It attaches the payments to bank rows that already exist.',
   },
   BGMAX_NOT_DEPOSIT_FILE: {
     httpStatus: 400,
-    message_sv: 'Filen är inte en BG Max-fil med Bankgirots insättningsuppgifter.',
-    message_en: 'The file is not a BG Max deposit specification file.',
+    message_sv: 'Filen är varken en BG Max-fil från Bankgirot eller bankens avisering av inbetalningar (camt.054).',
+    message_en: 'The file is neither a Bankgirot BG Max file nor the bank\'s notification of incoming payments (camt.054).',
   },
   BGMAX_TEST_FILE: {
     httpStatus: 400,
@@ -5391,6 +5504,11 @@ const BANK_FILE: Record<string, StructuredErrorEntry> = {
     httpStatus: 400,
     message_sv: 'Filen innehåller inga insättningar som går att koppla: summan av betalningarna stämmer inte med insättningen, eller filen är avkortad.',
     message_en: 'The file holds no deposit that can be attached: the payments do not add up to the deposit, or the file is truncated.',
+  },
+  CAMT054_NO_DEPOSITS: {
+    httpStatus: 400,
+    message_sv: 'Filen innehåller inga bokförda inbetalningar som går att koppla: posterna saknar betalningsuppgifter, eller betalningarna summerar inte till posten.',
+    message_en: 'The file holds no booked incoming payment that can be attached: the entries carry no payment details, or the payments do not add up to the entry.',
   },
   BANK_FILE_UNDO_NOT_FOUND: {
     httpStatus: 404,
@@ -7327,6 +7445,23 @@ const SUPPLIER_INVOICE_WAVE4: Record<string, StructuredErrorEntry> = {
     message_en:
       'No fiscal year covers the invoice date. Create the fiscal year first, or change the invoice date.',
   },
+  // A reverse-charge supplier invoice line on a cost account that cannot take
+  // it (supplierInvoiceReverseChargeAccountConflict, the rule the utlägg and
+  // bank categorization book by): the basis pair beside it would declare the
+  // purchase in two boxes. Refused at registration, inbox conversion and when
+  // a line is moved to another account.
+  SI_REVERSE_CHARGE_ACCOUNT: {
+    httpStatus: 400,
+    message_sv:
+      'Omvänd betalningsskyldighet kan inte bokföras på kontot för raden: kontot redovisar själv en momsruta (import i ruta 50, trepartshandel i ruta 37), är motkontot 4598, eller har en momskod för omvänd betalningsskyldighet utan momssats i kontoplanen. Köpet skulle då deklareras två gånger. En import registreras utan omvänd betalningsskyldighet och med importmomsen (ruta 60-62), ett köp vid trepartshandel utan omvänd betalningsskyldighet och utan moms; annars bokför raden på det kostnadskonto köpet avser.',
+    message_en:
+      'Reverse charge cannot be booked on the line\'s account: the account reports a VAT box itself (import in box 50, triangulation in box 37), is the 4598 offset, or has a reverse-charge momskod without a rate in the chart of accounts. The purchase would then be declared twice. Register an import without reverse charge and with its import VAT (boxes 60-62), a triangulation purchase without reverse charge and without VAT; otherwise book the line on the cost account the purchase is for.',
+    remediation: {
+      description:
+        'details.field names the line and details.account_number its account. details.reason "other_box": the account reports details.account_box itself (ruta37 trepartshandel, ruta50 import); such a purchase is not reverse charge, so register it without reverse charge (trepartshandel without VAT, an import with its import VAT in rutor 60-62). "basis_offset": 4598 is the basis offset, book the line on its cost account. "no_rate": the account\'s reverse-charge momskod has no rate of 25, 12 or 6 %; correct the rate in the chart of accounts or book on an ordinary cost account. Nothing was written.',
+      resource: 'Accounted://chart-of-accounts',
+    },
+  },
   SI_CREATE_ACCRUAL_REVERSE_CHARGE: {
     httpStatus: 400,
     message_sv:
@@ -7700,6 +7835,26 @@ const SUPPLIER_INVOICE_WAVE4: Record<string, StructuredErrorEntry> = {
     message_sv: 'Krediteringen kunde inte ångras.',
     message_en:
       'The credit could not be undone. A locked or closed period refuses the storno of the credit note; details.reason names the cause.',
+  },
+  // A credit note rests at 'credited' like its original, so its own id once
+  // passed for the original's: the preview restored the credit note as an
+  // invoice to pay, a write supplier_invoices_credit_note_not_payable refuses.
+  // The original is the way only while it is credited by this credit note:
+  // most imported credit notes are linked to no original (credited_invoice_id
+  // null, and uncredit finds a credit note only through that link), an
+  // imported original often rests at 'paid', and a reversed credit note's
+  // original may since carry a newer credit. Each case is said.
+  SI_UNCREDIT_CREDIT_NOTE: {
+    httpStatus: 400,
+    message_sv:
+      'En kreditering ångras på originalfakturan, inte på kreditfakturan. Är kreditfakturan kopplad till en krediterad originalfaktura och inte redan ångrad, gå till originalfakturan och välj "Ångra kreditering" där. Annars går krediteringen inte att ångra här.',
+    message_en:
+      'This id is a credit note; a credit is undone on its original invoice. Send the original\'s id from details.credited_invoice_id while this credit note is not reversed (details.credit_note_status). Otherwise its credit cannot be undone here: a null credited_invoice_id links no original, and a reversed credit note is already undone.',
+    remediation: {
+      description:
+        'Call uncredit again with the original invoice id in details.credited_invoice_id. Not when details.credit_note_status is reversed: that credit is already undone, and uncredit on the original would undo a newer credit instead. When credited_invoice_id is null, ask the person what to do: uncredit finds a credit note only through that link, so calling it on an original picked by hand would restore that invoice and leave this credit note in place. An original that is not credited answers changed=false: nothing is left to undo.',
+      tool: 'gnubok_uncredit_supplier_invoice',
+    },
   },
   SI_ITEM_NOT_FOUND: {
     httpStatus: 404,
@@ -8812,8 +8967,7 @@ const ASSISTANT_CHAT: Record<string, StructuredErrorEntry> = {
   // has the chat switched off (ASSISTANT_CHAT_ENABLED): no turn runs, and the
   // sentence says where the person's own assistant connects. 409 like the
   // other switched-off answers, and never 503: the chat console reads a 503
-  // as "no AI backend configured". Every intent is refused, the onboarding
-  // interview included.
+  // as "no AI backend configured". Every intent is refused.
   ASSISTANT_CHAT_OFF: {
     httpStatus: 409,
     message_sv: 'Chatten är avstängd. Koppla din egen assistent, till exempel Claude, under Agenter > Koppla en agent.',
@@ -9673,6 +9827,44 @@ const MATCH_BATCH: Record<string, StructuredErrorEntry> = {
     httpStatus: 400,
     message_sv: 'Avgifterna måste vara mindre än fakturorna de reglerar.',
     message_en: 'The fees must be smaller than the invoices they settle.',
+  },
+  BATCH_DEBT_INVALID: {
+    httpStatus: 400,
+    message_sv:
+      'En rad för tidigare leverantörsskuld är ogiltig. Högst 5 extra rader tillsammans med avgiftsraderna, var och en med konto och ett belopp över noll i hela ören.',
+    message_en:
+      'A row for an earlier supplier debt is invalid. At most 5 extra rows together with the fee rows, each with an account and an amount above zero in whole öre.',
+  },
+  BATCH_DEBT_ACCOUNT_INVALID: {
+    httpStatus: 400,
+    message_sv:
+      'En tidigare leverantörsskuld bokförs på ett aktivt konto för leverantörsskulder, 2440 till 2449. Aktivera kontot i kontoplanen eller välj ett annat.',
+    message_en:
+      'An earlier supplier debt is booked on an active supplier debt account, 2440 to 2449. Activate the account in the chart of accounts or choose another.',
+  },
+  BATCH_DEBT_SUPPLIER_ONLY: {
+    httpStatus: 400,
+    message_sv: 'En tidigare leverantörsskuld kan bara bokas på en utbetalning till leverantörer, inte på en inbetalning.',
+    message_en: 'An earlier supplier debt can only be booked on a payment to suppliers, not on an incoming payment.',
+  },
+  BATCH_RECEIVABLE_INVALID: {
+    httpStatus: 400,
+    message_sv:
+      'En rad för tidigare kundfordran är ogiltig. Högst 5 extra rader tillsammans med avgiftsraderna, var och en med konto och ett belopp över noll i hela ören.',
+    message_en:
+      'A row for an earlier customer receivable is invalid. At most 5 extra rows together with the fee rows, each with an account and an amount above zero in whole öre.',
+  },
+  BATCH_RECEIVABLE_ACCOUNT_INVALID: {
+    httpStatus: 400,
+    message_sv:
+      'En tidigare kundfordran bokförs på ett aktivt konto för kundfordringar, 1510 till 1519. Aktivera kontot i kontoplanen eller välj ett annat.',
+    message_en:
+      'An earlier customer receivable is booked on an active customer receivable account, 1510 to 1519. Activate the account in the chart of accounts or choose another.',
+  },
+  BATCH_RECEIVABLE_CUSTOMER_ONLY: {
+    httpStatus: 400,
+    message_sv: 'En tidigare kundfordran kan bara bokas på en inbetalning från kunder, inte på en utbetalning.',
+    message_en: 'An earlier customer receivable can only be booked on a payment from customers, not on an outgoing payment.',
   },
   BATCH_MIXED_KINDS_UNSUPPORTED: {
     httpStatus: 400,
@@ -11229,6 +11421,83 @@ const WEBSHOP_ORDERS: Record<string, StructuredErrorEntry> = {
     message_en:
       "The lines do not book the transaction's amount on its bank account, so it cannot be linked to the order's voucher. Nothing was booked. Book the payment on the transaction's account (details.account_number).",
   },
+  KUSTOM_SETTLEMENT_NO_FILE: {
+    httpStatus: 400,
+    message_sv: 'Ingen fil bifogad. Välj Kustoms settlement-rapport (CSV) och försök igen.',
+    message_en: 'No file attached. Choose the Kustom settlement report (CSV) and try again.',
+  },
+  KUSTOM_SETTLEMENT_TOO_LARGE: {
+    httpStatus: 400,
+    message_sv: 'Filen är för stor. Maxstorlek är 10 MB.',
+    message_en: 'File exceeds the 10 MB size limit.',
+  },
+  KUSTOM_SETTLEMENT_NOT_RECOGNIZED: {
+    httpStatus: 400,
+    message_sv:
+      'Filen känns inte igen som en settlement-rapport från Kustom. Ladda ner rapporten för utbetalningen som CSV i Kustoms portal och försök igen.',
+    message_en:
+      'The file was not recognised as a Kustom settlement report. Download the payout report as CSV in the Kustom portal and try again.',
+  },
+  KUSTOM_SETTLEMENT_NO_CONSUMER_VAT: {
+    httpStatus: 400,
+    message_sv:
+      'Rapporten saknar momsen per order. Kryssa i kundmomsen i rapportinställningarna i Kustoms portal, ladda ner rapporten igen och läs in den.',
+    message_en:
+      'The report has no VAT per order. Turn on consumer VAT in the report settings of the Kustom portal, download the report again and upload it.',
+  },
+  KUSTOM_SETTLEMENT_AMOUNT_FORMAT: {
+    httpStatus: 400,
+    message_sv:
+      'Beloppen i rapporten går inte att läsa. Välj belopp med decimaler (till exempel 100.00) i rapportinställningarna i Kustoms portal och ladda ner rapporten igen.',
+    message_en:
+      'The amounts in the report cannot be read. Choose decimal amounts (for example 100.00) in the report settings of the Kustom portal and download the report again.',
+  },
+  KUSTOM_SETTLEMENT_DATE_FORMAT: {
+    httpStatus: 400,
+    message_sv:
+      'Datumen i rapporten går inte att läsa. Välj datum med klockslag (Kustoms standard, till exempel 2026-11-18T09:00:00.000Z) i rapportinställningarna i Kustoms portal och ladda ner rapporten igen. Utan klockslag går det inte att avgöra vilken svensk dag ett köp gjordes.',
+    message_en:
+      "The dates in the report cannot be read. Choose dates with the time (Kustom's default, for example 2026-11-18T09:00:00.000Z) in the report settings of the Kustom portal and download the report again. Without the time, the Swedish day of a sale cannot be told.",
+  },
+  KUSTOM_SETTLEMENT_ID_COLUMNS_MISSING: {
+    httpStatus: 400,
+    message_sv:
+      'Rapporten saknar kolumnen capture_id eller refund_id, som håller isär köp och returer. Lägg till dem i rapportinställningarna i Kustoms portal och ladda ner rapporten igen.',
+    message_en:
+      'The report lacks the capture_id or refund_id column, which tells sales and returns apart. Add them in the report settings of the Kustom portal and download the report again.',
+  },
+  KUSTOM_SETTLEMENT_DUPLICATE_ROW: {
+    httpStatus: 400,
+    message_sv:
+      'Samma köp eller retur står två gånger i rapporten, så den går inte att läsa in säkert. Ladda ner rapporten igen från Kustom.',
+    message_en:
+      'The same sale or return appears twice in the report, so it cannot be uploaded safely. Download the report again from Kustom.',
+  },
+  KUSTOM_SETTLEMENT_TOTALS_MISMATCH: {
+    httpStatus: 400,
+    message_sv:
+      'Raderna i rapporten summerar inte till rapportens totaler, så filen verkar avkortad eller ändrad. Ladda ner rapporten igen från Kustom.',
+    message_en:
+      'The rows of the report do not add up to its totals, so the file looks cut or edited. Download the report again from Kustom.',
+  },
+  KUSTOM_SETTLEMENT_CUT_SHORT: {
+    httpStatus: 400,
+    message_sv: 'Filen tar slut mitt i en rad, så den verkar avkortad. Ladda ner rapporten igen från Kustom.',
+    message_en: 'The file ends in the middle of a row, so it looks cut short. Download the report again from Kustom.',
+  },
+  KUSTOM_SETTLEMENT_TOO_MANY_ROWS: {
+    httpStatus: 400,
+    message_sv:
+      'Rapporten har fler än 10 000 köp och returer, mer än en uppladdning läser in. Ladda ner rapporten för en utbetalning i taget från Kustom.',
+    message_en:
+      'The report holds more than 10,000 sales and returns, more than one upload reads. Download the report for one payout at a time from Kustom.',
+  },
+  KUSTOM_SETTLEMENT_IMPORT_FAILED: {
+    httpStatus: 500,
+    message_sv: 'Det gick inte att spara alla ordrar från rapporten. Försök igen: ordrar som redan sparats läses inte in två gånger.',
+    message_en: 'Not every order from the report could be saved. Try again: orders already saved are not imported twice.',
+    retryable: true,
+  },
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -12480,8 +12749,11 @@ const PAYMENT_ORDERS: Record<string, StructuredErrorEntry> = {
     message_sv: 'Banken kräver signering på sin egen webbsida, vilket inte stöds här ännu. Betala fakturorna med en betalfil i stället.',
     message_en: 'The bank requires signing on its own website, which is not supported here yet. Pay the invoices with a payment file instead.',
   },
+  // A 4xx, as BANK_PROVIDER_REFUSED: the bank answers the same refusal on
+  // every try (one that may pass on a retry is PAYMENT_PROVIDER_UNAVAILABLE).
+  // As a 502 it was logged at error and counted as an outage.
   PAYMENT_PROVIDER_REFUSED: {
-    httpStatus: 502,
+    httpStatus: 422,
     message_sv: 'Banken tog inte emot betalningen. Kontrollera uppgifterna och försök igen.',
     message_en: 'The bank did not accept the payment. Check the details and try again.',
   },
@@ -13179,8 +13451,12 @@ const BOLAGET: Record<string, StructuredErrorEntry> = {
   },
   SHARE_REGISTER_RANGE_TAKEN: {
     httpStatus: 409,
-    message_sv: 'Aktienumren finns redan i aktieboken. Nya aktier får nästa lediga nummer.',
-    message_en: 'The share numbers are already held. New shares take the next free numbers.',
+    message_sv: 'Aktienumren finns redan i aktieboken. Nya aktier får nästa lediga nummer. Har en införd anteckning fel nummer rättas den först.',
+    message_en: 'The share numbers are already held. New shares take the next free numbers. When an entry holds the numbers by mistake, that entry is voided first.',
+    remediation: {
+      description: 'For new shares, omit the range and send share_count. When an entry holds these numbers by mistake, void it with kind rattelse, and send this entry again once the rattelse is in the register.',
+      tool: 'gnubok_register_share_event',
+    },
     thrown_message_sv: true,
   },
   SHARE_REGISTER_NOT_HELD: {
@@ -13221,6 +13497,22 @@ const BOLAGET: Record<string, StructuredErrorEntry> = {
     httpStatus: 409,
     message_sv: 'Aktieboken har fått en ny anteckning sedan du förhandsgranskade. Förhandsgranska igen, så visas läget som det är nu.',
     message_en: 'The share register has a new entry since your preview. Preview again to see it as it stands now.',
+  },
+  SHARE_REGISTER_SETUP_COMPLETE: {
+    httpStatus: 409,
+    message_sv: 'Aktieboken är redan upplagd och i bruk. Ett ingående innehav förs bara in medan aktieboken läggs upp: för in en överlåtelse eller en emission i stället.',
+    message_en: 'The share register is already set up and in use. An opening holding is entered only while the register is set up: enter a transfer or an issue instead.',
+    thrown_message_sv: true,
+  },
+  SHARE_REGISTER_HOLDER_ADMIN_ONLY: {
+    httpStatus: 403,
+    message_sv: 'Bara företagets ägare eller en administratör kan ändra namn eller organisationsnummer på någon som står i aktieboken.',
+    message_en: 'Only the company\'s owner or an administrator can change the name or the organisation number of somebody the share register names.',
+  },
+  SHARE_REGISTER_EMPTY: {
+    httpStatus: 409,
+    message_sv: 'Aktieboken har inga aktier än. För in aktierna först.',
+    message_en: 'The share register holds no shares yet. Enter the shares first.',
   },
   SHARE_REGISTER_AVSTAMNINGSBOLAG: {
     httpStatus: 409,
@@ -13826,6 +14118,138 @@ const SUPPORT_ASSISTANT: Record<string, StructuredErrorEntry> = {
   },
 }
 
+// ─────────────────────────────────────────────────────────────────
+// The question list (company_questions, lib/questions)
+// ─────────────────────────────────────────────────────────────────
+
+const COMPANY_QUESTIONS: Record<string, StructuredErrorEntry> = {
+  // The company is not in COMPANY_QUESTIONS_COMPANY_IDS. 409 like the other
+  // switched-off answers.
+  COMPANY_QUESTIONS_OFF: {
+    httpStatus: 409,
+    message_sv: 'Frågelistan är inte påslagen för det här företaget.',
+    message_en: 'The question list is not switched on for this company.',
+    retryable: false,
+  },
+  // Either limit: the open questions a company holds at once, or the
+  // questions filed for it in 24 hours. The thrown text says which.
+  COMPANY_QUESTION_LIMIT_REACHED: {
+    httpStatus: 409,
+    message_sv: 'Gränsen för frågor till företaget är nådd: högst 5 öppna samtidigt och högst 3 nya per dygn.',
+    message_en: 'The limit for questions to the company is reached: at most 5 open at once and at most 3 new in 24 hours.',
+    retryable: false,
+  },
+  // A question resting on the same records exists, whatever its status. The
+  // thrown text names it.
+  COMPANY_QUESTION_ALREADY_ASKED: {
+    httpStatus: 409,
+    message_sv: 'Den här frågan är redan ställd till företaget.',
+    message_en: 'This question has already been put to the company.',
+    retryable: false,
+  },
+  COMPANY_QUESTION_NOT_FOUND: {
+    httpStatus: 404,
+    message_sv: 'Frågan hittades inte.',
+    message_en: 'The question was not found.',
+    retryable: false,
+  },
+  COMPANY_QUESTION_ALREADY_ENDED: {
+    httpStatus: 409,
+    message_sv: 'Frågan är redan besvarad eller stängd.',
+    message_en: 'The question is already answered or closed.',
+    retryable: false,
+  },
+  // Undo in the app: the question is open, somebody else ended it, it was
+  // ended through another door, or more than ten minutes ago. The thrown text
+  // says which.
+  COMPANY_QUESTION_UNDO_REFUSED: {
+    httpStatus: 409,
+    message_sv: 'Svaret kan inte ångras längre.',
+    message_en: 'The answer can no longer be undone.',
+    retryable: false,
+  },
+  // Linking a staged operation to a question that is open, or closed with a
+  // reason other than settled. The thrown text says how the question stands.
+  COMPANY_QUESTION_NOT_ANSWERED: {
+    httpStatus: 409,
+    message_sv: 'Frågan är varken besvarad eller löst av bokföringen, så inget förslag kan kopplas till den.',
+    message_en: 'The question is neither answered nor closed as settled, so no operation can be linked to it.',
+    retryable: false,
+  },
+  // The question already holds the most staged operations one question takes.
+  COMPANY_QUESTION_OPERATION_LIMIT: {
+    httpStatus: 409,
+    message_sv: 'Frågan har redan fem kopplade förslag, vilket är gränsen.',
+    message_en: 'The question already has five linked operations, which is the limit.',
+    retryable: false,
+  },
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Company formation, "Starta aktiebolag" (company_formations, lib/formation)
+// ─────────────────────────────────────────────────────────────────
+
+const COMPANY_FORMATION: Record<string, StructuredErrorEntry> = {
+  FORMATION_NOT_FOUND: {
+    httpStatus: 404,
+    message_sv: 'Bolagsbildningen hittades inte.',
+    message_en: 'The company formation was not found.',
+    retryable: false,
+  },
+  // The company is already set up from the formation, or it was cancelled.
+  FORMATION_LOCKED: {
+    httpStatus: 409,
+    message_sv: 'Bolaget är redan uppsatt, så svaren kan inte längre ändras här.',
+    message_en: 'The company is already set up, so the answers can no longer change here.',
+    retryable: false,
+  },
+  FORMATION_ALREADY_SET_UP: {
+    httpStatus: 409,
+    message_sv: 'Bolaget är redan uppsatt i Accounted.',
+    message_en: 'The company is already set up in Accounted.',
+    retryable: false,
+  },
+  // The answers still break a rule verksamt.se applies; the thrown text names it.
+  FORMATION_INCOMPLETE: {
+    httpStatus: 422,
+    message_sv: 'Några svar saknas eller behöver ändras innan dokumenten kan skapas.',
+    message_en: 'Some answers are missing or need a change before the documents can be made.',
+    retryable: false,
+  },
+  FORMATION_DOCUMENT_UNAVAILABLE: {
+    httpStatus: 404,
+    message_sv: 'Det dokumentet finns inte för det här bolaget.',
+    message_en: 'That document does not exist for this company.',
+    retryable: false,
+  },
+  // The organisation number is already a company in Accounted.
+  FORMATION_ORG_NUMBER_TAKEN: {
+    httpStatus: 409,
+    message_sv: 'Organisationsnumret finns redan som företag i Accounted.',
+    message_en: 'The organisation number is already a company in Accounted.',
+    retryable: false,
+  },
+  // The organisation number is not an aktiebolag registered after the formation started.
+  FORMATION_ORG_NUMBER_MISMATCH: {
+    httpStatus: 422,
+    message_sv: 'Organisationsnumret hör inte till ett nyregistrerat aktiebolag.',
+    message_en: 'The organisation number does not belong to a newly registered aktiebolag.',
+    retryable: false,
+  },
+  FORMATION_DEED_DATE_INVALID: {
+    httpStatus: 400,
+    message_sv: 'Ange dagen ni skrev under stiftelseurkunden. Den kan inte ligga i framtiden.',
+    message_en: 'Give the day you signed the founding deed. It cannot be in the future.',
+    retryable: false,
+  },
+  FORMATION_SETUP_FAILED: {
+    httpStatus: 500,
+    message_sv: 'Uppsättningen stannade på vägen. Försök igen, det som redan är gjort görs inte om.',
+    message_en: 'The setup stopped part way. Try again; what is already done is not redone.',
+    retryable: true,
+  },
+}
+
 const REGISTRY: Record<string, StructuredErrorEntry> = {
   ...GENERIC,
   ...DB_CONFLICTS,
@@ -13908,6 +14332,8 @@ const REGISTRY: Record<string, StructuredErrorEntry> = {
   ...STOCK_COUNT,
   ...CASH_FORECAST,
   ...SUPPORT_ASSISTANT,
+  ...COMPANY_QUESTIONS,
+  ...COMPANY_FORMATION,
 }
 
 export function getErrorEntry(code: string): StructuredErrorEntry | undefined {

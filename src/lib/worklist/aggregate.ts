@@ -17,6 +17,7 @@ import { listOpenSuggestions } from '@/lib/suggestions/list'
 import type { OpenSuggestion } from '@/lib/suggestions/types'
 import { isArkivBrainEnabled, isArkivSectionEnabled } from '@/lib/arkiv/flag'
 import { inboxHref, isInkorgV2Enabled } from '@/lib/inkorg/flag'
+import { isBookingScreenEnabled } from '@/lib/env/booking-screen-switch'
 import { inboxCompanionIds } from './inbox-companions'
 import {
   countAttestedToPayDue,
@@ -48,7 +49,10 @@ import {
   countSupplierPayeeChangesDue,
   countUnbookedSkattekontoRows,
   countUnbookedTransactions,
+  countOpenBankRows,
+  countFoundPairs,
   countVerifikatMissingDocument,
+  watchCountFailures,
 } from './categories'
 
 /**
@@ -151,42 +155,49 @@ export async function getWorklistCounts(
   // and Avtal: a row whose page is a 404 for this company is not counted.
   const section = isArkivSectionEnabled(companyId)
   const brain = isArkivBrainEnabled(companyId)
+  // With the booking screen, Hem's Att bokföra row counts what the list holds.
+  const toBook = isBookingScreenEnabled(companyId)
   // The decision row and the daily batch row count an invoice once (lib/collections/batch.ts).
   const collectionWork = countCollectionDecisionsAndBatch(supabase, companyId)
-  const [
-    bookTransaction,
-    bookSkattekonto,
-    inboxDocument,
-    suggestedMatch,
-    supplierInvoiceApproval,
-    verifikatMissingDocument,
-    overdueInvoices,
-    deadlineAction,
-    pendingOperations,
-    suggestion,
-    reconciliationDue,
-    expensePayout,
-    skattekontoPaymentDue,
-    documentRelevance,
-    documentUnclassified,
-    documentFieldReview,
-    agreementPaymentMissed,
-    arkivFinding,
-    peppolDeliveryFailed,
-    collectionDecision,
-    collectionAttention,
-    collectionSettlementsToBook,
-    collectedPaymentsToBook,
-    collectionBatchReady,
-    reminderBatchReady,
-    bankSwitch,
-    paymentsVerificationRenewal,
-    supplierPayeeChange,
-    documentsToSign,
-    paymentFailed,
-    attestedToPay,
-    paymentsToSign,
-  ] = await Promise.all([
+  const {
+    result: [
+      bookTransaction,
+      bookSkattekonto,
+      inboxDocument,
+      suggestedMatch,
+      supplierInvoiceApproval,
+      verifikatMissingDocument,
+      overdueInvoices,
+      deadlineAction,
+      pendingOperations,
+      suggestion,
+      reconciliationDue,
+      expensePayout,
+      skattekontoPaymentDue,
+      documentRelevance,
+      documentUnclassified,
+      documentFieldReview,
+      agreementPaymentMissed,
+      arkivFinding,
+      peppolDeliveryFailed,
+      collectionDecision,
+      collectionAttention,
+      collectionSettlementsToBook,
+      collectedPaymentsToBook,
+      collectionBatchReady,
+      reminderBatchReady,
+      bankSwitch,
+      paymentsVerificationRenewal,
+      supplierPayeeChange,
+      documentsToSign,
+      paymentFailed,
+      attestedToPay,
+      paymentsToSign,
+      openBankRows,
+      foundPairs,
+    ],
+    failed: failedCounts,
+  } = await watchCountFailures(companyId, () => Promise.all([
     countUnbookedTransactions(supabase, companyId),
     countUnbookedSkattekontoRows(supabase, companyId),
     countInboxDocuments(supabase, companyId, { companionIds: inboxCompanionIds(supabase, companyId) }),
@@ -246,7 +257,9 @@ export async function getWorklistCounts(
     options.paymentsToSignDue !== undefined
       ? Promise.resolve(options.paymentsToSignDue).then((due) => due?.count ?? 0)
       : countPaymentsToSignDue(supabase, companyId),
-  ])
+    toBook ? countOpenBankRows(supabase, companyId) : 0,
+    toBook ? countFoundPairs(supabase, companyId) : 0,
+  ]))
 
   // The overdue customer invoices are one grouped row (lib/worklist/types.ts
   // OverdueInvoicesDue): the count says how many invoices, the total takes
@@ -324,5 +337,8 @@ export async function getWorklistCounts(
       (paymentsToSign > 0 ? 1 : 0),
     overdueInvoices: overdueInvoice > 0 ? overdueInvoices : null,
     inboxHref: inboxHref(isInkorgV2Enabled(companyId)),
+    ...(toBook ? { toBook: { bankRows: openBankRows, foundPairs } } : {}),
+    // Set only when true, so a complete payload keeps its shape.
+    ...(failedCounts.length > 0 ? { incomplete: true } : {}),
   }
 }

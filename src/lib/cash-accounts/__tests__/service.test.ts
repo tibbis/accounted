@@ -19,6 +19,9 @@ import {
   getRevokedConnectionIds,
   upsertFromPsd2,
   ensureManualCashAccount,
+  findCashAccountCurrencyMismatch,
+  isCashAccountCurrencyMismatch,
+  isCashAccountDisabledPayee,
 } from '../service'
 import { pickKeeper } from '../twins'
 import { defaultLedgerForCurrency } from '../ledger-slots'
@@ -356,6 +359,81 @@ describe('findFreeLedgerAccount: the seeded row goes to the account its payment 
       used.add(resolved!.ledgerAccount)
     }
     expect(ledgers).toEqual(['1931', '1930'])
+  })
+})
+
+describe('findFreeLedgerAccount: the seeded row whose details are only a printed IBAN', () => {
+  // Fictitious numbers. The seeded 1930 row has no clearing or account
+  // number, only the IBAN its invoices print (payee_iban), and that IBAN is
+  // the company's own account. The bank lists another account first.
+  const FIRST = { iban: 'SE3180000842200000001861', bban: '842200000001861', currency: 'SEK' }
+  const OWN = { iban: 'SE7080000842200000006309', bban: '842200000006309', currency: 'SEK' }
+  const consent = [FIRST, OWN]
+  const seededRow = {
+    ledger_account: '1930', bank_connection_id: null, iban: null, currency: 'SEK',
+    clearing_number: null, account_number: null, payee_iban: 'SE70 8000 0842 2000 0000 6309',
+  }
+
+  /** PostgREST hands back only the columns a query selects: so does this stub for cash_accounts. */
+  function selecting(rows: Array<Record<string, unknown>>): SupabaseClient {
+    const base = makeSupabase([])
+    return {
+      from: vi.fn((table: string) => {
+        if (table !== 'cash_accounts') return base.from(table)
+        let columns: string[] | null = null
+        const chain: Record<string, unknown> = {}
+        for (const method of ['eq', 'neq', 'not', 'is', 'like', 'in', 'order', 'limit', 'range']) {
+          chain[method] = vi.fn(() => chain)
+        }
+        chain.select = vi.fn((list: string) => {
+          columns = list.split(',').map((c) => c.trim())
+          return chain
+        })
+        chain.then = (onFulfilled: (value: unknown) => unknown) => {
+          const data = rows.map((row) => (columns ? Object.fromEntries(columns.map((c) => [c, row[c] ?? null])) : row))
+          return Promise.resolve({ data, error: null }).then(onFulfilled)
+        }
+        return chain
+      }),
+    } as unknown as SupabaseClient
+  }
+
+  it('lets the account the printed IBAN names take 1930, not the account the bank lists first', async () => {
+    const supabase = selecting([seededRow])
+    expect(await findFreeLedgerAccount(supabase, 'c1', 'SEK', new Set(), { ...FIRST, consent })).toBe('1931')
+    expect(await findFreeLedgerAccount(supabase, 'c1', 'SEK', new Set(['1931']), { ...OWN, consent })).toBe('1930')
+  })
+
+  it('resolvePsd2LedgerAccount suggests 1930 for the named account in the picker', async () => {
+    const supabase = selecting([seededRow])
+    const used = new Set<string>()
+    const ledgers: string[] = []
+    for (const account of consent) {
+      const resolved = await resolvePsd2LedgerAccount(supabase, 'c1', 'u1', { ...account, consent, exclude: used, prepareOnly: true })
+      ledgers.push(resolved!.ledgerAccount)
+      used.add(resolved!.ledgerAccount)
+    }
+    expect(ledgers).toEqual(['1931', '1930'])
+  })
+
+  it('never moves the seeded row to another account when the account the printed IBAN names already has a row of its own', async () => {
+    const ownRow = {
+      id: 'own-row', ledger_account: '1931', bank_connection_id: null, iban: OWN.iban, currency: 'SEK',
+      clearing_number: null, account_number: null, payee_iban: null,
+    }
+    const supabase = selecting([{ ...seededRow, id: 'seeded-row' }, ownRow])
+    expect(await findFreeLedgerAccount(supabase, 'c1', 'SEK', new Set(), { ...FIRST, consent })).not.toBe('1930')
+    const used = new Set<string>()
+    const resolved = []
+    for (const account of consent) {
+      const resolution = await resolvePsd2LedgerAccount(supabase, 'c1', 'u1', { ...account, consent, exclude: used, prepareOnly: true })
+      resolved.push(resolution)
+      used.add(resolution!.ledgerAccount)
+    }
+    expect(resolved.map((r) => r!.ledgerAccount)).not.toContain('1930')
+    expect(resolved[0]!.reuseCashAccountId).not.toBe('seeded-row')
+    expect(resolved[1]!.ledgerAccount).toBe('1931')
+    expect(resolved[1]!.reuseCashAccountId).toBe('own-row')
   })
 })
 
@@ -972,9 +1050,12 @@ describe('ensureManualCashAccount', () => {
         inserted: [],
         lookupCount: 0,
       }
-      await expect(
-        ensureManualCashAccount(makeManualSupabase(stub), 'c1', '1930', 'SEK'),
-      ).rejects.toMatchObject({ code: 'CASH_ACCOUNT_DISABLED_PAYEE' })
+      const err = await ensureManualCashAccount(makeManualSupabase(stub), 'c1', '1930', 'SEK').catch((e: unknown) => e)
+      expect(err).toMatchObject({ code: 'CASH_ACCOUNT_DISABLED_PAYEE' })
+      // A caller answers it as a refusal (the create_transactions approval
+      // did not, and answered a 500); a failure stays a failure.
+      expect(isCashAccountDisabledPayee(err)).toBe(true)
+      expect(isCashAccountDisabledPayee(new Error('ensureManualCashAccount lookup failed: timeout'))).toBe(false)
       expect(stub.updated ?? []).toHaveLength(0)
       expect(stub.inserted).toHaveLength(0)
     })
@@ -1019,6 +1100,18 @@ describe('ensureManualCashAccount', () => {
       ensureManualCashAccount(makeManualSupabase(stub), 'c1', '1935', 'SEK'),
     ).rejects.toThrow(/denominated in USD, not SEK/)
     expect(stub.inserted).toHaveLength(0)
+  })
+
+  // A caller answers the conflict as a refusal (the create_transactions
+  // approval did not, and answered a 500): it carries its code and what it names.
+  it('refuses the different currency with CASH_ACCOUNT_CURRENCY_MISMATCH, naming the ledger and both currencies', async () => {
+    const stub: ManualStub = { lookup: { data: { id: 'ca-eur', currency: 'EUR' } }, inserted: [], lookupCount: 0 }
+    const err = await ensureManualCashAccount(makeManualSupabase(stub), 'c1', '1948', 'gbp').catch((e: unknown) => e)
+    expect(isCashAccountCurrencyMismatch(err)).toBe(true)
+    expect(err).toMatchObject({
+      code: 'CASH_ACCOUNT_CURRENCY_MISMATCH',
+      details: { ledger_account: '1948', account_currency: 'EUR', currency: 'GBP' },
+    })
   })
 
   it('creates a manual row (source=manual, uppercased currency) when none exists', async () => {
@@ -1075,5 +1168,29 @@ describe('ensureManualCashAccount', () => {
     await expect(
       ensureManualCashAccount(makeManualSupabase(stub), 'c1', '1935', 'SEK'),
     ).rejects.toThrow(/boom/)
+  })
+})
+
+// The read a door makes before it stages a row (gnubok_create_transactions),
+// so the refusal ensureManualCashAccount gives at approval is said first.
+describe('findCashAccountCurrencyMismatch', () => {
+  it('answers the refusal for a row in another currency than the account on its ledger, writing nothing', async () => {
+    const stub: ManualStub = { lookup: { data: { id: 'ca-eur', currency: 'EUR' } }, inserted: [], lookupCount: 0 }
+    const mismatch = await findCashAccountCurrencyMismatch(makeManualSupabase(stub), 'c1', '1948', 'GBP')
+    expect(mismatch).toMatchObject({
+      code: 'CASH_ACCOUNT_CURRENCY_MISMATCH',
+      details: { ledger_account: '1948', account_currency: 'EUR', currency: 'GBP' },
+    })
+    expect(stub.inserted).toHaveLength(0)
+    expect(stub.updated ?? []).toHaveLength(0)
+  })
+
+  it('answers null for an account in the row currency, a ledger without one, and a failed read', async () => {
+    const same: ManualStub = { lookup: { data: { id: 'ca-eur', currency: 'EUR' } }, inserted: [], lookupCount: 0 }
+    expect(await findCashAccountCurrencyMismatch(makeManualSupabase(same), 'c1', '1948', 'eur')).toBeNull()
+    const none: ManualStub = { lookup: { data: null }, inserted: [], lookupCount: 0 }
+    expect(await findCashAccountCurrencyMismatch(makeManualSupabase(none), 'c1', '1949', 'GBP')).toBeNull()
+    const failed: ManualStub = { lookup: { data: null, error: { message: 'timeout' } }, inserted: [], lookupCount: 0 }
+    expect(await findCashAccountCurrencyMismatch(makeManualSupabase(failed), 'c1', '1948', 'GBP')).toBeNull()
   })
 })

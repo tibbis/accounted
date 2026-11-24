@@ -98,6 +98,8 @@ export const SESSION_SEGMENT_PACKAGES: Readonly<Record<string, SwitchablePackage
   billing: null,
   // The Bolaget registers (aktiebok, roles): Bokföring's package, never switched off.
   bolaget: null,
+  // Starting an aktiebolag: before the company exists, so no package applies.
+  formation: null,
   bookkeeping: null,
   // Budgets (accounted#134): planning beside the resultatrapport, part of Bokföring.
   budgets: null,
@@ -126,6 +128,8 @@ export const SESSION_SEGMENT_PACKAGES: Readonly<Record<string, SwitchablePackage
   onboarding: null,
   parties: null,
   'pending-operations': null,
+  // The question list (lib/questions): answering, closing and reopening a question.
+  questions: null,
   reconciliation: null,
   reports: null,
   rules: null,
@@ -721,6 +725,9 @@ const POS_AND_WEBSHOP: PackageDoors = {
     'POST /api/webshop-orders/:id/mark-booked',
     'POST /api/webshop-orders/:id/underlag',
     'POST /api/webshop-orders/bulk-book',
+    // A Kustom settlement report read by hand opens no connection, as a
+    // document upload opens no mailbox: it starts nothing that stays open.
+    'POST /api/webshop-orders/kustom-settlement',
     'PUT /api/webshop-orders/settings',
     'op:pos-sales.day-book',
     'op:pos-sales.disconnect',

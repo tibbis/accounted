@@ -2633,7 +2633,7 @@ Response `200` (`application/pdf`).
 **INK2 inkomstdeklaration (aktiebolag): INK2, INK2R and INK2S fields for a räkenskapsår.**
 `scope:reports:read · risk:low · idempotent`
 
-Computes the aktiebolag income tax return from the books, keyed by SRU field code: ink2 (page 1: 7104 överskott / 7114 underskott), ink2r (räkenskapsschema: balance sheet and income statement, the balance sheet from the closed books and the income statement before the resultatavslut) and ink2s (skattemässiga justeringar, including the adjustments saved in the year-end flow), with the per-code account breakdown, totals and warnings. The SRU files for upload at skatteverket.se are served by GET /reports/ink2/sru; sru_file names that path. Read-only.
+Computes the aktiebolag income tax return from the books, keyed by SRU field code: ink2 (page 1: 7104 överskott / 7114 underskott, 7132/7133 underlag för särskild löneskatt på pensionskostnader from 7410-7419), ink2r (räkenskapsschema: balance sheet and income statement, the balance sheet from the closed books and the income statement before the resultatavslut) and ink2s (skattemässiga justeringar, including the adjustments saved in the year-end flow), with the per-code account breakdown, totals and warnings. The SRU files for upload at skatteverket.se are served by GET /reports/ink2/sru; sru_file names that path. Read-only.
 
 **Use when:** Preparing or checking the aktiebolag income tax return after bokslut, or reconciling INK2R figures against the årsredovisning.
 **Do not use for:** Enskild firma (GET /reports/ne-bilaga), the årsredovisning itself, or submitting to Skatteverket (upload the SRU files at skatteverket.se; nothing is sent from here).
@@ -2642,7 +2642,7 @@ Computes the aktiebolag income tax return from the books, keyed by SRU field cod
 - Only for aktiebolag: another legal form answers 400 TAX_DECL_INK2_WRONG_LEGAL_FORM.
 - Amounts are whole kronor as Skatteverket takes them; codes with no amount are 0.
 - Run it after the year-end closing: before bokslut the tax (8910) and bokslutsdispositioner are missing, and warnings say so.
-- ink2s is not the whole INK2S. Computed: 7650/7750 (4.1/4.2), 7651 (4.3a), 7653 (4.3c) and 7754 (4.5c) from the year-end adjustments, 7654 (4.6a, schablonintäkt on the opening periodiseringsfonder: statslåneräntan of 30 November the year before the calendar year the räkenskapsår ends in, at least 0.5 %, times whole months / 12, so brutet, short and long years are covered; a year that starts or ends mid-month, or whose rate is not published yet, gets 0 with a warning naming the opening fonder), 7666/7765 (4.9), 7763 (4.14a) and 7670/7770 (4.15/4.16). 7763 is the deficit saved in the year-end flow or the underskottsregister, never read from last year's return: 0 means none was entered, not that none exists. Every other INK2S row and the upplysningar about the årsredovisning (8040/8041 uppdragstagare, 8044/8045 revision) are neither computed nor in the SRU file; they are entered in Skatteverket's e-tjänst.
+- ink2s is not the whole INK2S. Computed: 7650/7750 (4.1/4.2), 7651 (4.3a), 7652 (4.3b, write-downs of financial assets), 7653 (4.3c), 7753 (4.5b, dividends) and 7754 (4.5c) from the year-end adjustments, 7673 (4.6d, the 6 % or 4 % uppräkning on periodiseringsfonder set aside before 2021 and återförda this year, oldest first; 0 with a warning when a fond names no year or its year cannot be told), 7654 (4.6a, schablonintäkt on the opening periodiseringsfonder: statslåneräntan of 30 November the year before the calendar year the räkenskapsår ends in, at least 0.5 %, times whole months / 12, so brutet, short and long years are covered; a year that starts or ends mid-month, or whose rate is not published yet, gets 0 with a warning naming the opening fonder), 7666/7765 (4.9), 7763 (4.14a) and 7670/7770 (4.15/4.16). 7763 is the deficit saved in the year-end flow or the underskottsregister, never read from last year's return: 0 means none was entered, not that none exists. Every other INK2S row and the upplysningar about the årsredovisning (8040/8041 uppdragstagare, 8044/8045 revision) are neither computed nor in the SRU file; they are entered in Skatteverket's e-tjänst.
 - A period id from another company answers 404 FISCAL_PERIOD_NOT_FOUND.
 
 | Parameter | In | Type | Required | Notes |
@@ -2741,6 +2741,7 @@ The aktiebolag income tax return as the two SRU files Skatteverket's filöverfö
 - Unzip and upload INFO.SRU and BLANKETTER.SRU under exactly those names; do not re-encode them to UTF-8.
 - Only for aktiebolag: another legal form answers 400 TAX_DECL_INK2_WRONG_LEGAL_FORM.
 - Refused while an SIE import is unfinished: complete or undo it first.
+- A declaration with sruBlockers (an account without an SRU field, a balance sheet that does not tie, a closed year whose declared result is not the booked 2099) answers 422 TAX_DECL_INK2_SRU_BLOCKED with the reason in details.reason: correct the books, do not retry.
 
 | Parameter | In | Type | Required | Notes |
 |---|---|---|---|---|
@@ -2756,14 +2757,14 @@ Response `200` (`application/zip`).
 **INK3 underlag (ideell förening): INK3R, INK3S and INK3SUF values per ruta for a räkenskapsår.**
 `scope:reports:read · risk:low · idempotent`
 
-The figures an ideell förening types into Skatteverket's e-tjänst Inkomstdeklaration 2, 3 och 4, by field code: INK3R (balance sheet from the closed books; income statement in two columns, enligt redovisningen from the books before the resultatavslut and som ska tas upp/dras av from the company's per-account treatment), INK3S (7.1/7.2, 7.5a and 7.9/7.10 computed, the rest entered) and INK3SUF (entered; part of filing only when the company states the förening is allmännyttig). Overrides the company saved replace the computed figure. filing holds every field with a value. Only beskattningsperiod 2026P4 is pinned. Read-only: nothing is filed and no SRU file exists; the user signs the first page in the e-tjänst.
+The figures an ideell förening types into Skatteverket's e-tjänst Inkomstdeklaration 2, 3 och 4, by field code: INK3R (balance sheet from the closed books; income statement in two columns, enligt redovisningen from the books before the resultatavslut and som ska tas upp/dras av from the company's per-account treatment), INK3S (7.1/7.2, 7.5a and 7.9/7.10 computed, the rest entered) and INK3SUF (entered; part of filing only when the company states the förening is allmännyttig). Overrides the company saved replace the computed figure. filing holds every field with a value. Field codes from Skatteverket's 2026P4 edition, which covers beskattningsperiod 2026P4 to 2027P3. Read-only: nothing is filed and no SRU file exists; the user signs the first page in the e-tjänst.
 
 **Use when:** Preparing or checking an ideell förening's INK3 after bokslut, or answering what goes in a ruta.
 **Do not use for:** Aktiebolag or ekonomisk förening (GET /reports/ink2), enskild firma (GET /reports/ne-bilaga), deciding whether the förening is allmännyttig (the company states it), or submitting anything to Skatteverket.
 
 **Pitfalls:**
 - Only for ideell förening: another legal form answers 400 TAX_DECL_INK3_WRONG_LEGAL_FORM.
-- Only räkenskapsår in a pinned beskattningsperiod (2026P4: ending 2026-09-01 to 2026-12-31); others answer 422 TAX_DECL_INK3_PERIOD_NOT_SUPPORTED.
+- Only räkenskapsår in a covered beskattningsperiod (2026P4 to 2027P3: ending 2026-09-01 to 2027-08-31); others answer 422 TAX_DECL_INK3_PERIOD_NOT_SUPPORTED.
 - A field with needsInput true has no final figure yet: a shared or unclassified account feeds it. The treatments and overrides are set in the app, not over v1 or MCP.
 - allmannyttig null means the company has not stated it; INK3SUF is left out of filing until it says yes.
 - Amounts are whole kronor with öre dropped.
@@ -2988,6 +2989,7 @@ Net result, cash position, outstanding and overdue receivables, VAT liability, r
 **Pitfalls:**
 - With a dimension filter, cashPosition, receivables, vatLiability and topSuppliers are still company-wide: do not present them as the dimension's.
 - topSuppliersUnconvertedFxCount counts foreign-currency invoices left out of topSuppliers for lack of a SEK amount.
+- vatLiability is the moms on the 26xx accounts that no momsredovisning has moved to 2650 or 1650 yet, not ruta 49: moms a booked momsredovisning moved is no longer in it. The declared figure is the vat_payable measure.
 - dim_no and dim_code must be sent together.
 
 | Parameter | In | Type | Required | Notes |
@@ -3112,13 +3114,13 @@ Example response `200`:
 
 ### `GET /api/v1/companies/{companyId}/reports/ne-bilaga`
 
-**NE-bilaga (enskild firma): rutor R1-R11 for a räkenskapsår.**
+**NE-bilaga (enskild firma): balansräkning B1-B16 and rutor R1-R11 for a räkenskapsår.**
 `scope:reports:read · risk:low · idempotent`
 
-Computes the NE-bilaga rutor R1-R11 from the books before the resultatavslut (försäljning, momsfria intäkter, varuinköp, övriga kostnader, lönekostnader, räntor, avskrivningar, årets resultat), with the per-ruta account breakdown and warnings. The owner's personnummer (the enskild firma's org number) is masked in this JSON; the SRU files for upload at skatteverket.se, served by GET /reports/ne-bilaga/sru, carry it in full. Read-only.
+Computes the NE-bilaga rutor R1-R11 from the books before the resultatavslut (försäljning, momsfria intäkter, varuinköp, övriga kostnader, lönekostnader, räntor, avskrivningar, årets resultat) and the balansräkning B1-B16 at the year's end (balans, per BAS kopplingstabell NE_EJ_K1; B10 eget kapital is tillgångar minus skulder), with the per-ruta account breakdown and warnings. The owner's personnummer (the enskild firma's org number) is masked in this JSON; the SRU files, served by GET /reports/ne-bilaga/sru, carry it in full and hold B1-B16, R1-R11 and sida 2 R12-R14 (R13 and R14 are the tax adjustments, as in sida2). Read-only.
 
 **Use when:** Preparing or checking the enskild firma's NE-bilaga after bokslut.
-**Do not use for:** Aktiebolag (GET /reports/ink2), the egenavgifter / räntefördelning / periodiseringsfond adjustments (MCP accounted_preview_ef_declaration), or submitting (upload the SRU files at skatteverket.se).
+**Do not use for:** Aktiebolag (GET /reports/ink2), the egenavgifter / räntefördelning / periodiseringsfond adjustments (MCP accounted_preview_ef_declaration), or submitting (the owner imports blanketter.sru in Skatteverket's Inkomstdeklaration 1 e-tjänst, Bilagor, Enskild näringsverksamhet (NE), and completes sida 2 there).
 
 **Pitfalls:**
 - Only for enskild firma: another legal form answers 400 TAX_DECL_NE_WRONG_LEGAL_FORM.
@@ -3136,6 +3138,7 @@ Response `200`:
   data: {
     fiscalYear: { fiscal_period_id: string, name: string, start: string, end: string, isClosed: boolean },
     rutor: Record<string, number>,
+    balans: Record<string, number>,
     breakdown: Record<string, { accounts: { accountNumber: string, accountName: string, amount: number }[], total: number }>,
     companyInfo: { companyName: string, orgNumber: string | null, entityType: string, addressLine1: string | null, postalCode: string | null, city: string | null, email: string | null },
     warnings: string[],
@@ -3176,6 +3179,13 @@ Example response `200`:
       "R9": 0,
       "R10": 12000,
       "R11": 253000
+    },
+    "balans": {
+      "B4": 36000,
+      "B7": 40000,
+      "B9": 210000,
+      "B10": 238000,
+      "B16": 48000
     },
     "companyInfo": {
       "companyName": "Anna Svensson Konsult",
@@ -3663,6 +3673,7 @@ Computes momsdeklaration rutor for the given period_type / year / period. The re
 **Pitfalls:**
 - `period_type` (monthly|quarterly|yearly), `year`, and `period` are all required.
 - For monthly: period is 1-12. For quarterly: period is 1-4. For yearly: period is 1.
+- Yearly (helårsmoms) covers the räkenskapsår that ends in `year`, an extended or shortened one in full; a year no recorded räkenskapsår ends in answers 404 VAT_REPORT_FISCAL_YEAR_NOT_FOUND, naming the räkenskapsår that exist.
 - `accounting_method` is accepted for backward compatibility but has no effect on the figures: the declaration is a pure ledger projection, and the method (faktureringsmetoden vs kontantmetoden per ML 15 kap 8-11 §§, ML 2023:200) is already reflected in when VAT-bearing journal entries are posted.
 - Output ruta 49 = (10+11+12+30+31+32+60+61+62) − 48. Positive = pay; negative = refund.
 
@@ -3670,7 +3681,7 @@ Computes momsdeklaration rutor for the given period_type / year / period. The re
 |---|---|---|---|---|
 | `companyId` | path | `string` | yes |  |
 | `period_type` | query | `"monthly" \| "quarterly" \| "yearly"` | yes | Declaration period length. Required. |
-| `year` | query | `number` | yes | Calendar year of the period, 2000-2100. Required. |
+| `year` | query | `number` | yes | Calendar year of the period, 2000-2100; for yearly, the year the räkenskapsår ends. Required. |
 | `period` | query | `number` | yes | Period number within the year: 1-12 for monthly, 1-4 for quarterly, 1 for yearly. Required. |
 | `accounting_method` | query | `"accrual" \| "cash"` | no | Accepted for backward compatibility; has no effect on the figures. |
 
@@ -3742,6 +3753,7 @@ The momsdeklaration for a period as the eSKDUpload v6.0 XML (ISO 8859-1) that Sk
 **Pitfalls:**
 - A missing or invalid org number on the company settings answers 400 VAT_ESKD_ORG_NUMBER_INVALID: the file would be rejected at upload.
 - fiscal_period_id is for yearly (helårsmoms) with a broken räkenskapsår; it is ignored for monthly and quarterly.
+- For yearly, year is the year the räkenskapsår ends; a year no recorded räkenskapsår ends in answers 404 VAT_REPORT_FISCAL_YEAR_NOT_FOUND, naming the räkenskapsår that exist.
 - Refused while an SIE import is unfinished.
 
 | Parameter | In | Type | Required | Notes |
@@ -3976,15 +3988,15 @@ Example response `200`:
 **The proposed momsredovisning verifikat for a VAT period: clear 26xx to 2650 or 1650.**
 `scope:reports:read · risk:low · idempotent`
 
-Builds the settlement entry for a momsperiod from the same ledger totals as the momsdeklaration: every output VAT account (261x-263x, reverse charge and import included) debited and every input VAT account (264x) credited by its period balance at exact öre, the net to 2650 (att betala, credit) or 1650 (att återfå, debit) at the whole-krona amount the declaration is filed with (ruta 49), and the öre gap on 3740. Dated the period's last day, or the first open day after it when that day is closed or locked (entry_date_reason says why). existing_entries lists the settlements already booked or drafted for the period: dated inside it (tagged vat_settlement or recognised by shape) unless it clears exactly the previous period's balances instead, or dated after it and clearing exactly this period's balances (late_settlement set); booking_status sums them up. When the posted ones cleared only part of the period's VAT (a settlement that came with an import mid-period, a verifikat added after the period was settled), partly_settled is true and lines hold only what is left on the accounts, with the net less what they already moved. fingerprint identifies these exact lines. Read-only.
+Builds the settlement entry for a momsperiod from the same ledger totals as the momsdeklaration: every output VAT account (261x-263x, reverse charge and import included) debited and every input VAT account (264x) credited by its period balance at exact öre, the net to 2650 (att betala, credit) or 1650 (att återfå, debit) at the whole-krona amount the declaration is filed with (ruta 49), and the öre gap on 3740. Dated the period's last day, or the first open day after it when that day is closed or locked (entry_date_reason says why). existing_entries lists the settlements already booked or drafted for the period: dated inside it (tagged vat_settlement or recognised by shape) unless it clears exactly the previous period's balances instead, or dated after it and clearing exactly this period's balances (late_settlement set); booking_status sums them up. Every posted one is listed, since each gates booking. When the posted ones no longer clear the period's VAT exactly (a settlement that came with an import mid-period, a verifikat added after the period was settled, a credit note that lowered an account after they cleared it), partly_settled is true and lines hold only what is left on the accounts (what they cleared past an account's balance, a krona or more, is taken back when no other balance stands on that side of it), with the net less what they already moved, on 2650, debit or credit; a claim they put on 1650 that 1650 still holds exactly moves to 2650 with it, so the period's later charges, refunds and corrections all land on 2650. fingerprint identifies these exact lines. Read-only.
 
 **Use when:** Before booking the VAT for a period (POST /vat/settlement), to review what will be posted.
 **Do not use for:** The declaration rutor themselves (GET /reports/vat-declaration) or paying the VAT (the skattekonto payment is booked separately).
 
 **Pitfalls:**
-- booking_status booked means a posted settlement exists: booking again is refused; reverse that verifikat first if the period must be re-booked.
-- is_empty true means the period has no VAT to clear.
-- lines clear the WHOLE period, also when booking_status is booked and the period is settled in full. Only with partly_settled true are they what is left after the settlements already posted: booking is still refused then (booking_status booked), so the rest is posted as an ordinary verifikat or the earlier settlement is reversed and the period booked whole.
+- booking_status booked means a posted settlement exists: booking again is refused; reverse every posted one in existing_entries first if the period must be re-booked.
+- is_empty true means the period has no VAT to clear and its posted settlements left nothing on the accounts.
+- lines clear the WHOLE period, also when booking_status is booked and the period is settled in full. Only with partly_settled true are they what is left after the settlements already posted: booking is still refused then (booking_status booked), so the rest is posted as an ordinary verifikat, or every posted settlement in existing_entries is reversed and the period booked whole.
 - An ordinary verifikat stays out of the declaration rutor as a momsredovisning only when it has a 2650 or 1650 line (or is a pure 26xx movement against 1630): two 26xx accounts against each other count as VAT of the period.
 - An existing_entries row recognised by shape can be a correction, not a momsredovisning (e.g. output VAT moved to 1650 next to a sales correction): once the user confirms, it is marked as one on the Moms page or with accounted_mark_not_momsredovisning; the rutor then read it and it no longer counts as a momsredovisning.
 
@@ -4450,7 +4462,7 @@ Posts the settlement proposal of GET /reports/vat-declaration/settlement-proposa
 **Do not use for:** Filing the momsdeklaration with Skatteverket (the eSKD file or the Skatteverket connection), booking the payment to the skattekonto, or custom settlement lines (post an ordinary verifikat with POST /journal-entries).
 
 **Pitfalls:**
-- A posted settlement in the period answers 409 VAT_SETTLEMENT_ALREADY_BOOKED with details.journal_entry_id: reverse it first if the period must be re-booked. When that verifikat is a correction the shapes caught, not a momsredovisning, and the user confirms it, mark it as one instead (the Moms page, or accounted_mark_not_momsredovisning).
+- A posted settlement in the period answers 409 VAT_SETTLEMENT_ALREADY_BOOKED with details.journal_entry_id and, when the refusal read them, details.posted_settlements (every posted one, each gates): reverse them all first if the period must be re-booked. When such a verifikat is a correction the shapes caught, not a momsredovisning, and the user confirms it, mark it as one instead (the Moms page, or accounted_mark_not_momsredovisning).
 - Pass expected_fingerprint from the proposal you reviewed: if the ledger changed since, 409 VAT_SETTLEMENT_PROPOSAL_CHANGED instead of booking different lines.
 - A locked or closed period, or a date on or before the company lock date, answers 400 PERIOD_LOCKED; no voucher number is spent.
 - A posted verifikat is permanent: undo it with storno (POST /journal-entries/{id}/reverse), never by editing.

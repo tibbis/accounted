@@ -287,6 +287,10 @@ export interface UserUiState {
   // hidden by this person, with its X or under Inställningar > Ditt konto.
   // Its own choice: hide_assistant_fab is the built-in assistant's button.
   support_fab_hidden?: boolean
+  // Favoriter (lib/navigation/favorites): the hrefs of the menu rows this
+  // person pinned, in the order they were added. Per person, not per company:
+  // the sidebar draws only the ones the open company's menu shows.
+  nav_favorites?: string[]
 }
 
 export type DashboardShell = 'v1' | 'v2'
@@ -679,6 +683,10 @@ export interface CompanySettings {
   // Invoice PDF settings
   ore_rounding: boolean
   invoice_show_ocr: boolean
+  // The OCR reference carries Bankgirot's length digit before the check
+  // digit (lib/invoices/ocr-reference.ts). Optional in TS: a row read before
+  // the column's migration has it absent, which prints the plain form.
+  invoice_ocr_length_digit?: boolean
   invoice_show_bankgiro: boolean
   invoice_show_plusgiro: boolean
   invoice_show_swish: boolean
@@ -1025,6 +1033,15 @@ export const TRANSACTION_METHODS = [
 ] as const
 
 export type TransactionMethod = (typeof TRANSACTION_METHODS)[number]
+
+/**
+ * The title a bank row is stored with when its source gave none
+ * (normalizeImportedDescription in lib/transactions/external-id.ts, which
+ * exports it as FALLBACK_DESCRIPTION). It sits beside the row's type because
+ * the ledger reads it too: a row with only this title names no counterparty
+ * (namesCounterparty in lib/bookkeeping/counterparty-templates.ts).
+ */
+export const TRANSACTION_FALLBACK_DESCRIPTION = 'Okänd transaktion'
 
 // Transaction
 export interface Transaction {
@@ -2383,6 +2400,11 @@ export interface BASAccount {
   default_vat_treatment: import('@/lib/vat/account-vat-treatment').AccountVatTreatment | null
   // Momsruta override for 26xx VAT accounts; null = BAS mapping by number.
   vat_box: import('@/lib/vat/account-vat-box').AccountVatBox | null
+  // OSS (unionsordningen): the other EU country the account is for, and that
+  // country's VAT rate in percent on a sales account (lib/vat/oss-accounts.ts).
+  // Optional: only the reads that need them select them.
+  oss_country?: string | null
+  oss_vat_rate?: number | null
   description: string | null
   sru_code: string | null
   k2_excluded: boolean
@@ -3967,7 +3989,12 @@ export interface VatDeclaration {
    */
   kontantmetodCutoff?: KontantmetodCutoffVatFacts
   // Supporting data
+  /**
+   * Verifikat in the period from customer invoices (booking, payment, cash
+   * payment, credit note), not invoices: a paid invoice counts twice.
+   */
   invoiceCount: number
+  /** Verifikat in the period booked from bank transactions. */
   transactionCount: number
   // Breakdown by source
   breakdown: {
@@ -4323,6 +4350,13 @@ export type DepreciationMethod =
 
 export type WritableDepreciationMethod = 'linear'
 export type AssetDisposalType = 'sale' | 'scrap' | 'business_transfer'
+/**
+ * How the asset came onto the books: bought, taken over in a rörelseförvärv
+ * (inkråmsförvärv) or a fusion, or moved in from another balance sheet post
+ * (varulager, pågående nyanläggningar). The note on anläggningstillgångar
+ * (ÅRL 5 kap. 8 §) shows each on its own row.
+ */
+export type AssetAcquisitionType = 'purchase' | 'business_acquisition' | 'merger' | 'reclassification'
 export type AssetJamkningDirection = 'increase' | 'decrease' | 'none' | 'transferred'
 
 /**
@@ -4444,6 +4478,9 @@ export interface Asset {
   /** Deprecated legacy field. New tax depreciation is pooled per fiscal
    *  period and ordinary per-asset depreciation is linear. */
   restvarde_target: number | null
+  /** How the asset came onto the books. Absent on rows read before the
+   *  column existed: a purchase. */
+  acquisition_type?: AssetAcquisitionType
   disposed_at: string | null
   disposed_proceeds: number | null
   /** How the asset left the register. Null for legacy disposal records. */
@@ -4777,6 +4814,17 @@ export interface IngestOptions {
    * new id scheme takes a new label.
    */
   stableExternalIds?: boolean
+  /**
+   * The feed's reading of a bank text it lists as booked but does not take
+   * as booked: a Nordea card hold (crm#2076, isNordeaCardHold). The feed
+   * leaves such rows out of the batch. One stored before it did, by this feed
+   * or the other one, ignored or not, still holds its occurrence index.
+   * Re-keying never gives it an incoming row (reconcileStableExternalIds) and
+   * it is no cross-channel mirror twin (decideIngestRow), so a purchase booked
+   * on its day for its amount takes a fresh id instead of being skipped as its
+   * duplicate. Read from the stored row's original_description.
+   */
+  isNotBooked?: (text: string) => boolean
 }
 
 /**
@@ -4835,9 +4883,9 @@ export interface IngestResult {
   first_error?: { message: string; code?: string | null; details?: string | null; hint?: string | null }
 }
 
-// ── Webshop orders (Orders page; synced by the woocommerce/shopify/zettle extensions) ──
+// ── Webshop orders (Orders page; synced by the woocommerce/shopify/zettle extensions, read from a Kustom settlement file) ──
 
-export type WebshopPlatform = 'woocommerce' | 'shopify' | 'zettle'
+export type WebshopPlatform = 'woocommerce' | 'shopify' | 'zettle' | 'kustom'
 export type WebshopOrderRowType = 'order' | 'refund'
 
 /** One VAT rate bucket of an order, in the order's currency. */
@@ -5097,7 +5145,7 @@ export interface KPIReport {
   cashPosition: number             // SEK (sum of 19xx account balances)
   outstandingReceivables: number   // SEK
   overdueReceivables: number       // SEK
-  vatLiability: number             // SEK, ruta 49 (positive = owe, negative = refund)
+  vatLiability: number             // SEK, moms on 26xx not yet moved by a momsredovisning (positive = owe, negative = refund); not ruta 49
   totalRevenue: number             // SEK
   totalExpenses: number            // SEK
   grossMargin: number | null       // percentage, null if no revenue

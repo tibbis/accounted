@@ -40,6 +40,8 @@ export interface NavGateFlags {
   requiresBolagetHub?: boolean
   /** A Bolaget register page (aktiebok, styrelse): the rollout and a form that keeps an aktiebok (lib/bolaget/hub.ts `registers`). */
   requiresBolagetRegisters?: boolean
+  /** A Bolaget page for meetings, capital or owner tax: the rollout alone (lib/bolaget/hub.ts `money`). */
+  requiresBolagetMoney?: boolean
   /** Avtal och åtaganden (/bolaget/avtal): the commitments rollout, any form (lib/bolaget/hub.ts `agreements`). */
   requiresCommitments?: boolean
   /** A page of the MCP server extension (/settings/api): shown only where that extension is built in. */
@@ -48,16 +50,24 @@ export interface NavGateFlags {
   requiresAgents?: boolean
   /** What the Agenter page replaces (the Arbetssätt view of the wiki): hidden where that page is open. */
   hiddenWithAgents?: boolean
+  /** Shown only where the agent picture is switched on for the company (AGENT_PICTURE_COMPANY_IDS, lib/env/agent-picture-switch.ts). */
+  requiresAgentPicture?: boolean
+  /** Hidden where the agent picture is switched on: the picture holds what the row opens, or shows it from its own rows. */
+  hiddenWithAgentPicture?: boolean
   /** The built-in chat (/chat): hidden where it is switched off (ASSISTANT_CHAT_ENABLED, lib/env/assistant-chat-switch.ts). */
   requiresAssistantChat?: boolean
   /** Fakta in the wiki: only where Arkiv reads the company's documents (lib/arkiv/flag.ts isArkivBrainEnabled). */
   requiresArkivBrain?: boolean
   /** The new Inkorg page (/inkorg): shown only for companies in the INKORG_V2_COMPANY_IDS rollout (lib/inkorg/flag.ts). */
   requiresInkorgV2?: boolean
+  /** Att bokföra (/att-bokfora): shown only for companies in the BOOKING_SCREEN_COMPANY_IDS rollout (lib/env/booking-screen-switch.ts). */
+  requiresBookingScreen?: boolean
   /** What the new Inkorg page replaces (Underlag under Inköp): hidden for the companies in that rollout. */
   hiddenWithInkorgV2?: boolean
   /** The Autogiro page (/invoices/autogiro): shown only for companies in the AUTOGIRO_COMPANY_IDS rollout (lib/invoices/autogiro/flag.ts). */
   requiresAutogiro?: boolean
+  /** The question list (/questions): shown only for companies in the COMPANY_QUESTIONS_COMPANY_IDS rollout (lib/env/company-questions-switch.ts). */
+  requiresCompanyQuestions?: boolean
   requiredCapability?: CapabilityKey
   /** Show only for these legal forms (one or several). */
   entityOnly?: EntityType | readonly EntityType[]

@@ -16,6 +16,7 @@ import {
   AssetOpeningChangedError,
   AssetValueAdjustmentBlockedError,
   BookkeepingDatabaseError,
+  sieSourceVoucherTaken,
   ContractRevenueRefusedError,
   contractRevenueRefusalFromRpc,
   DeferredTaxAlreadyPostedError,
@@ -38,6 +39,7 @@ import {
   JournalEntryNotFoundError,
   UnattendedCommitLimitExceededError,
   AccrualDraftPostedByScheduleError,
+  isBankBookingContextRefusal,
   valueAdjustmentBlockFromRpc,
   type BookkeepingOperation,
 } from '@/lib/bookkeeping/errors'
@@ -68,6 +70,7 @@ import { commitAsReviewed, isBookingReviewRefusal } from '@/lib/bookkeeping/book
 import { linkBusinessEventToDraft, type BusinessEventLink, type SqlBusinessEventLink } from '@/lib/bookkeeping/business-event-link'
 import { callWithBusinessEvents } from '@/lib/bookkeeping/business-event-rpc'
 import type { PayoutFeeLine } from '@/lib/bookkeeping/payout-fee-lines'
+import type { SupplierDebtLine } from '@/lib/bookkeeping/supplier-debt-lines'
 import {
   findKontantmetodCarry,
   kontantmetodCarryHasSettlements,
@@ -96,7 +99,9 @@ export async function commitSIEImportChunk(supabase: SupabaseClient, job: SIEJob
     p_company_id: job.company_id, p_import_id: job.id, p_worker_id: job.worker_id,
     p_attempt: job.job_attempt, p_phase: phase, p_chunk_no: chunk,
   })
-  if (error) throw new BookkeepingDatabaseError('import_sie_chunk', error.message)
+  // A voucher whose source series and number the year already holds is
+  // refused on every try: its own error, so the worker stops the job.
+  if (error) throw sieSourceVoucherTaken(error) ?? new BookkeepingDatabaseError('import_sie_chunk', error.message)
   if (!data) throw new BookkeepingDatabaseError('import_sie_chunk', 'Missing completion receipt')
   return data as SIEChunkResult
 }
@@ -120,12 +125,16 @@ const log = createLogger('bookkeeping.engine')
  * Log a failed journal write. A refusal the database raises on purpose is a
  * warning: a PT409 conflict (a busy bank account, a bank row that changed
  * under the booking), which the doors answer as a 409 to retry or refresh,
- * and a write behind a period lock or the lock date, answered as a 4xx.
+ * a write behind a period lock or the lock date, answered as a 4xx, and the
+ * bank-booking guard's refusal of a draft that does not name its bank row,
+ * answered as a 409 that says where to book it instead.
  * Logged at error they filled Vercel's runtime errors with expected
  * answers. Anything else stays an error.
  */
 function logWriteFailure(message: string, error: unknown, context: Record<string, unknown>): void {
-  const expected = (error as { code?: unknown } | null)?.code === 'PT409' || isPeriodLockRefusal(error)
+  const raised = error as { code?: unknown; message?: unknown } | null
+  const expected = raised?.code === 'PT409' || isPeriodLockRefusal(error) ||
+    isBankBookingContextRefusal(raised?.code, raised?.message)
   if (expected) log.warn(message, error, context)
   else log.error(message, error, context)
 }
@@ -2420,6 +2429,14 @@ export interface MatchBatchAllocationInput {
     }>
   >
   /**
+   * A supplier batch: the supplier debt from before the company kept its
+   * books here that the row also pays (supplierDebtLines,
+   * lib/bookkeeping/supplier-debt-lines.ts), sent as p_debt_lines (migration
+   * 20261120150000). Empty or omitted: the parameter is not sent. Sent to a
+   * database without it, the call answers PGRST202: a refusal, never a fee row.
+   */
+  debtLines?: SupplierDebtLine[]
+  /**
    * The posting port's events, one per allocation (sale.payment_received or
    * purchase.paid), linked to the samlingsverifikat before its number is
    * drawn. Omitted: the RPC is called as before.
@@ -2459,6 +2476,7 @@ export async function commitMatchBatchAllocation(
       p_user_id: userId,
       ...(input.feeLines?.length ? { p_fee_lines: input.feeLines } : {}),
       ...(input.cashLines && Object.keys(input.cashLines).length > 0 ? { p_cash_lines: input.cashLines } : {}),
+      ...(input.debtLines?.length ? { p_debt_lines: input.debtLines } : {}),
       ...events,
     }),
   )
@@ -3143,7 +3161,8 @@ export async function reverseEntry(
   // original's fiscal year, so its date must lie inside that year and the year
   // must be open (BFL 5 kap 5 §, BFNAR 2013:2 p. 2.17-2.18). Checked before
   // anything is written: the period-lock trigger only refused the insert.
-  const entryDate = await assertStornoTarget(supabase, companyId, original, reversalDate)
+  // Also refused when a posted storno already reverses the original.
+  const { date: entryDate } = await assertStornoTarget(supabase, companyId, original, reversalDate)
 
   // Resolve account IDs: include inactive rows. The accounts on the
   // original committed entry were active at commit time; if the user has

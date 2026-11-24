@@ -11,8 +11,17 @@ import type { CategorizationTemplate } from '@/types'
  * match, and a rule the system only proposed all open Granska bokföring.
  * So does any proposal the assistant's read puts in another reverse-charge
  * box (ruta 21 against ruta 22): the invoice decides that, not the history.
+ * So does a learned pair whose reverse-charge box was never learned and that
+ * neither its cost account nor the company's posted bookings confirm
+ * (reverse_charge_box_unconfirmed): it books ruta 21 by default.
  * So does a learned counterpart matched on money moving against its learned
  * direction (a likely refund, crm#1598): the habit was learned the other way.
+ * So does the company's own earlier booking of the counterparty
+ * ('precedent', ./booking-precedent.ts), however many earlier bookings agree:
+ * it is what was done before, not a rule anyone set or confirmed.
+ * So does the assistant's read on a row where an auto-learned mapping row
+ * that is no longer read would have proposed (replaces_learned_rule): the
+ * read stands where a rule stood.
  * Every direct booking carries Ångra on its toast.
  *
  * Before the evidence, the company and the rule have their say
@@ -41,7 +50,7 @@ export const ASSISTANT_LIKELY = 0.5
  * revision). The thresholds are spelled into the version, so changing one
  * changes the version on its own.
  */
-export const DIRECT_BOOKING_POLICY_REVISION = 4
+export const DIRECT_BOOKING_POLICY_REVISION = 5
 
 /**
  * The approval policy a decision's confidence band is evaluated under,
@@ -112,7 +121,7 @@ export function askedForReview(rule: RuleReviewFlags, settings: DirectBookingSet
 
 type PolicyEvidence = Pick<
   SuggestedTemplate,
-  'source' | 'seen_count' | 'confidence' | 'has_underlag' | 'rule_mode' | 'rule_own' | 'rule_requires_review' | 'contested' | 'read_reverse_charge_kind' | 'direction_mismatch'
+  'source' | 'seen_count' | 'confidence' | 'has_underlag' | 'rule_mode' | 'rule_own' | 'rule_requires_review' | 'contested' | 'read_reverse_charge_kind' | 'reverse_charge_box_unconfirmed' | 'direction_mismatch' | 'replaces_learned_rule'
 > &
   RuleReviewFlags
 
@@ -129,7 +138,7 @@ export function reviewRequired(s: PolicyEvidence, settings: DirectBookingSetting
 export function booksWithoutReview(
   s: Pick<
     SuggestedTemplate,
-    'source' | 'seen_count' | 'confidence' | 'has_underlag' | 'rule_mode' | 'rule_own' | 'rule_requires_review' | 'contested' | 'read_reverse_charge_kind' | 'direction_mismatch'
+    'source' | 'seen_count' | 'confidence' | 'has_underlag' | 'rule_mode' | 'rule_own' | 'rule_requires_review' | 'contested' | 'read_reverse_charge_kind' | 'reverse_charge_box_unconfirmed' | 'direction_mismatch' | 'replaces_learned_rule'
   >,
 ): boolean {
   // A match the assistant's read took down from the row is the opposite of a
@@ -142,6 +151,15 @@ export function booksWithoutReview(
   // company invoices decides the box, and that is on the invoice
   // (accounted#37). A counterpart learned as one pair never learned a box.
   if (s.read_reverse_charge_kind) return false
+  // A learned pair's box that nothing confirms: it books the EU-service
+  // default, and the seller may be outside the EU (ruta 22).
+  if (s.reverse_charge_box_unconfirmed) return false
+  // A read on a row where an auto-learned mapping row that is no longer read
+  // would have proposed: it takes the rule's place, never its one click.
+  if (s.replaces_learned_rule) return false
+  // How the counterparty was booked before is no rule: whatever its count, a
+  // person reviews it. Only a counterparty rule turns a habit into one click.
+  if (s.source === 'precedent') return false
   // A matched mapping rule of the company's own that does not ask for a
   // review. System defaults (company_id null) are the catalog in disguise.
   if (s.source === 'rule') return !!s.rule_own && !s.rule_requires_review

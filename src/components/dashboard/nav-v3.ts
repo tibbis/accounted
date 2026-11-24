@@ -33,9 +33,11 @@ import {
   HashtagIcon,
   HomeIcon,
   InboxIcon,
+  InboxStackIcon,
   ListBulletIcon,
   PencilSquareIcon,
   PercentBadgeIcon,
+  QuestionMarkCircleIcon,
   QueueListIcon,
   ReceiptRefundIcon,
   RectangleGroupIcon,
@@ -164,9 +166,12 @@ export const NAV_V3_AREAS: NavV3Area[] = [
     groups: [
       {
         items: [
-          { href: '/', module: 'platform', labelKey: 'home', icon: HomeIcon, match: ['/onboarding/books'] },
-          { href: '/?vy=behover', module: 'platform', labelKey: 'v3_needs_you', icon: InboxIcon, match: ['/arkiv/granska'] },
+          // Hem lists what needs the person (it took over Behöver dig), and counts it.
+          { href: '/', module: 'platform', labelKey: 'home', icon: HomeIcon, match: ['/onboarding/books', '/arkiv/granska'] },
+          // One list of what waits to be booked, beside the queues it gathers, while the booking screen rolls out.
+          { href: '/att-bokfora', module: 'platform', labelKey: 'v3_to_book', icon: InboxStackIcon, requiresBookingScreen: true },
           { href: '/pending', module: 'platform', labelKey: 'v3_routine', icon: ArrowPathIcon },
+          { href: '/questions', module: 'platform', labelKey: 'v3_questions', icon: QuestionMarkCircleIcon, requiresCompanyQuestions: true },
           { href: '/?vy=gjort', module: 'platform', labelKey: 'v3_done', icon: CheckIcon },
         ],
       },
@@ -279,7 +284,8 @@ export const NAV_V3_AREAS: NavV3Area[] = [
     groups: [
       {
         items: [
-          { href: '/bookkeeping', module: 'ledger', labelKey: 'v3_vouchers', icon: BookOpenIcon, match: ['/dimensions/tagging'] },
+          // The booking screen (/bokfor) sits under Verifikat: it makes one.
+          { href: '/bookkeeping', module: 'ledger', labelKey: 'v3_vouchers', icon: BookOpenIcon, match: ['/dimensions/tagging', '/bokfor'] },
           { href: '/chart-of-accounts', module: 'ledger', labelKey: 'chart_of_accounts', icon: QueueListIcon },
           { href: '/dimensions', module: 'ledger', labelKey: 'dimensions', icon: HashtagIcon, requiresDimensions: true },
           { href: '/bookkeeping/periodiseringar', module: 'ledger', labelKey: 'periodiseringar', icon: CalendarDateRangeIcon },
@@ -389,9 +395,9 @@ export const NAV_V3_AREAS: NavV3Area[] = [
           },
           { href: '/bolaget/aktiebok', module: 'corporate', labelKey: 'v3_share_register', icon: BookOpenIcon, requiresBolagetRegisters: true },
           { href: '/bolaget/styrelse', module: 'corporate', labelKey: 'v3_board', icon: UserIcon, requiresBolagetRegisters: true },
-          { href: '/bolaget/moten', module: 'corporate', labelKey: 'v3_meetings', icon: CalendarDateRangeIcon, requiresBolagetRegisters: true },
-          { href: '/bolaget/kapital', module: 'corporate', labelKey: 'v3_capital', icon: BanknotesIcon, requiresBolagetRegisters: true },
-          { href: '/bolaget/agarskatt', module: 'corporate', labelKey: 'v3_owner_tax', icon: PercentBadgeIcon, requiresBolagetRegisters: true },
+          { href: '/bolaget/moten', module: 'corporate', labelKey: 'v3_meetings', icon: CalendarDateRangeIcon, requiresBolagetMoney: true },
+          { href: '/bolaget/kapital', module: 'corporate', labelKey: 'v3_capital', icon: BanknotesIcon, requiresBolagetMoney: true },
+          { href: '/bolaget/agarskatt', module: 'corporate', labelKey: 'v3_owner_tax', icon: PercentBadgeIcon, requiresBolagetMoney: true },
         ],
       },
     ],
@@ -410,30 +416,54 @@ export const NAV_V3_AREAS: NavV3Area[] = [
     owns: ['/settings/api'],
     groups: [
       {
+        // Where the agent picture is on (AGENT_PICTURE_COMPANY_IDS) the area
+        // is these two rows, with no group label: the picture (Kontext) and
+        // Bokföringsregler. The rows the picture replaces hide there; what
+        // they open is reached from the picture or by its address. Chatt,
+        // below, follows the chat's own switch and stays. The picture is what
+        // a connected agent gets, so its row needs what Koppla en agent
+        // needs: the MCP server extension. Without it the area is
+        // Bokföringsregler, and /wiki leads there (wikiPlace).
+        items: [
+          {
+            href: '/wiki',
+            module: 'agent',
+            labelKey: 'v3_context',
+            icon: RectangleGroupIcon,
+            newBadge: true,
+            match: ['/agent-knowledge'],
+            requiresAgentPicture: true,
+            requiresMcpExtension: true,
+          },
+          { href: '/rules', module: 'transactions', labelKey: 'v2_rules', icon: AdjustmentsHorizontalIcon, requiresAgentPicture: true },
+        ],
+      },
+      {
         labelKey: 'v3_group_steer',
         items: [
-          { href: '/rules', module: 'transactions', labelKey: 'v2_rules', icon: AdjustmentsHorizontalIcon },
-          { href: '/skills', module: 'agent', labelKey: 'v3_skills', icon: SparklesIcon, newBadge: true, requiresAgents: true },
+          { href: '/rules', module: 'transactions', labelKey: 'v2_rules', icon: AdjustmentsHorizontalIcon, hiddenWithAgentPicture: true },
+          { href: '/skills', module: 'agent', labelKey: 'v3_skills', icon: SparklesIcon, newBadge: true, requiresAgents: true, hiddenWithAgentPicture: true },
         ],
       },
       {
         labelKey: 'v3_group_knowledge',
         items: [
           // /agent-knowledge redirects into the wiki, view by view.
-          { href: '/wiki', module: 'agent', labelKey: 'v3_context', icon: RectangleGroupIcon, newBadge: true, match: ['/agent-knowledge'] },
+          { href: '/wiki', module: 'agent', labelKey: 'v3_context', icon: RectangleGroupIcon, newBadge: true, match: ['/agent-knowledge'], hiddenWithAgentPicture: true },
           // Every view of the wiki is a row here, so the page carries no view switcher.
-          { href: '/wiki?view=map', module: 'agent', labelKey: 'v3_rules_profile', icon: BookOpenIcon },
-          { href: '/wiki?view=facts', module: 'agent', labelKey: 'v3_facts', icon: ListBulletIcon, requiresArkivBrain: true },
-          { href: '/wiki?view=memory', module: 'agent', labelKey: 'v3_memory', icon: BookmarkIcon },
+          { href: '/wiki?view=map', module: 'agent', labelKey: 'v3_rules_profile', icon: BookOpenIcon, hiddenWithAgentPicture: true },
+          { href: '/wiki?view=facts', module: 'agent', labelKey: 'v3_facts', icon: ListBulletIcon, requiresArkivBrain: true, hiddenWithAgentPicture: true },
+          { href: '/wiki?view=memory', module: 'agent', labelKey: 'v3_memory', icon: BookmarkIcon, hiddenWithAgentPicture: true },
           // Where the Agenter page is open, Arbetssätt above is that page.
-          { href: '/wiki?view=skills', module: 'agent', labelKey: 'v3_skills', icon: SparklesIcon, hiddenWithAgents: true },
+          { href: '/wiki?view=skills', module: 'agent', labelKey: 'v3_skills', icon: SparklesIcon, hiddenWithAgents: true, hiddenWithAgentPicture: true },
         ],
       },
       {
         // The built-in chat will be removed: a
         // customer's own assistant connects over MCP instead (Koppla en agent
         // above). Until then the row stays, behind the switch that takes the
-        // chat away (ASSISTANT_CHAT_ENABLED, on unless switched off).
+        // chat away (ASSISTANT_CHAT_ENABLED, on unless switched off), with
+        // the agent picture on or off.
         items: [{ href: '/chat', module: 'agent', labelKey: 'v3_chat', icon: ChatBubbleLeftIcon, requiresAssistantChat: true }],
       },
     ],

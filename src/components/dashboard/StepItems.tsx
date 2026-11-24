@@ -20,6 +20,8 @@ import { INKORG_FOCUS_QUERY, INKORG_HREF } from '@/lib/inkorg/flag'
 import { PAYMENT_STATUSES_TO_BOOK, SETTLEMENT_STATUSES_TO_BOOK } from '@/lib/collections/settlements-ui'
 import { filterOpenDeadlines } from '@/lib/deadlines/open'
 import { readSkattekontoOpeningDate, whereSkattekontoRowOpen } from '@/lib/skatteverket/skattekonto-open-rows'
+import { bookingScreenHref } from '@/lib/bookkeeping/booking-screen'
+import { TO_BOOK_RETURN_PARAM } from '@/lib/bookkeeping/to-book'
 
 /**
  * What stands behind a count row, inside its Börja step: the first few items
@@ -28,7 +30,7 @@ import { readSkattekontoOpeningDate, whereSkattekontoRowOpen } from '@/lib/skatt
  * the destination page makes or the predicate its count is defined by
  * (lib/worklist/categories.ts), never a new route:
  *
- *   attest              GET /api/supplier-invoices?status=all, narrowed with
+ *   attest              GET /api/supplier-invoices?status=unsettled, narrowed with
  *                       the Registrerade rule (lib/supplier-invoices/list-tabs)
  *   to_pay              GET /api/supplier-invoices?status=to_pay (the Att betala tab)
  *   overdue             invoices, the Förfallna rule (lib/invoices/overdue)
@@ -36,6 +38,9 @@ import { readSkattekontoOpeningDate, whereSkattekontoRowOpen } from '@/lib/skatt
  *   inbox               GET /api/extensions/ext/invoice-inbox/items?limit=200, the
  *                       read Inkommande makes, in its Behöver dig queue order
  *   bank_rows, matches  transactions not yet booked (and with a proposed match)
+ *   to_book             the open bank rows Att bokföra lists (open_bank_rows),
+ *                       each opening the booking screen (Att bokföra's row,
+ *                       with the booking screen switched on)
  *   skattekonto         skattekonto_transactions booked at Skatteverket, no verifikat
  *   settlements, collected_payments, collection_decision, collection_attention
  *                       the collection tables, by the statuses the counts use
@@ -57,6 +62,7 @@ export type StepItemsKind =
   | 'missing_underlag'
   | 'inbox'
   | 'bank_rows'
+  | 'to_book'
   | 'matches'
   | 'skattekonto'
   | 'settlements'
@@ -127,8 +133,9 @@ export function byDate(a: StepItem, b: StepItem): number {
 }
 
 async function loadSupplierInvoices(kind: 'attest' | 'to_pay'): Promise<StepItem[]> {
-  // Att betala is asked for as the tab asks (the route narrows it); Registrerade has no filter of its own.
-  const res = await fetch(`/api/supplier-invoices?status=${kind === 'to_pay' ? 'to_pay' : 'all'}`)
+  // Att betala is asked for as the tab asks (the route narrows it); Registrerade
+  // reads what is not settled, since an invoice to attest never is.
+  const res = await fetch(`/api/supplier-invoices?status=${kind === 'to_pay' ? 'to_pay' : 'unsettled'}`)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const rows = ((await res.json()).data ?? []) as SupplierInvoiceRow[]
   return rows.filter(kind === 'attest' ? isAwaitingAttestInList : isToPayInList).map(supplierInvoiceItem).sort(byDate)
@@ -187,9 +194,16 @@ async function loadOverdueInvoices(companyId: string): Promise<StepItem[]> {
   })
 }
 
-/** The Inkommande address that opens one document in its focus view (InkorgPage reads `fokus`). */
-export function inboxFocusHref(href: string, id: string): string {
-  return href === INKORG_HREF ? `${INKORG_HREF}?${INKORG_FOCUS_QUERY}=${encodeURIComponent(id)}` : href
+/**
+ * The Inkommande address that opens one document in its focus view
+ * (InkorgPage reads `fokus`), with the list to return to when it was opened
+ * from Att bokföra (`tillbaka`, InkorgPage reads it through toBookReturnPath).
+ */
+export function inboxFocusHref(href: string, id: string, back?: string | null): string {
+  if (href !== INKORG_HREF) return href
+  const params = new URLSearchParams({ [INKORG_FOCUS_QUERY]: id })
+  if (back) params.set(TO_BOOK_RETURN_PARAM, back)
+  return `${INKORG_HREF}?${params}`
 }
 
 /** An inbox item as a step item: what it is, the door it came through, when it came in, the amount read off it. */
@@ -234,6 +248,15 @@ const invoiceName = (invoice: unknown): string => {
  * (lib/worklist/categories.ts), the order oldest or soonest first, the limit
  * STEP_ITEMS_CAP.
  */
+/**
+ * The page a booking screen opened from a step returns to: the view the step
+ * was opened in, Börja on its step included, so the person goes on from the
+ * same place (safeReturnPath keeps any view of Hem).
+ */
+function stepBack(): string {
+  return `${window.location.pathname}${window.location.search}`
+}
+
 async function loadFromTables(kind: StepItemsKind, companyId: string, href: string): Promise<StepItem[]> {
   const supabase = createClient()
   const rows = async (query: PromiseLike<{ data: unknown; error: { message: string } | null }>): Promise<Row[]> => {
@@ -242,6 +265,28 @@ async function loadFromTables(kind: StepItemsKind, companyId: string, href: stri
     return (data ?? []) as Row[]
   }
   switch (kind) {
+    case 'to_book': {
+      // Att bokföra's bank rows: the open_bank_rows view the list reads.
+      const back = stepBack()
+      return (
+        await rows(
+          supabase
+            .from('open_bank_rows')
+            .select('id, date, description, amount, currency')
+            .eq('company_id', companyId)
+            .order('date', { ascending: true })
+            .order('id', { ascending: true })
+            .limit(STEP_ITEMS_CAP),
+        )
+      ).map((r) => ({
+        id: String(r.id),
+        name: text(r.description),
+        date: text(r.date) || null,
+        amount: num(r.amount),
+        currency: text(r.currency) || null,
+        href: bookingScreenHref({ kind: 'transaction', transactionId: String(r.id), account: null }, back),
+      }))
+    }
     case 'bank_rows':
     case 'matches': {
       let query = supabase

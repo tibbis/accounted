@@ -1,15 +1,17 @@
 import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer'
 import type { ArsredovisningData, StatementRow } from './types'
 import { formatPdfKronor } from './pdf-format'
+import { roundThousands } from '@/lib/bokslut/ixbrl/thousand-kronor'
 import { pdfTextDeep } from '@/lib/pdf/number-text'
 import { formatOrgNumberDisplay } from '@/lib/invariants/org-number'
 import { EquitySpecificationTable } from './equity-specification-pdf'
 import {
+  type ArsredovisningPdfMode,
   CERTIFICATE_SIGNER,
   CERTIFICATE_SIGNER_LINE,
   draftCertificateNote,
   eSigningCertificateNote,
-  type ArsredovisningPdfMode,
+  PAPER_COPY_CERTIFICATION,
 } from './signature-pages'
 import { SignaturesPdf } from './signatures-pdf'
 
@@ -280,6 +282,10 @@ export function ArsredovisningK3PDF({
   // As in the K2 template: the typed texts are made safe for Helvetica
   // (no U+2212 glyph) once, where the data enters (crm#1887).
   const data = pdfTextDeep(reportData)
+  // The year's choice to state the flerårsöversikt in thousands of kronor:
+  // the figures the iXBRL document tags (roundThousands), so the two agree.
+  const overviewTkr = data.forvaltningsberattelse.flerarsoversikt_tkr === true
+  const overviewAmount = (kronor: number) => fmt(overviewTkr ? roundThousands(kronor) : kronor)
   const agmDispositionDecision =
     data.forvaltningsberattelse.agm_disposition_outcome === 'proposal_approved'
       ? `Årsstämman beslutade att godkänna styrelsens förslag: ${data.forvaltningsberattelse.resultatdisposition}`
@@ -333,7 +339,7 @@ export function ArsredovisningK3PDF({
           </>
         )}
 
-        <Text style={styles.sectionTitle}>Flerårsöversikt (kr)</Text>
+        <Text style={styles.sectionTitle}>Flerårsöversikt ({overviewTkr ? 'tkr' : 'kr'})</Text>
         <View style={styles.tableHeader}>
           <Text style={styles.colLabel}>År</Text>
           <Text style={styles.colAmount}>Nettoomsättning</Text>
@@ -343,8 +349,8 @@ export function ArsredovisningK3PDF({
         {data.forvaltningsberattelse.flerarsoversikt.map((row) => (
           <View key={row.year} style={styles.tableRow}>
             <Text style={styles.colLabel}>{row.year}</Text>
-            <Text style={styles.colAmount}>{fmt(row.net_revenue)}</Text>
-            <Text style={styles.colAmount}>{fmt(row.result_after_financial)}</Text>
+            <Text style={styles.colAmount}>{overviewAmount(row.net_revenue)}</Text>
+            <Text style={styles.colAmount}>{overviewAmount(row.result_after_financial)}</Text>
             <Text style={styles.colAmount}>
               {row.soliditet_pct === null ? '-' : row.soliditet_pct.toFixed(1)}
             </Text>
@@ -674,6 +680,7 @@ export function ArsredovisningK3PDF({
               att årsstämman beslutade om disposition av bolagets resultat i enlighet
               med vad som anges nedan.
             </Text>
+            {mode === 'signing' && <Text style={styles.paragraph}>{PAPER_COPY_CERTIFICATION}</Text>}
             <Text style={styles.paragraph}>
               Jag intygar också att årsredovisningen ger en rättvisande bild av
               företagets ställning och resultat samt att förvaltningsberättelsen ger

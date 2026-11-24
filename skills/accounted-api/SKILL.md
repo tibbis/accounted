@@ -8,7 +8,7 @@ description: >-
   transactions and reconciliation, payroll (lön), VAT/moms and financial
   reports, SIE import/export, documents, webhooks. Covers auth with
   gnubok_sk_ API keys, conventions (dry-run, idempotency, cursor
-  pagination, scopes), and all 475 endpoints.
+  pagination, scopes), and all 477 endpoints.
 ---
 
 <!-- GENERATED FILE, do not edit. Source: lib/api/v1 registry + scripts/api-skill/overlays. Regenerate with `npm run apiskill:generate`. -->
@@ -225,7 +225,7 @@ call can undo it, e.g. invoice credit).
 
 ## Endpoint index
 
-API version `2026-05-12`, 475 operations. Paths are shown without
+API version `2026-05-12`, 477 operations. Paths are shown without
 their `/api/v1` prefix (full base URL: `https://app.accounted.se/api/v1`).
 
 ### Core (24)
@@ -284,7 +284,7 @@ POST /companies/{companyId}/journal-entries/no-document-required : Mark many pos
 POST /companies/{companyId}/voucher-gap-explanations : Document a gap in the verifikationsserie (BFL 5 kap 6-7 §§) [scope:bookkeeping:write risk:low idempotent dry-run]
 ```
 
-### Periods and registers (77)
+### Periods and registers (78)
 
 Full detail: [references/periods.md](references/periods.md)
 
@@ -296,6 +296,7 @@ PATCH /companies/{companyId}/accounts/{number} : Edit or deactivate an account i
 DELETE /companies/{companyId}/accounts/{number} : Delete an account nothing has been booked on [scope:bookkeeping:write risk:medium idempotent dry-run]
 POST /companies/{companyId}/accounts/activate : Activate BAS accounts in bulk [scope:bookkeeping:write risk:low idempotent dry-run reversible]
 POST /companies/{companyId}/accounts/deactivate : Deactivate accounts in bulk [scope:bookkeeping:write risk:low idempotent dry-run reversible]
+POST /companies/{companyId}/accounts/oss-countries : Say which EU country each OSS account is for (unionsordningen) [scope:bookkeeping:write risk:low idempotent dry-run reversible]
 POST /companies/{companyId}/accrual-schedules : Create a periodisering by hand for an amount on 17xx/29xx that no invoice line in Accounted carries, with monthly catch-up [scope:bookkeeping:write risk:medium idempotent dry-run reversible]
 POST /companies/{companyId}/accrual-schedules/{id}/cancel : Undo a periodisering set up by hand: cancel its months not yet posted and storno the months it posted [scope:bookkeeping:write risk:medium idempotent dry-run]
 POST /companies/{companyId}/accrual-schedules/{id}/replan : Re-plan the months of a periodisering that are not yet posted: a new period end and/or the day each month books on [scope:bookkeeping:write risk:low idempotent dry-run reversible]
@@ -564,7 +565,7 @@ PATCH /companies/{companyId}/owner-loans/{id} : Update an owner loan: outstandin
 POST /companies/{companyId}/owner-loans/{id}/interest : Record the interest on an owner loan for an inkomstår and the tax withheld: the figures KU20 reports [scope:companies:write risk:low idempotent dry-run reversible]
 ```
 
-### Banking (66)
+### Banking (67)
 
 Full detail: [references/banking.md](references/banking.md)
 
@@ -584,6 +585,7 @@ POST /companies/{companyId}/cash-accounts/change-ledgers : Change which 19xx led
 PUT /companies/{companyId}/cash-accounts/payee-defaults : Choose which bank account invoices in a currency tell the customer to pay to [scope:companies:write risk:medium idempotent dry-run reversible]
 POST /companies/{companyId}/imports/bank : Import a bank-file (CSV / Excel / XML / CAMT053) [scope:transactions:write risk:medium idempotent]
 POST /companies/{companyId}/imports/bank/{id}/undo : Undo a bank file import: delete the rows it created that are still unbooked [scope:transactions:write risk:high idempotent dry-run]
+POST /companies/{companyId}/imports/deposit-specification : Attach a deposit specification (BG Max or camt.054) to the bank rows that are its deposits [scope:transactions:write risk:medium idempotent dry-run]
 POST /companies/{companyId}/imports/sie : Import a SIE4 file [scope:bookkeeping:write risk:high idempotent reversible]
 POST /companies/{companyId}/imports/sie/{id}/resume : Resume an interrupted SIE import from where it stopped [scope:bookkeeping:write risk:medium idempotent dry-run]
 POST /companies/{companyId}/imports/sie/{id}/undo : Undo an SIE import by batch storno: every entry it posted is reversed, nothing is deleted [scope:bookkeeping:write risk:high idempotent dry-run]
@@ -634,7 +636,7 @@ GET /companies/{companyId}/webshop-orders : The order and refund rows synced fro
 GET /companies/{companyId}/webshop-orders/{orderId} : One webshop order row with its line items and the booking the Orders page would prefill [scope:transactions:read risk:low idempotent]
 POST /companies/{companyId}/webshop-orders/{orderId}/book : Book one webshop order or refund with your own lines, linked to the order with its orderunderlag [scope:bookkeeping:write risk:high idempotent dry-run]
 POST /companies/{companyId}/webshop-orders/book-day : Book a store's orders and refunds of one day and one payment method as one verifikat, with a day summary as underlag [scope:bookkeeping:write risk:high idempotent dry-run]
-GET /companies/{companyId}/webshop-orders/oss-underlag : Underlag for the OSS declaration (unionsordningen): a quarter's webshop sales to consumers in other EU countries, per country and VAT rate, in euro [scope:reports:read risk:low idempotent]
+GET /companies/{companyId}/webshop-orders/oss-underlag : Underlag for the OSS declaration (unionsordningen): a quarter's sales to consumers in other EU countries, per country and VAT rate, in euro [scope:reports:read risk:low idempotent]
 ```
 
 ### Employees (32)
@@ -754,7 +756,7 @@ GET /companies/{companyId}/reports/journal-register : Journal register (verifika
 GET /companies/{companyId}/reports/kassaflodesanalys : Kassaflödesanalys (cash flow statement, indirect method) for a räkenskapsår [scope:reports:read risk:low idempotent]
 GET /companies/{companyId}/reports/kpi : Business KPIs (nyckeltal) for a fiscal period, as the dashboard shows them [scope:reports:read risk:low idempotent]
 GET /companies/{companyId}/reports/monthly-breakdown : Income statement broken down by month for a fiscal period [scope:reports:read risk:low idempotent]
-GET /companies/{companyId}/reports/ne-bilaga : NE-bilaga (enskild firma): rutor R1-R11 for a räkenskapsår [scope:reports:read risk:low idempotent]
+GET /companies/{companyId}/reports/ne-bilaga : NE-bilaga (enskild firma): balansräkning B1-B16 and rutor R1-R11 for a räkenskapsår [scope:reports:read risk:low idempotent]
 GET /companies/{companyId}/reports/ne-bilaga/sru : NE-bilaga SRU files (INFO.SRU + BLANKETTER.SRU) as a zip, for upload at skatteverket.se [scope:reports:read risk:low idempotent]
 GET /companies/{companyId}/reports/periodisk-sammanstallning : Periodisk sammanställning (EU sales list): per-customer EU sales of goods, services and triangulation [scope:reports:read risk:low idempotent]
 GET /companies/{companyId}/reports/periodisk-sammanstallning/csv : Periodisk sammanställning as the SKV 574008 CSV file, for upload at skatteverket.se [scope:reports:read risk:low idempotent]

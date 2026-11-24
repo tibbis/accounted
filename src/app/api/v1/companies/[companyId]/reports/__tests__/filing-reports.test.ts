@@ -92,6 +92,7 @@ import { GET as getBokslut } from '../bokslutsbilagor/route'
 import { GET as getKpi } from '../kpi/route'
 import { GET as getDimPnl } from '../dimension-pnl/route'
 import { GET as getAuditTrail } from '../../audit-trail/route'
+import { codedRefusal } from '@/lib/errors/refusal'
 
 const mockValidate = validateApiKey as ReturnType<typeof vi.fn>
 const mockServiceClient = createServiceClientNoCookies as ReturnType<typeof vi.fn>
@@ -153,13 +154,14 @@ function useClient(tables: Record<string, TableResp | TableResp[]>) {
 function ink2Declaration() {
   return {
     fiscalYear: { id: PERIOD_ID, name: '2025', start: '2025-01-01', end: '2025-12-31', isClosed: true },
-    ink2: { '7011': '20250101', '7012': '20251231', '7104': 1000, '7114': 0 },
+    ink2: { '7011': '20250101', '7012': '20251231', '7104': 1000, '7114': 0, '7132': 0, '7133': 0 },
     ink2r: { '7410': 5000 },
     ink2s: { '7650': 1000 },
     breakdown: {},
     totals: { totalAssets: 1, totalEquityLiabilities: 1, operatingResult: 1, aretsResultat: 1 },
     companyInfo: { companyName: 'Testbolaget AB', orgNumber: '556677-8899', entityType: 'aktiebolag', addressLine1: 'Gatan 1', postalCode: '11122', city: 'Stockholm', email: null },
     warnings: [],
+    sruBlockers: [],
   }
 }
 
@@ -172,6 +174,10 @@ function neDeclaration() {
     warnings: [`Kontrollera ${PNR} mot Skatteverket`],
     bookedResult: 480000,
     sruBlockers: [],
+    balans: { B1: 0, B2: 0, B3: 0, B4: 0, B5: 0, B6: 0, B7: 0, B8: 0, B9: 0, B10: 0, B11: 0, B12: 0, B13: 0, B14: 0, B15: 0, B16: 0 },
+    balansBreakdown: Object.fromEntries(['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11', 'B12', 'B13', 'B14', 'B15', 'B16'].map((b) => [b, { accounts: [], total: 0 }])) as never,
+    sida2: { R12: 480000, R13: 0, R14: 0 },
+    sida2Breakdown: { R13: { items: [], total: 0 }, R14: { items: [], total: 0 } },
   }
 }
 
@@ -255,6 +261,17 @@ describe('GET /reports/ink2 and /reports/ink2/sru', () => {
     expect(body.data.fiscalYear.id).toBeUndefined()
     expect(body.data.companyInfo.orgNumber).toBe('556677-8899')
     expect(body.data.sru_file.download).toBe(`/api/v1/companies/${COMPANY_ID}/reports/ink2/sru?period_id=${PERIOD_ID}`)
+  })
+
+  it('422 TAX_DECL_INK2_SRU_BLOCKED when the form does not tie to the books, with the reason', async () => {
+    useClient({ fiscal_periods: PERIOD, company_settings: AB })
+    const blocker = 'Konto 1395 (Övriga långfristiga fordringar) kunde inte mappas till ett SRU-fält.'
+    m.ink2.mockResolvedValue({ ...ink2Declaration(), sruBlockers: [blocker] })
+    const res = await get(getInk2Sru, `/reports/ink2/sru?period_id=${PERIOD_ID}`)
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error.code).toBe('TAX_DECL_INK2_SRU_BLOCKED')
+    expect(JSON.stringify(body.error)).toContain('Konto 1395')
   })
 
   it('500 TAX_DECL_GENERATION_FAILED when the generator throws', async () => {
@@ -463,6 +480,24 @@ describe('GET /reports/vat-declaration/eskd', () => {
     const body = await res.text()
     expect(body).toContain('<OrgNr>556677-8899</OrgNr>')
     expect(body).toContain('<MomsBetala>21800</MomsBetala>')
+  })
+
+  it('404 VAT_REPORT_FISCAL_YEAR_NOT_FOUND for a yearly year no räkenskapsår ends in, naming the years', async () => {
+    useClient({ company_settings: { data: { org_number: '5566778899' }, error: null } })
+    // As resolvePeriodDates throws it (lib/reports/vat-declaration.ts).
+    m.vat.mockRejectedValue(
+      codedRefusal(
+        'VAT_REPORT_FISCAL_YEAR_NOT_FOUND',
+        "No räkenskapsår ends in 2025, so there is no helårsmoms period 2025. The company's räkenskapsår: 2025-07-17..2026-12-31 (year 2026).",
+        { description: "Pass year = the year one of the company's räkenskapsår ends.", tool: 'gnubok_list_fiscal_periods' },
+      ),
+    )
+    const res = await get(getEskd, '/reports/vat-declaration/eskd?period_type=yearly&year=2025&period=1')
+    expect(res.status).toBe(404)
+    const { error } = await res.json()
+    expect(error.code).toBe('VAT_REPORT_FISCAL_YEAR_NOT_FOUND')
+    expect(error.message_en).toContain('2025-07-17..2026-12-31 (year 2026)')
+    expect(error.recovery_hint).toContain('Pass year')
   })
 })
 

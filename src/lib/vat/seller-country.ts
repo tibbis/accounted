@@ -7,7 +7,9 @@
  * Deterministic, and in this order, the first that answers wins:
  *   1. the VAT number's prefix (EL is Greece; XI, Northern Ireland, is the
  *      United Kingdom, which is right for the services this decides), when
- *      the number has its member state's format;
+ *      the number has its member state's format, except a Swedish number
+ *      beside an address that names another country (swedishVatNumberAbroad),
+ *      which decides nothing;
  *   2. the IBAN's country;
  *   3. a Swedish organisationsnummer (ten digits, the hyphen optional);
  *   4. a country named in the address as read, by the names the country
@@ -22,7 +24,7 @@
  * (lib/operations/inkorg-one-click.ts) and the supplier-invoice form's
  * "Ny leverantör" read the same answer.
  */
-import { COUNTRY_OPTIONS, vatNumberCountryPrefix } from './country-codes'
+import { COUNTRY_OPTIONS, countryCodeOfPrintedName, vatNumberCountryPrefix } from './country-codes'
 import { isEuMemberCountry } from './eu-countries'
 import { isKronorCurrency } from '@/lib/bookkeeping/currency-utils'
 import { isMalformedEuVatNumber } from '@/lib/invariants/vat-number'
@@ -109,7 +111,7 @@ const COUNTRY_NAMES: ReadonlyArray<readonly [string, string]> = [
 
 const US_STATE_NAMES = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida',
-  'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland',
+  'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland',
   'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
   'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma',
   'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah',
@@ -150,9 +152,22 @@ const NAME_PATTERNS: ReadonlyArray<{ re: RegExp; code: string }> = COUNTRY_NAMES
  * on its own.
  */
 export function countryFromAddress(address: string | null | undefined): string | null {
+  const named = namedCountries(address)
+  if (named.length === 0) return null
+  return named.reduce((last, one) => (one.at > last.at ? one : last)).code
+}
+
+interface NamedCountry {
+  at: number
+  end: number
+  code: string
+}
+
+/** Every country the address names on its own, where it stands (see countryFromAddress). */
+function namedCountries(address: string | null | undefined): NamedCountry[] {
   const text = address?.trim()
-  if (!text) return null
-  const found: Array<{ at: number; end: number; code: string }> = []
+  if (!text) return []
+  const found: NamedCountry[] = []
   for (const { re, code } of NAME_PATTERNS) {
     for (const match of text.matchAll(re)) {
       const at = match.index ?? 0
@@ -166,15 +181,109 @@ export function countryFromAddress(address: string | null | undefined): string |
       found.push({ at, end: at + match[0].length, code: 'US' })
     }
   }
-  const standalone = found.filter(
+  return found.filter(
     (one) => !found.some((other) => other !== one && other.at <= one.at && other.end >= one.end && other.end - other.at > one.end - one.at),
   )
-  if (standalone.length === 0) return null
-  return standalone.reduce((last, one) => (one.at > last.at ? one : last)).code
 }
+
+/**
+ * The country the address names when the VAT number is Swedish and the
+ * address is abroad, else null. A business established abroad can register
+ * for VAT in Sweden, so its number starts with SE; whether it is established
+ * here for the sale (ML 2023:200 16 kap. 4 §) decides whether it owes the
+ * VAT or the buyer does (16 kap. 9 §), and the document does not tell. The
+ * caller asks the person; nothing decides it as Swedish or as foreign.
+ */
+export function swedishVatNumberAbroad(identity: SellerIdentity | null | undefined): string | null {
+  if (vatNumberCountry(identity?.vatNumber) !== SWEDEN) return null
+  return countryEndingAddress(identity?.address)
+}
+
+/**
+ * What may follow an address's country, then the end: digits and
+ * punctuation ("10117", "95014-2083"), or one postcode of up to ten letters,
+ * digits, spaces or hyphens with a digit among them ("SW1A 1AA", "D02 X285").
+ * Prose after the name ("Danmark 1, 755 91 Uppsala", "Israel Andersson, ...")
+ * is no postcode.
+ */
+const AFTER_COUNTRY = /^(?:[\s\d.,-]*|[\s.,-]*(?=[A-Za-z0-9 -]*\d)[A-Za-z0-9][A-Za-z0-9 -]{0,9}[\s.,]*)$/
+
+/** A phone number with its label, to the end of its part: "Tel +65 6123 4567", "Ph. (555) 123". */
+const LABELLED_PHONE = /\b(?:tel|tfn|telefon|phone|ph|fax|mob|mobile)\b\.?\s*:?\s*[+(\d][^,\n]*/gi
+
+/**
+ * A part of an address that is no place: digits alone (a postcode, a phone
+ * number), an e-mail, a web address, or a labelled e-mail, web address or
+ * registration number ("VAT: SE...", "Org.nr 556...").
+ */
+const NOT_A_PLACE = /^(?:[^\p{L}]*|.*@.*|(?:www\.|https?:\/\/).*|(?:e-?mail|e-?post|web(?:site)?|webb|vat|tax|gst|org|reg|momsreg)\b.*[\d.].*)$/iu
+
+/** The address without what may follow its country: labelled phone numbers, and last parts (by comma or line) that are no place. */
+function withoutTrailingContact(text: string): string {
+  const parts = text.replace(LABELLED_PHONE, '').split(/[,\n]/)
+  while (parts.length > 0 && NOT_A_PLACE.test(parts[parts.length - 1]!.trim())) parts.pop()
+  return parts.join(',').trim()
+}
+
+/** A name without the postcode words before or after it: "Malaysia" of "50000 Malaysia". */
+function withoutPostcode(text: string): string {
+  const words = text.trim().split(/\s+/)
+  // Any script's digits: a postcode in Arabic-Indic digits beside "مصر" is one too.
+  while (words.length > 0 && /\p{Nd}/u.test(words[0]!)) words.shift()
+  while (words.length > 0 && /\p{Nd}/u.test(words[words.length - 1]!)) words.pop()
+  return words.join(' ')
+}
+
+/**
+ * The country an address's last part (by comma or line) names, or null. A
+ * code counts only as the whole part ("..., DE", "..., U.K."): two letters
+ * left beside a number are a floor, a giro or a box ("4 tr", "BG 5050-1055").
+ * A name of three letters or more counts with a postcode beside it, or as
+ * one side of a slash, a dash or brackets ("Schweiz/Suisse", "Norway (NO)").
+ */
+function countryOfLastPart(text: string): string | null {
+  const part = (text.split(/[,\n]/).pop() ?? '').trim()
+  if (/^[A-Za-z]{2}$/.test(part) || /^(?:[A-Za-z]\.){2,3}$/.test(part)) return countryCodeOfPrintedName(part.replace(/\./g, ''))
+  for (const piece of [part, ...part.split(/\s*[/()]\s*|\s+-\s+/)]) {
+    const name = withoutPostcode(piece)
+    if (name.replace(/[^\p{L}]/gu, '').length < 3) continue
+    const code = countryCodeOfPrintedName(name)
+    if (code) return code
+  }
+  return null
+}
+
+/**
+ * The country other than Sweden that ends an address, or null. Stricter than
+ * countryFromAddress, since it overrules a Swedish VAT number: the name must
+ * close the address (a postcode, a phone number, an e-mail or a web address
+ * may follow), so a person or a street called after a country inside a
+ * Swedish address ("c/o Israel Andersson", "Danmark 1, 755 91 Uppsala") is no
+ * country; an address that names Sweden anywhere is Swedish; and a last part
+ * that is a country's code or any name a document prints for it counts
+ * (country-codes.ts countryCodeOfPrintedName), as a Peppol delivery writes it
+ * ("Hauptstr. 1, 10117 Berlin, DE") or a seller its own ("..., UK",
+ * "..., Nederland", "..., Malaysia"). A wrong country here only makes the
+ * caller ask; a missed one lets Swedish VAT be deducted.
+ */
+function countryEndingAddress(address: string | null | undefined): string | null {
+  const text = withoutTrailingContact(address?.trim() ?? '')
+  if (!text) return null
+  const named = namedCountries(text)
+  if (named.some((one) => one.code === SWEDEN)) return null
+  if (named.length > 0) {
+    const last = named.reduce((latest, one) => (one.at > latest.at ? one : latest))
+    if (AFTER_COUNTRY.test(text.slice(last.end))) return last.code
+  }
+  const printed = countryOfLastPart(text)
+  return printed && printed !== SWEDEN ? printed : null
+}
+
+const UNKNOWN: SellerCountry = { country: null, region: null, source: null }
 
 /** The seller's country, by the order in the file comment. */
 export function sellerCountry(identity: SellerIdentity | null | undefined): SellerCountry {
+  if (swedishVatNumberAbroad(identity)) return { ...UNKNOWN }
   const fromVat = vatNumberCountry(identity?.vatNumber)
   if (fromVat) return { country: fromVat, region: regionOfCountry(fromVat), source: 'vat_number' }
   const fromIban = ibanCountry(identity?.iban)
@@ -183,7 +292,7 @@ export function sellerCountry(identity: SellerIdentity | null | undefined): Sell
   if (org && SWEDISH_ORG_NUMBER.test(org)) return { country: SWEDEN, region: 'se', source: 'org_number' }
   const fromAddress = countryFromAddress(identity?.address)
   if (fromAddress) return { country: fromAddress, region: regionOfCountry(fromAddress), source: 'address' }
-  return { country: null, region: null, source: null }
+  return { ...UNKNOWN }
 }
 
 /**

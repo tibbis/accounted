@@ -3,6 +3,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 vi.mock('../categories', () => ({
   countUnbookedTransactions: vi.fn().mockResolvedValue(4),
+  countOpenBankRows: vi.fn().mockResolvedValue(9),
+  countFoundPairs: vi.fn().mockResolvedValue(1),
   countUnbookedSkattekontoRows: vi.fn().mockResolvedValue(7),
   countInboxDocuments: vi.fn().mockResolvedValue(6),
   countSuggestedMatches: vi.fn().mockResolvedValue(2),
@@ -38,6 +40,9 @@ vi.mock('../categories', () => ({
   countPaymentsFailedDue: vi.fn().mockResolvedValue(0),
   countAttestedToPayDue: vi.fn().mockResolvedValue(0),
   countPaymentsToSignDue: vi.fn().mockResolvedValue(0),
+  // The real watcher's contract: run the reads, report the categories whose
+  // read failed (lib/worklist/__tests__/categories.test.ts covers it).
+  watchCountFailures: vi.fn(async (_companyId: string, run: () => Promise<unknown>) => ({ result: await run(), failed: [] })),
 }))
 
 vi.mock('@/lib/suggestions/list', () => ({
@@ -45,6 +50,7 @@ vi.mock('@/lib/suggestions/list', () => ({
 }))
 
 import { getWorklistCounts } from '../aggregate'
+import { watchCountFailures } from '../categories'
 
 const supabase = {} as SupabaseClient
 
@@ -63,7 +69,45 @@ afterEach(() => {
   else process.env.ARKIV_BRAIN_COMPANY_IDS = savedEnv.brain
 })
 
+describe('getWorklistCounts: Att bokföra\'s figures', () => {
+  const before = process.env.BOOKING_SCREEN_COMPANY_IDS
+  beforeEach(() => {
+    delete process.env.BOOKING_SCREEN_COMPANY_IDS
+  })
+  afterEach(() => {
+    if (before === undefined) delete process.env.BOOKING_SCREEN_COMPANY_IDS
+    else process.env.BOOKING_SCREEN_COMPANY_IDS = before
+  })
+
+  it('answers the open bank rows and the found receipts where the booking screen is switched on', async () => {
+    process.env.BOOKING_SCREEN_COMPANY_IDS = '*'
+    const data = await getWorklistCounts(supabase, 'company-1')
+    expect(data.toBook).toEqual({ bankRows: 9, foundPairs: 1 })
+    // The triage count and the total are what they were.
+    expect(data.counts.book_transaction).toBe(4)
+  })
+
+  it('answers none without the booking screen', async () => {
+    const data = await getWorklistCounts(supabase, 'company-1')
+    expect(data).not.toHaveProperty('toBook')
+  })
+})
+
 describe('getWorklistCounts', () => {
+  it('says the counts are incomplete when a read failed, so a zero total is not "Allt är klart"', async () => {
+    vi.mocked(watchCountFailures).mockImplementationOnce(async (_companyId, run) => ({
+      result: await run(),
+      failed: ['book_transaction'],
+    }))
+    const failed = await getWorklistCounts(supabase, 'company-1')
+    expect(failed.incomplete).toBe(true)
+    expect(watchCountFailures).toHaveBeenCalledWith('company-1', expect.any(Function))
+
+    // A complete read keeps the payload's shape: no flag at all.
+    const complete = await getWorklistCounts(supabase, 'company-1')
+    expect(complete).not.toHaveProperty('incomplete')
+  })
+
   it('aggregates every category', async () => {
     const { counts } = await getWorklistCounts(supabase, 'company-1')
     expect(counts).toEqual({

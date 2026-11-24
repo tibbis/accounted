@@ -22,6 +22,7 @@ import {
   hasScope,
   validateApiKey,
   credentialActor,
+  allowlistReachesCompany,
   OAUTH_MCP_KEY_NAME,
   findStageApproveConflict,
   DEFAULT_SCOPES,
@@ -287,6 +288,30 @@ describe('agent:write scope', () => {
 // ============================================================
 // validateApiKey
 // ============================================================
+
+describe('allowlistReachesCompany', () => {
+  const COMPANY = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const OTHER = 'bbbbbbbb-0000-4000-8000-000000000002'
+
+  it('lets a key without a company list into every company', () => {
+    expect(allowlistReachesCompany(null, COMPANY)).toBe(true)
+    expect(allowlistReachesCompany(undefined, COMPANY)).toBe(true)
+  })
+
+  it('lets a key with a list into the companies on it and no other', () => {
+    expect(allowlistReachesCompany([OTHER, COMPANY], COMPANY)).toBe(true)
+    expect(allowlistReachesCompany([OTHER], COMPANY)).toBe(false)
+  })
+
+  it('compares ids without case', () => {
+    expect(allowlistReachesCompany([COMPANY.toUpperCase()], COMPANY)).toBe(true)
+    expect(allowlistReachesCompany([COMPANY], COMPANY.toUpperCase())).toBe(true)
+  })
+
+  it('lets a list that is present and empty into nothing, as such a key is refused', () => {
+    expect(allowlistReachesCompany([], COMPANY)).toBe(false)
+  })
+})
 
 describe('validateApiKey', () => {
   function setupMockRpc(response: { data: unknown; error: unknown }) {
@@ -596,6 +621,26 @@ describe('validateApiKey', () => {
 
       expect(result).toMatchObject({ client, clientName: 'Egen klient (registered client)' })
       expect(from).toHaveBeenCalledWith('oauth_client_registrations')
+    })
+
+    it("names a partner's key by the partner, without the registered-client suffix", async () => {
+      const chain: Record<string, unknown> = {}
+      for (const method of ['select', 'in', 'order', 'limit']) chain[method] = vi.fn(() => chain)
+      chain.then = (resolve: (v: unknown) => void) => resolve({ data: [{ slug: 'acme', name: 'Acme' }], error: null })
+      const from = vi.fn(() => chain)
+      const rpc = vi.fn().mockResolvedValue({
+        data: [{ user_id: 'user-123', company_id: 'company-456', api_key_name: OAUTH_MCP_KEY_NAME, rate_limited: false, client: 'partner:acme' }],
+        error: null,
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockCreateClient.mockReturnValue({ rpc, from } as any)
+
+      const result = await validateApiKey('gnubok_sk_test-key-value')
+
+      expect(result).toMatchObject({ client: 'partner:acme', clientName: 'Acme' })
+      expect(from).toHaveBeenCalledWith('oauth_partner_clients')
+      expect(chain.in).toHaveBeenCalledWith('slug', ['acme'])
+      expect(credentialActor({ apiKeyName: OAUTH_MCP_KEY_NAME, client: 'partner:acme', clientName: 'Acme', serviceAccount: null }).label).toBe('Acme')
     })
 
     it('does not look a built-in client up', async () => {

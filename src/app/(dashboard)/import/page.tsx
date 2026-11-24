@@ -54,7 +54,7 @@ import type { OpeningBalanceParseResult, OpeningBalanceExecuteResult, DetectedCo
 import type { ImportExecuteOptions } from '@/components/import/ImportReviewStep'
 import type { ExistingYearMode } from '@/components/import/SIEExistingYearChoice'
 import type { SIEAppendPlan } from '@/lib/import/sie-append'
-import { applyMappingOverride, getMappingStats, isValidBASRange } from '@/lib/import/account-mapper'
+import { applyMappingOverride, getMappingStats, isLowConfidenceMapping, isValidBASRange } from '@/lib/import/account-mapper'
 import { decodeFileContent } from '@/lib/import/shared/encoding'
 import type { BankFileParseResult, BankFileFormatId, BankFileDuplicateInfo, GenericCSVColumnMapping } from '@/lib/import/bank-file/types'
 import type { FileAccountMatch } from '@/lib/cash-accounts/file-account'
@@ -126,6 +126,7 @@ const BankFileColumnMappingStep = dynamic(() => import('@/components/import/Bank
 const BankFileConfirmStep = dynamic(() => import('@/components/import/BankFileConfirmStep'), { loading: ImportStepLoading })
 const BankFileResultStep = dynamic(() => import('@/components/import/BankFileResultStep'), { loading: ImportStepLoading })
 const BankDepositSpecStep = dynamic(() => import('@/components/import/BankDepositSpecStep'), { loading: ImportStepLoading })
+const KustomSettlementImport = dynamic(() => import('@/components/import/KustomSettlementImport'), { loading: ImportStepLoading })
 const OpeningBalanceUploadStep = dynamic(() => import('@/components/import/OpeningBalanceUploadStep'), { loading: ImportStepLoading })
 const OpeningBalanceColumnMappingStep = dynamic(() => import('@/components/import/OpeningBalanceColumnMappingStep'), { loading: ImportStepLoading })
 const OpeningBalanceEditStep = dynamic(() => import('@/components/import/OpeningBalanceEditStep'), { loading: ImportStepLoading })
@@ -864,12 +865,14 @@ function SIEImportWizard({
     }
   }, [preview, leavesOutUnused, effectiveMappings])
 
-  // Skip the mapping step when all accounts are already mapped
+  // Skip the mapping step when all accounts are already mapped and none is
+  // uncertain: the preview's "Granska mappningar" leads here for an uncertain
+  // row, such as a used class 9 account suggested to 2999 (#2539).
   const hasUnmapped = effectiveMappings.some((m) => !m.targetAccount)
   const needsVatReview = effectiveMappings.some((m) =>
     m.requiresVatTreatmentReview && !m.vatTreatmentReviewed
   )
-  const showMappingStep = hasUnmapped || needsVatReview
+  const showMappingStep = hasUnmapped || needsVatReview || effectiveMappings.some(isLowConfidenceMapping)
   const sieSteps: ImportWizardStep[] = showMappingStep
     ? ['upload', 'preview', 'mapping', 'review', 'result']
     : ['upload', 'preview', 'review', 'result']
@@ -1035,7 +1038,7 @@ function SIEImportWizard({
       )
       const mapped = updatedMappings.filter((m) => m.targetAccount).length
       const unmapped = updatedMappings.length - mapped
-      const lowConfidence = updatedMappings.filter((m) => m.targetAccount && m.confidence < 0.7).length
+      const lowConfidence = updatedMappings.filter(isLowConfidenceMapping).length
 
       return {
         ...prev,
@@ -1335,7 +1338,8 @@ function SIEImportWizard({
         <ImportReviewStep preview={effectivePreview} mappings={effectiveMappings} onlyUsedAccounts={leavesOutUnused}
           onExecute={handleExecuteImport} onBack={goBack} isLoading={isLoading}
           theaterModel={theaterModel} error={error}
-          blocked={Boolean(duplicateImportId) && existingYearMode === 'append' && (!appendPlan || appendPlan.refusal !== null)} />
+          blocked={Boolean(duplicateImportId) && existingYearMode === 'append' && (!appendPlan || appendPlan.refusal !== null)}
+          replacingImportId={duplicateImportId && existingYearMode === 'replace' ? duplicateImportId : null} />
       )}
       {step === 'result' && importResult && (
         <ImportResultStep result={importResult} onNewImport={handleNewImport} onUndo={handleUndo}
@@ -1720,7 +1724,7 @@ const ZettlePanel = getSettingsPanel('zettle')
 // Import Page with Selection Cards
 // ============================================================
 
-type ImportMode = null | 'psd2' | 'stripe' | 'woocommerce' | 'shopify' | 'zettle' | 'bank' | 'skattekonto' | 'sie' | 'underlag' | 'csv_data' | 'migration'
+type ImportMode = null | 'psd2' | 'stripe' | 'woocommerce' | 'shopify' | 'zettle' | 'kustom' | 'bank' | 'skattekonto' | 'sie' | 'underlag' | 'csv_data' | 'migration'
 
 // Query params the URL sync effect turns into an open mode (and its
 // preselects). "Tillbaka till val" removes them.
@@ -1772,8 +1776,8 @@ export default function ImportPage() {
     // third-party credentials, so their deep links are ignored in the sandbox.
     // Manual file-import modes (bank file, CSV/Excel, SIE) stay reachable.
     const allowedModes = isSandbox
-      ? ['bank', 'skattekonto', 'sie', 'underlag', 'csv_data']
-      : ['psd2', 'stripe', 'woocommerce', 'shopify', 'zettle', 'bank', 'skattekonto', 'sie', 'underlag', 'csv_data', 'migration']
+      ? ['kustom', 'bank', 'skattekonto', 'sie', 'underlag', 'csv_data']
+      : ['psd2', 'stripe', 'woocommerce', 'shopify', 'zettle', 'kustom', 'bank', 'skattekonto', 'sie', 'underlag', 'csv_data', 'migration']
     // A read-only member gets no import wizard from a deep link.
     if (!canWrite) {
       // stays on the choices
@@ -1993,6 +1997,16 @@ export default function ImportPage() {
                     onClick={() => setMode('zettle')}
                   />
                 )}
+                {/* A file, not a connection: no extension, no credentials, so
+                    the sandbox keeps it like the other file imports. */}
+                <ImportRow
+                  title={t('kustom_title')}
+                  action={t('tab_import')} icon="upload"
+                  sub={t('kustom_description')}
+                  disabled={!canWrite}
+                  lockTitle={lockedTitle}
+                  onClick={() => setMode('kustom')}
+                />
                 {hasMigrationExtension && (
                   <ImportRow
                     title={t('migration_title')}
@@ -2251,6 +2265,7 @@ export default function ImportPage() {
           />
         )
       )}
+      {mode === 'kustom' && <KustomSettlementImport />}
       {mode === 'bank' && <BankFileImportWizard onBack={backToChoices} />}
       {mode === 'skattekonto' && <SkattekontoImportWizard onBack={backToChoices} />}
       {/* The CSV/Excel wizard opens on "Ingående balanser" by default, which is

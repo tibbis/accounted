@@ -14,6 +14,7 @@ import {
 import { workflowSkills } from '../skills'
 import { isDefaultCatalogTool } from '../tool-reach'
 import { ALL_SCOPES, DEFAULT_OAUTH_SCOPES, TOOL_SCOPE_MAP } from '@/lib/auth/scope-catalog'
+import { createPagedMockSupabase, manyRows } from '@/tests/helpers'
 
 vi.mock('@/lib/supabase/server', () => ({
   createClient: vi.fn(),
@@ -22,6 +23,11 @@ vi.mock('@/lib/supabase/server', () => ({
 
 vi.mock('@/lib/suggestions/list', () => ({
   listOpenSuggestions: vi.fn().mockResolvedValue([]),
+}))
+
+vi.mock('@/lib/questions/list', () => ({
+  listOpenQuestionsForBriefing: vi.fn().mockResolvedValue([]),
+  listQuestions: vi.fn(),
 }))
 
 vi.mock('@/lib/grants/review', () => ({
@@ -47,7 +53,8 @@ function mockSupabase(opts: {
   // bank_connections.last_synced_at of the latest sync (crm#1454). undefined → no connection.
   bankLastSyncedAt?: string
   profile?: {
-    profile_summary: string | null
+    // Stored rows still carry the summary the removed build wrote; the briefing never hands it on.
+    profile_summary?: string | null
     horizontal_atoms: string[] | null
     vertical_atoms: string[] | null
     modifier_atoms: string[] | null
@@ -94,12 +101,14 @@ function mockSupabase(opts: {
   }>
   // company_inboxes.local_part of the active inbox (crm#1174). undefined → no row.
   inboxLocalPart?: string
-  errors?: { profile?: string; memory?: string; atoms?: string }
+  errors?: { profile?: string; memory?: string; atoms?: string; dimensionValues?: string }
 }) {
   const profile = opts.profile === undefined ? null : opts.profile
   const memoryRows = opts.memoryRows ?? []
   const atomRows = opts.atomRows ?? []
   const errors = opts.errors ?? {}
+  // The values read pages like PostgREST: at most 1,000 rows a request.
+  const pagedValues = createPagedMockSupabase({ dimension_values: opts.dimensionValueRows ?? [] })
 
   /** Order-agnostic chainable query resolving to `data` when awaited. */
   const chainResolving = (data: unknown) => {
@@ -112,6 +121,7 @@ function mockSupabase(opts: {
   }
 
   return {
+    findCalls: pagedValues.findCalls,
     from: vi.fn((table: string) => {
       if (table === 'company_skills') return chainResolving([])
       if (table === 'profiles') {
@@ -207,7 +217,12 @@ function mockSupabase(opts: {
         return chainResolving(opts.dimensionRows ?? [])
       }
       if (table === 'dimension_values') {
-        return chainResolving(opts.dimensionValueRows ?? [])
+        if (errors.dimensionValues) {
+          const failing = chainResolving(null)
+          failing.then = (resolve: (v: unknown) => void) => resolve({ data: null, error: { message: errors.dimensionValues } })
+          return failing
+        }
+        return pagedValues.supabase.from(table)
       }
       if (table === 'account_dimension_rules') {
         // PR10: the briefing surfaces active rules; default none.
@@ -270,7 +285,7 @@ describe('gnubok_get_agent_briefing tool', () => {
     expect(none.data_status).toEqual({ bank_last_synced_at: null })
   })
 
-  it('returns null summary, empty atoms, empty memory, null user_name when nothing exists', async () => {
+  it('returns empty atoms, empty memory, null user_name when nothing exists', async () => {
     const tool = tools.find((t) => t.name === 'gnubok_get_agent_briefing')!
     const supabase = mockSupabase({ profile: null })
     const result = (await tool.execute(
@@ -281,11 +296,14 @@ describe('gnubok_get_agent_briefing tool', () => {
       { type: 'api_key' }
     )) as {
       user_name: string | null
-      profile_summary: string | null
       atoms: unknown[]
       memory: unknown[]
     }
-    expect(result.profile_summary).toBeNull()
+    // The key stays, always null: an earlier tools/list declared it required.
+    expect(result).toHaveProperty('profile_summary', null)
+    for (const key of ['company', 'user_name', 'profile_summary', 'atoms', 'memory', 'recommended_tools']) {
+      expect(result).toHaveProperty(key)
+    }
     expect(result.atoms).toEqual([])
     expect(result.memory).toEqual([])
     expect(result.user_name).toBeNull()
@@ -381,7 +399,7 @@ describe('gnubok_get_agent_briefing tool', () => {
     expect(result.user_name).toBeNull()
   })
 
-  it('returns profile + atom metadata + memory when populated', async () => {
+  it('returns atom metadata + memory when populated, and never the summary the removed build stored', async () => {
     const tool = tools.find((t) => t.name === 'gnubok_get_agent_briefing')!
     const supabase = mockSupabase({
       profile: {
@@ -407,11 +425,14 @@ describe('gnubok_get_agent_briefing tool', () => {
       supabase as never,
       { type: 'api_key' }
     )) as {
-      profile_summary: string | null
       atoms: Array<{ id: string; tier: string; title: string; description: string }>
       memory: Array<{ id: string; kind: string; content: string; relevance_score: number | null }>
+      where_to_find: string[]
     }
-    expect(result.profile_summary).toContain('Acme AB')
+    expect(result).toHaveProperty('profile_summary', null)
+    expect(JSON.stringify(result)).not.toContain('som IT-konsult')
+    expect(result.where_to_find.join(' ')).not.toContain('profile_summary')
+    expect(Object.keys((tool.outputSchema as { properties: Record<string, unknown> }).properties)).not.toContain('profile_summary')
     expect(result.atoms).toHaveLength(3)
     expect(result.atoms.map((a) => a.id).sort()).toEqual([
       'horizontal/swedish-vat',
@@ -457,6 +478,12 @@ describe('gnubok_get_agent_briefing tool', () => {
     expect(result.memory_sync.last_synced_at).toBe('2026-10-02T09:00:00Z')
     expect(result.memory_sync.note).toContain('origin: session_sync')
     expect(result.where_to_find.join(' ')).toContain('gnubok_remember_fact')
+    // The memory line says where a note about one purchase belongs, in the tool description's own sentence.
+    const purchaseNotePlace =
+      "A note about one purchase or verifikat (who took part, what a receipt was for) goes on that verifikat with gnubok_set_voucher_note or in the booking's description, not here."
+    expect(result.where_to_find[0]).toMatch(/^memory: /)
+    expect(result.where_to_find[0]).toContain(purchaseNotePlace)
+    expect(tools.find((t) => t.name === 'gnubok_remember_fact')!.description).toContain(purchaseNotePlace)
     expect(result.memory_truncated).toBeUndefined()
   })
 
@@ -486,11 +513,9 @@ describe('gnubok_get_agent_briefing tool', () => {
       supabase as never,
       { type: 'api_key' }
     )) as {
-      profile_summary: string | null
       atoms: unknown[]
       memory: unknown[]
     }
-    expect(result.profile_summary).toBe('Composer ran but selected nothing.')
     expect(result.atoms).toEqual([])
   })
 
@@ -585,6 +610,54 @@ describe('gnubok_get_agent_briefing tool', () => {
       { type: 'api_key' }
     )) as { dimensions?: { enabled: boolean } }
     expect(result.dimensions?.enabled).toBe(false)
+  })
+
+  it('counts every active value past 1,000 rows, a dimension whose codes sort last included (crm#2152)', async () => {
+    const tool = tools.find((t) => t.name === 'gnubok_get_agent_briefing')!
+    const projects = manyRows(1500, (i) => ({ dimension_id: 'dim-6', code: `P${String(i).padStart(5, '0')}`, name: `Projekt ${i}` }))
+    const costCentres = ['X1', 'X2', 'X3'].map((code) => ({ dimension_id: 'dim-1', code, name: `Kostnadsställe ${code}` }))
+    const supabase = mockSupabase({
+      profile: null,
+      dimensionsEnabled: true,
+      dimensionRows: [
+        { id: 'dim-1', sie_dim_no: 1, name: 'Kostnadsställe' },
+        { id: 'dim-6', sie_dim_no: 6, name: 'Projekt' },
+      ],
+      // Ordered by code across the company, as the read orders them.
+      dimensionValueRows: [...projects, ...costCentres],
+    })
+
+    const result = (await tool.execute({}, 'company-1', 'user-1', supabase as never, { type: 'api_key' })) as {
+      dimensions?: { dimensions: Array<{ sie_dim_no: number; active_value_count: number; top_values: Array<{ code: string }> }> }
+    }
+
+    const [ks, projekt] = result.dimensions!.dimensions
+    expect(ks).toMatchObject({ sie_dim_no: 1, active_value_count: 3 })
+    expect(ks.top_values.map((v) => v.code)).toEqual(['X1', 'X2', 'X3'])
+    expect(projekt).toMatchObject({ sie_dim_no: 6, active_value_count: 1500 })
+    expect(projekt.top_values.map((v) => v.code)).toEqual(projects.slice(0, 10).map((v) => v.code))
+    // Every page reads the company's active values (the MCP client has no RLS
+    // to fall back on) on a total order: a code is unique only inside its dimension.
+    const pages = supabase.findCalls('dimension_values', 'range')
+    const filters = supabase.findCalls('dimension_values', 'eq')
+    const orders = supabase.findCalls('dimension_values', 'order').map(([column]) => column)
+    expect(pages.length).toBeGreaterThan(1)
+    expect(filters).toEqual(pages.flatMap(() => [['company_id', 'company-1'], ['is_active', true]]))
+    expect(orders).toEqual(pages.flatMap(() => ['code', 'id']))
+  })
+
+  it('omits the dimensions block, and still briefs, when the values read fails', async () => {
+    const tool = tools.find((t) => t.name === 'gnubok_get_agent_briefing')!
+    const supabase = mockSupabase({
+      profile: null,
+      dimensionRows: [{ id: 'dim-6', sie_dim_no: 6, name: 'Projekt' }],
+      errors: { dimensionValues: 'canceling statement due to statement timeout' },
+    })
+
+    const result = (await tool.execute({}, 'company-1', 'user-1', supabase as never, { type: 'api_key' })) as Record<string, unknown>
+
+    expect('dimensions' in result).toBe(false)
+    expect(result.company).toBeDefined()
   })
 })
 
@@ -830,6 +903,64 @@ describe('suggestions (Profiles and Suggestions, step 3)', () => {
     const result = await tool().execute({}, COMPANY, 'user-1', supabase as never, { type: 'api_key' })
     expect(result).not.toHaveProperty('suggestions')
     expect(result).not.toHaveProperty('suggestions_how')
+  })
+})
+
+describe('open questions (the question list)', () => {
+  const tool = () => tools.find((t) => t.name === 'gnubok_get_agent_briefing')!
+  const COMPANY = 'company-1'
+
+  it('lists the open questions with their options and why, and says how to answer one', async () => {
+    const { listOpenQuestionsForBriefing } = await import('@/lib/questions/list')
+    vi.mocked(listOpenQuestionsForBriefing).mockResolvedValueOnce([
+      {
+        question_id: 'q-1',
+        status: 'open',
+        close_reason: null,
+        question: 'Leverantören drog 4 990 kr den 3 november. Vad gäller köpet?',
+        why: 'Det avgör hur raden bokförs.',
+        options: [
+          { id: 'licences', label: 'Fler licenser' },
+          { id: 'annual', label: 'Årsbetalning' },
+        ],
+        evidence: [{ kind: 'transaction', id: '10000000-0000-4000-8000-000000000001' }],
+        asked_by: 'Claude',
+        client: 'claude',
+        answer_option: null,
+        answer_text: null,
+        answered_at: null,
+        answered_via: null,
+        fact_id: null,
+        created_at: '2026-11-19T08:00:00Z',
+      },
+    ])
+    const supabase = mockSupabase({ profile: null })
+    const result = (await tool().execute({}, COMPANY, 'user-1', supabase as never, { type: 'api_key' })) as {
+      open_questions?: unknown
+      open_questions_how?: string
+    }
+    expect(listOpenQuestionsForBriefing).toHaveBeenCalledWith(supabase, COMPANY)
+    expect(result.open_questions).toEqual([
+      {
+        question_id: 'q-1',
+        question: 'Leverantören drog 4 990 kr den 3 november. Vad gäller köpet?',
+        options: [
+          { option_id: 'licences', label: 'Fler licenser' },
+          { option_id: 'annual', label: 'Årsbetalning' },
+        ],
+        why: 'Det avgör hur raden bokförs.',
+        asked_at: '2026-11-19T08:00:00Z',
+      },
+    ])
+    expect(result.open_questions_how).toContain('gnubok_remember_fact')
+    expect(result.open_questions_how).toContain('answers_question_id')
+  })
+
+  it('leaves both keys out when nothing is open or the list is not switched on', async () => {
+    const supabase = mockSupabase({ profile: null })
+    const result = await tool().execute({}, COMPANY, 'user-1', supabase as never, { type: 'api_key' })
+    expect(result).not.toHaveProperty('open_questions')
+    expect(result).not.toHaveProperty('open_questions_how')
   })
 })
 

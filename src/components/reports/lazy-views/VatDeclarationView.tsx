@@ -45,6 +45,8 @@ import { useCompanySettings } from '@/components/settings/useSettings'
 import { useCanWrite } from '@/lib/hooks/use-can-write'
 import { mostRecentEndedVatPeriod } from '@/lib/vat/period-defaults'
 import { vatLandingStep } from '@/lib/vat/landing-step'
+import { partlySettledRestBooksAlone } from '@/lib/vat/partly-settled-rest'
+import { postedVatSettlements } from '@/lib/reports/vat-settlement'
 import { resolveInitialVatPeriodSelection } from '@/lib/vat/period-selection'
 import { fiscalPeriodForVatYear } from '@/lib/reports/period-dates'
 import { fiscalYearEndMonthIn, fiscalYearEndMonthOn } from '@/lib/tax/deadline-config'
@@ -190,6 +192,28 @@ const SETTLEMENT_DATE_REASON: Record<VatSettlementDateReason, string> = {
 }
 
 /**
+ * The period's posted momsredovisningar as links, "A2 (2026-09-30) och A4
+ * (2026-09-30)", joined the locale's way.
+ */
+function VoucherLinks({ entries, locale }: { entries: VatSettlementExistingEntry[]; locale: ErrorLocale }) {
+  const parts = new Intl.ListFormat(locale, { type: 'conjunction' }).formatToParts(entries.map((_, i) => String(i)))
+  return (
+    <>
+      {parts.map((part, i) => {
+        const entry = part.type === 'element' ? entries[Number(part.value)] : undefined
+        return entry ? (
+          <Link key={i} href={`/bookkeeping/${entry.id}`} className="underline underline-offset-2 hover:text-foreground">
+            {formatVoucher(entry)} ({formatDate(entry.entry_date)})
+          </Link>
+        ) : (
+          <React.Fragment key={i}>{part.value}</React.Fragment>
+        )
+      })}
+    </>
+  )
+}
+
+/**
  * "Bokför momsrapport" (issue #980): builds an editable verifikat proposal
  * from the momsrapport (clearing the period's 26xx accounts to 2650/1650,
  * öre gap on 3740) and books it through the ordinary journal entry form, so
@@ -325,6 +349,10 @@ function VatBookingCard({
     }
   }
   const { edited, editProps } = useEditedSinceOpen()
+  // Every posted momsredovisning of the period gates booking it again, so the
+  // advice to reverse names all of them, not only the first (#3646).
+  const posted = postedVatSettlements(proposal?.existing_entries)
+  const postedVouchers = new Intl.ListFormat(errorLocale, { type: 'conjunction' }).format(posted.map((entry) => formatVoucher(entry)))
 
   // FormLine amounts are input strings; the proposal's numbers are already
   // öre-rounded server-side.
@@ -343,18 +371,53 @@ function VatBookingCard({
           förslaget och kan ändra raderna innan verifikatet bokförs.
         </p>
 
-        {booked && (
+        {booked && proposal?.partly_settled && (
+          // The posted momsredovisning no longer clears the period (a
+          // verifikat added to it afterwards, a credit note after it, or a
+          // settlement that came with an import): the proposal's lines are
+          // what is left. "Already
+          // booked" alone hid that the momskonton are not at zero and that
+          // 2650/1650 no longer matches ruta 49 (#3570).
+          <div className="flex items-start gap-2 text-[13px] leading-6 text-attn">
+            <ExclamationCircleIcon className="mt-1 h-4 w-4 shrink-0" aria-hidden="true" />
+            <div className="space-y-1">
+              <p>
+                {t.rich('vat_partly_settled_intro', {
+                  count: posted.length,
+                  vouchers: () => <VoucherLinks entries={posted} locale={errorLocale} />,
+                })}
+              </p>
+              <ul className="tabular-nums">
+                {proposal.lines.map((line, i) => (
+                  <li key={i}>
+                    {t('vat_partly_settled_line', {
+                      account: line.account_number,
+                      side: line.debit_amount > 0 ? 'debit' : 'credit',
+                      amount: formatAmount(line.debit_amount > 0 ? line.debit_amount : line.credit_amount),
+                    })}
+                  </li>
+                ))}
+              </ul>
+              <p>
+                {partlySettledRestBooksAlone(proposal)
+                  ? t('vat_partly_settled_ways', {
+                      count: posted.length,
+                      vouchers: postedVouchers,
+                      date: formatDate(proposal.entry_date),
+                    })
+                  : t('vat_partly_settled_rebook', { count: posted.length, vouchers: postedVouchers })}
+              </p>
+            </div>
+          </div>
+        )}
+        {booked && !proposal?.partly_settled && (
           <div className="flex items-start gap-2 text-[13px] leading-6 text-muted-foreground">
             <ExclamationCircleIcon className="mt-1 h-4 w-4 shrink-0" aria-hidden="true" />
             <p>
-              Momsen för perioden är redan bokförd:{' '}
-              <Link
-                href={`/bookkeeping/${booked.id}`}
-                className="underline underline-offset-2 hover:text-foreground"
-              >
-                verifikat {formatVoucher(booked)} ({formatDate(booked.entry_date)})
-              </Link>
-              . Annullera det verifikatet först om perioden behöver bokföras om.
+              {t.rich('vat_already_booked', {
+                count: posted.length,
+                vouchers: () => <VoucherLinks entries={posted} locale={errorLocale} />,
+              })}
             </p>
           </div>
         )}
@@ -513,6 +576,7 @@ function VatStepper({
   ruta49,
   bookingStatus,
   bookedVoucher,
+  partlySettled,
   filed,
 }: {
   active: number
@@ -527,6 +591,11 @@ function VatStepper({
    * to it lives in step 3 itself (a link cannot sit inside the tab button).
    */
   bookedVoucher?: string | null
+  /**
+   * The posted momsredovisning no longer clears the period (the proposal's
+   * partly_settled): step 3 is not done while VAT is left (#3570).
+   */
+  partlySettled: boolean
   /** The period has a filing record (Skatteverket kvittens or marked by hand). */
   filed: boolean
 }) {
@@ -559,15 +628,17 @@ function VatStepper({
       n: 3,
       label: 'Bokför',
       sub:
-        bookingStatus === 'booked'
-          ? bookedVoucher
-            ? `bokförd ${bookedVoucher}`
-            : 'bokförd'
-          : bookingStatus === 'draft'
-            ? 'utkast finns'
-            : 'mot 2650',
-      done: bookingStatus === 'booked',
-      warn: false,
+        bookingStatus === 'booked' && partlySettled
+          ? 'moms kvar att bokföra'
+          : bookingStatus === 'booked'
+            ? bookedVoucher
+              ? `bokförd ${bookedVoucher}`
+              : 'bokförd'
+            : bookingStatus === 'draft'
+              ? 'utkast finns'
+              : 'mot 2650',
+      done: bookingStatus === 'booked' && !partlySettled,
+      warn: bookingStatus === 'booked' && partlySettled,
     },
     {
       n: 4,
@@ -787,7 +858,12 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
   // type (see lib/vat/period-selection.ts). `useCompanySettings` only
   // refetches when the active company changes, so this never clobbers a
   // manual selection mid-session.
-  const { settings, isLoading: settingsLoading, refetch: refetchSettings } = useCompanySettings()
+  const {
+    settings,
+    isLoading: settingsLoading,
+    loadFailed: settingsLoadFailed,
+    refetch: refetchSettings,
+  } = useCompanySettings()
   const [appliedCompany, setAppliedCompany] = useState<string | null>(null)
   const companyKey = settingsLoading ? null : (settings?.company_id ?? 'none')
 
@@ -855,7 +931,8 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
   // through every gate and render a silently guessed quarterly declaration;
   // the wrong period type for an årsmoms company is a compliance hazard, so
   // it now gates like the other unknowns.
-  const settingsRowMissing = !settingsLoading && settings === null
+  // A failed read is not a missing row: it says so with a retry below.
+  const settingsRowMissing = !settingsLoading && settings === null && !settingsLoadFailed
   // Registered but never picked a redovisningsperiod (rare: onboarding
   // requires it, but companies created outside that flow can miss it).
   const momsPeriodMissing = settings?.vat_registered === true && !settings.moms_period
@@ -911,6 +988,7 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
     periodType === null ||
     seedPending ||
     notVatRegistered ||
+    settingsLoadFailed ||
     settingsRowMissing ||
     momsPeriodMissing ||
     awaitingFiscalPeriod
@@ -1137,6 +1215,16 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
   // title and skips its own), so the H1 must survive the gated/loading
   // states too: each early return carries the action-less header.
   const bareHeader = pageTitle ? <PageHeader title={pageTitle} /> : null
+
+  // A failed settings read needs no seeded period to say so.
+  if (settingsLoadFailed) {
+    return (
+      <div className="space-y-8">
+        {bareHeader}
+        <LoadError title={tReports('vat_settings_load_failed')} onRetry={() => void refetchSettings()} />
+      </div>
+    )
+  }
 
   if (settingsLoading || periodType === null) {
     return (
@@ -1389,6 +1477,7 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
             ruta49={buildFiledAmounts(data.rutor).net}
             bookingStatus={bookingStatus}
             bookedVoucher={settlement.booked ? formatVoucher(settlement.booked) : null}
+            partlySettled={settlement.proposal?.partly_settled === true}
             filed={filingRecord !== null}
           />
 
@@ -1412,9 +1501,11 @@ export default function VatDeclarationView({ pageTitle }: { pageTitle?: string }
             <section className="space-y-3">
               <div>
             {/* The title and the period picker already name the declaration
-                and its period; only the basis counts are new here. */}
+                and its period; only the basis counts are new here. They
+                count verifikat, not invoices: a paid invoice is two (its
+                booking and its payment), so the label says verifikat. */}
             <p className="px-1 text-xs tabular-nums text-muted-foreground">
-              {data.invoiceCount} fakturor · {data.transactionCount} transaktioner
+              {tReports('vat_entry_counts', { invoices: data.invoiceCount, transactions: data.transactionCount })}
             </p>
             <div className="mt-4 space-y-8">
               <div>

@@ -1152,6 +1152,125 @@ Example response `200`:
 
 ---
 
+### `POST /api/v1/companies/{companyId}/imports/deposit-specification`
+
+**Attach a deposit specification (BG Max or camt.054) to the bank rows that are its deposits.**
+`scope:transactions:write · risk:medium · idempotent · dry-run`
+
+Reads Bankgirot's BG Max file or the bank's ISO 20022 camt.054 notification of incoming payments (sent as base64) and attaches each deposit's payments to the stored bank row that is that deposit, as the row's parts: payer, organisation number, OCR or invoice number, message and amount per payment. Each payment gets the open customer invoice its reference names as a suggestion; nothing is booked. Never creates a bank row and never changes one's amount, date or text. Uploading the same file again writes the same parts.
+
+**Use when:** A bank row is a deposit of several incoming payments (a bankgiro deposit) or carries no payer and no OCR, and the bank or Bankgirot delivers a file that says who paid what.
+**Do not use for:** Bank statements that should create bank rows (POST /imports/bank), or booking the payments (match the bank row to its invoices after this).
+
+**Pitfalls:**
+- Send the file bytes as standard, padded base64 in content_base64, up to about 3 MB of file. The format is read from the content, not the file name.
+- A file cut short still attaches the deposits it holds whole: issues then says the file may be truncated (a BG Max file without its end record, a camt.054 file without its closing element). Send the whole file again to attach the rest.
+- A deposit whose bank row has not synced yet answers status no_row and attaches nothing: sync the bank and send the same file again.
+- A deposit that fits two bank rows equally well answers status ambiguous and is left for a person.
+- A deposit whose payments do not add up to it is left out and counted in rejected_deposits.
+- A file that is neither format answers 400 BGMAX_NOT_DEPOSIT_FILE; a file with nothing to attach answers 400 BGMAX_NO_DEPOSITS or CAMT054_NO_DEPOSITS with the first issues in details.
+- dry_run=true reads and matches without writing: the same summary with applied false.
+
+| Parameter | In | Type | Required | Notes |
+|---|---|---|---|---|
+| `companyId` | path | `string` | yes |  |
+| `dry_run` | query | `string` | no | true (any case) previews the write without committing it, like the X-Dry-Run: true header. Any other value commits. |
+
+Request body:
+```ts
+{ filename: string, content_base64: string }
+```
+
+Example request:
+```json
+{
+  "filename": "camt054_20261201.xml",
+  "content_base64": "PD94bWwgdmVyc2lvbj0i…"
+}
+```
+
+Response `200`:
+```ts
+{
+  data: {
+    filename: string,
+    format: "bgmax" | "camt054",
+    date_from: string | null,
+    date_to: string | null,
+    rejected_deposits: number,
+    issues: { severity: "info" | "warning" | "error", message: string }[],
+    applied: boolean,
+    deposits: number,
+    payments: number,
+    matched_deposits: number,
+    matched_payments: number,
+    suggested_payments: number,
+    ready_rows: number,
+    no_row: number,
+    ambiguous: number,
+    outcomes: { date: string, amount: number, bankgiro: string | null, payments: number, status: "matched" | "no_row" | "ambiguous", transaction_id: string | null, suggested: number }[]
+  },
+  meta: {
+    request_id: string,
+    api_version: string,
+    next_cursor?: string | null,
+    audit?: { voucher_number?: string, voucher_url?: string, audit_trail_url?: string, immutable_at?: string },
+    warnings?: { code: string, message_sv: string, message_en: string, remediation?: { description: string, tool?: string, args?: Record<string, unknown>, resource?: string } }[],
+    partial_expansions?: string[],
+    coverage?: Record<string, unknown>
+  }
+}
+```
+
+Example response `200`:
+```json
+{
+  "data": {
+    "filename": "camt054_20261201.xml",
+    "format": "camt054",
+    "date_from": "2026-12-01",
+    "date_to": "2026-12-01",
+    "rejected_deposits": 0,
+    "issues": [],
+    "applied": true,
+    "deposits": 2,
+    "payments": 4,
+    "matched_deposits": 1,
+    "matched_payments": 3,
+    "suggested_payments": 3,
+    "ready_rows": 1,
+    "no_row": 1,
+    "ambiguous": 0,
+    "outcomes": [
+      {
+        "date": "2026-12-01",
+        "amount": 1500,
+        "bankgiro": "123-4567",
+        "payments": 3,
+        "status": "matched",
+        "transaction_id": "7c1d…",
+        "suggested": 3
+      },
+      {
+        "date": "2026-12-01",
+        "amount": 250,
+        "bankgiro": null,
+        "payments": 1,
+        "status": "no_row",
+        "transaction_id": null,
+        "suggested": 0
+      }
+    ]
+  },
+  "meta": {
+    "request_id": "req_…",
+    "api_version": "2026-05-12"
+  }
+}
+```
+
+---
+
 ### `POST /api/v1/companies/{companyId}/imports/sie`
 
 **Import a SIE4 file.**
@@ -3133,7 +3252,9 @@ Response `200`:
   data: {
     dry_run: boolean,
     signoff?: { id: string, handle?: string, account_key: string, through_date: string, external_balance: number | null, ledger_balance: number | null, unexplained_difference: number | null, note: string | null, signed_by: string, signed_at: string, reopened_at: string | null, reopened_by: string | null, reopen_reason: string | null },
-    would_sign?: { account_key: string, through_date: string, external_balance: number | null, ledger_balance: number | null, unexplained_difference: number | null, is_reconciled: boolean, forced: boolean, previous_through_date: string | null }
+    bank_balance?: { as_of: string, bank_balance: number | null, booked_balance: number | null, difference: number | null, unbooked: { count: number, total: number } | null, before_history: { history_start: string, difference: number } | null, rest: number | null } | null,
+    warning?: { code: "BANK_BALANCE_DIFFERS" | "NO_BANK_BALANCE", message: string } | null,
+    would_sign?: { account_key: string, through_date: string, external_balance: number | null, ledger_balance: number | null, unexplained_difference: number | null, is_reconciled: boolean, forced: boolean, previous_through_date: string | null, bank_balance: { as_of: string, bank_balance: number | null, booked_balance: number | null, difference: number | null, unbooked: { count: number, total: number } | null, before_history: { history_start: string, difference: number } | null, rest: number | null } | null, warning: { code: "BANK_BALANCE_DIFFERS" | "NO_BANK_BALANCE", message: string } | null }
   },
   meta: {
     request_id: string,
@@ -3165,7 +3286,9 @@ Example response `200`:
       "reopened_at": null,
       "reopened_by": null,
       "reopen_reason": null
-    }
+    },
+    "bank_balance": null,
+    "warning": null
   },
   "meta": {
     "request_id": "req_…",
@@ -3346,6 +3469,7 @@ Returns matched / unmatched counts and the balance delta between the bank ledger
 - is_reconciled means |difference| < 0.01 for the window, an aggregate check, not a per-transaction guarantee.
 - Judge health on unexplained_difference, NOT on difference. difference is just the gap between the two sides and is expected to be large mid-year; it is fully explained while every krona of it sits in unmatched_transaction_total, unmatched_gl_line_total or settled_gl_line_total. A non-zero unexplained_difference is the real finding: a matched pair disagreeing in amount, a voucher with several lines on the account, or a storno/correction line the candidate list hides.
 - Ignored transactions are excluded from bank_transaction_total and difference (they never get a ledger counterpart); their count and sum are reported separately.
+- On a foreign-currency account gl_1930_balance and gl_1930_opening_balance are null when the opening balance is not known in that currency: it is booked in SEK, and the ledger before it does not say what it is in the currency (an imported first year, or history booked in SEK only). The account still reconciles on its movement: difference and is_reconciled do not use the opening balance.
 
 | Parameter | In | Type | Required | Notes |
 |---|---|---|---|---|
@@ -3361,9 +3485,9 @@ Response `200`:
     bank_transaction_total: number,
     ignored_transaction_total: number,
     ignored_transaction_count: number,
-    gl_1930_balance: number,
+    gl_1930_balance: number | null,
     gl_1930_period_movement: number,
-    gl_1930_opening_balance: number,
+    gl_1930_opening_balance: number | null,
     gl_1930_correction_adjustment: number,
     difference: number,
     is_reconciled: boolean,
@@ -4158,6 +4282,8 @@ Allocates the transaction across N invoices of one kind: one samlingsverifikatio
 - A bank row in a foreign currency returns 400 BATCH_FOREIGN_CURRENCY: the verifikat is in kronor and this door does not read the row's SEK. Match it to one invoice at a time (match-invoice, match-supplier-invoice). A SEK row against foreign invoices works: state each allocation in kronor, within 10 % of what the invoice is booked at (BATCH_FX_DEVIATION_TOO_LARGE).
 - The allocation amounts must sum to |amount| of the transaction: BATCH_AMOUNT_EXCEEDS_TX / BATCH_AMOUNT_BELOW_TX otherwise.
 - fees books a payment service's fee on the row: a payout net of Stripe's or a card acquirer's fee (customer invoices: allocations - fees = |amount|) or a bank's charge added to a payment (supplier invoices: allocations + fees = |amount|). Each invoice is allocated what it owed. At most 5 rows, each a debit on an active BAS class 6 account (6570 Bankkostnader, 6040 Kontokortsavgifter) with no VAT, since a payment service is exempt (ML 10 kap. 33 §): BATCH_FEE_ACCOUNT_INVALID otherwise. The fees must be smaller than the invoices (BATCH_FEE_TOO_LARGE). A platform's commission is a taxable service, not a fee row: book it from the platform's invoice.
+- supplier_debts books the part of a supplier payment that pays invoices registered before the company kept its books here (a SIE import carries the 2440 balance, not the invoices): a debit on an active 244x account (2440 Leverantörsskulder), no VAT, since the moms was booked with the invoice. Supplier invoices only (BATCH_DEBT_SUPPLIER_ONLY); allocations + fees + supplier_debts = |amount|. Not a fee: it may be larger than the invoices. At most 5 fee and debt rows together (BATCH_DEBT_INVALID); another account returns BATCH_DEBT_ACCOUNT_INVALID.
+- customer_receivables is the customer side: the part of an incoming payment (a Bankgirot deposit that also pays invoices issued in the bookkeeping kept before, which a SIE import carries only as the 1510 balance) booked as a credit on an active 151x account (1510 Kundfordringar), no VAT. Customer invoices only (BATCH_RECEIVABLE_CUSTOMER_ONLY); allocations - fees + customer_receivables = |amount|. It may be larger than the invoices. At most 5 fee and receivable rows together (BATCH_RECEIVABLE_INVALID); another account returns BATCH_RECEIVABLE_ACCOUNT_INVALID. total_debts in the answer is these rows together.
 - A row that posted vouchers already explain (each invoice marked paid by hand) returns 409 BATCH_TX_POSSIBLE_DUPLICATE with the vouchers: link the row to them instead. force=true needs expected_journal_entry_ids naming exactly that set.
 - Kontantmetoden: unbooked SEK customer invoices paid in full book their revenue and moms here (all or none, BATCH_CASH_LINES_MIXED). One unbooked supplier invoice allocated the whole row (no fees) is booked as match-supplier-invoice books it: cost and moms at payment, its lines in the dry run. Others return 400 BATCH_CASH_METHOD_UNBOOKED_INVOICE.
 - Faktureringsmetoden with defer_invoice_booking (Registrera men bokför inte): each supplier invoice registered without its verifikat is booked first by the supplier-invoices :book step (dated on its invoice date), then the samlingsverifikation clears its 2440; registration_journal_entry_ids names them and the dry run shows them as registration_entries. A refusal of the book step (PERIOD_LOCKED on an invoice date, SI_BOOK_NO_FISCAL_PERIOD, SI_ACCRUED_COST_PERIOD_LOCKED, SI_BOOK_INVALID_STATUS for a partially paid invoice) refuses the batch with that code and details.registration_first, before anything is booked.
@@ -4177,7 +4303,9 @@ Request body:
   allocations: { kind: "customer_invoice", invoice_id: string, amount: number } | { kind: "supplier_invoice", supplier_invoice_id: string, amount: number }[],
   force?: boolean,
   expected_journal_entry_ids?: string[],
-  fees?: { account: string, amount: number, description?: string }[]
+  fees?: { account: string, amount: number, description?: string }[],
+  supplier_debts?: { account: string, amount: number, description?: string }[],
+  customer_receivables?: { account: string, amount: number, description?: string }[]
 }
 ```
 
@@ -4210,6 +4338,7 @@ Response `200`:
     total_allocated: number,
     leftover: number,
     total_fees?: number,
+    total_debts?: number,
     registration_journal_entry_ids?: Record<string, string>,
     sale_journal_entry_ids?: Record<string, string>
   },
@@ -4936,7 +5065,7 @@ Lists the rows the Shopify, WooCommerce and Zettle syncs store: one per paid ord
 |---|---|---|---|---|
 | `companyId` | path | `string` | yes |  |
 | `booked` | query | `"booked" \| "unbooked"` | no | booked: booked here or marked as booked outside; unbooked: the rest. |
-| `platform` | query | `"woocommerce" \| "shopify" \| "zettle"` | no |  |
+| `platform` | query | `"woocommerce" \| "shopify" \| "zettle" \| "kustom"` | no |  |
 | `row_type` | query | `"order" \| "refund"` | no |  |
 | `from` | query | `string` | no | First order date, inclusive. |
 | `to` | query | `string` | no | Last order date, inclusive. |
@@ -4948,7 +5077,7 @@ Response `200`:
 ```ts
 {
   data: {
-    orders: { webshop_order_id: string, platform: "woocommerce" | "shopify" | "zettle", store_scope: string, store_label: string | null, row_type: "order" | "refund", parent_webshop_order_id: string | null, order_number: string, platform_status: string, is_paid: boolean, order_date: string, paid_date: string | null, currency: string, total: number, total_tax: number, total_sek: number | null, exchange_rate: number | null, vat_breakdown: { rate: number, net: number, tax: number }[], customer_country: string | null, customer_name: string | null, customer_company: string | null, payment_method: string | null, payment_method_title: string | null, refunded_total: number, booking_status: "booked" | "marked_booked" | "invoiced" | "in_transactions" | "unpaid" | "to_book", journal_entry_id: string | null, invoice_id: string | null, manually_booked_journal_entry_id: string | null, remote_changed_after_freeze: boolean }[],
+    orders: { webshop_order_id: string, platform: "woocommerce" | "shopify" | "zettle" | "kustom", store_scope: string, store_label: string | null, row_type: "order" | "refund", parent_webshop_order_id: string | null, order_number: string, platform_status: string, is_paid: boolean, order_date: string, paid_date: string | null, currency: string, total: number, total_tax: number, total_sek: number | null, exchange_rate: number | null, vat_breakdown: { rate: number, net: number, tax: number }[], customer_country: string | null, customer_name: string | null, customer_company: string | null, payment_method: string | null, payment_method_title: string | null, refunded_total: number, booking_status: "booked" | "marked_booked" | "invoiced" | "in_transactions" | "unpaid" | "to_book", journal_entry_id: string | null, invoice_id: string | null, manually_booked_journal_entry_id: string | null, remote_changed_after_freeze: boolean }[],
     total: number
   },
   meta: {
@@ -5041,7 +5170,7 @@ Response `200`:
 {
   data: {
     webshop_order_id: string,
-    platform: "woocommerce" | "shopify" | "zettle",
+    platform: "woocommerce" | "shopify" | "zettle" | "kustom",
     store_scope: string,
     store_label: string | null,
     row_type: "order" | "refund",
@@ -5305,7 +5434,7 @@ Posts one verifikat (source_type webshop_order, dated the day) for every unbooke
 Request body:
 ```ts
 {
-  platform: "woocommerce" | "shopify" | "zettle",
+  platform: "woocommerce" | "shopify" | "zettle" | "kustom",
   store_scope: string,
   date: string,
   payment_method: string,
@@ -5384,10 +5513,10 @@ Example response `200`:
 
 ### `GET /api/v1/companies/{companyId}/webshop-orders/oss-underlag`
 
-**Underlag for the OSS declaration (unionsordningen): a quarter's webshop sales to consumers in other EU countries, per country and VAT rate, in euro.**
+**Underlag for the OSS declaration (unionsordningen): a quarter's sales to consumers in other EU countries, per country and VAT rate, in euro.**
 `scope:reports:read · risk:low · idempotent`
 
-Adds up the webshop orders booked on the OSS accounts (VAT code oss, the OSS output VAT account, or accounts a Shopify country rule names for OSS) in a calendar quarter: per destination country and VAT rate the sales without VAT and the VAT, in euro at the ECB rate for the last day of the quarter (the next publication day when the ECB published none) and in kronor as booked. Refunds of an earlier quarter's sales are corrections of that quarter (country, quarter, VAT). unaccounted lists the OSS-account verifikat that book no order (manual vouchers, stornos): they count in ledger_vat_sek but in no row or total, because the ledger does not say their country or VAT rate. warnings names the orders missing from the underlag. Read-only; nothing is filed.
+Adds up what is booked on the OSS accounts (VAT code oss, the OSS output VAT account, accounts a Shopify country rule names for OSS, and 26xx accounts that name an OSS country) in a calendar quarter: per country and VAT rate the sales without VAT and the VAT, in euro at the ECB rate for the last day of the quarter (the next publication day when the ECB published none) and in kronor as booked. A verifikat that books a webshop order takes country and rate from the order. One that books no order takes them from its accounts, when the sales account names a country and a rate (accounts.oss-countries): the VAT follows the sales it is booked with. Refunds of an earlier quarter's orders, and stornos and rättelser of an earlier quarter's verifikat, are corrections of that quarter (country, quarter, VAT). unaccounted lists the verifikat with neither an order nor a country on their accounts: they count in ledger_vat_sek but in no row or total. accounts lists the OSS accounts that name a country, those a verifikat waits for (blocks_vouchers) and what their names suggest. warnings names what is missing or needs a look. Read-only; nothing is filed.
 
 **Use when:** Before filing the quarterly OSS declaration in Skatteverket's e-tjänst, or to check what the OSS accounts hold per country.
 **Do not use for:** The Swedish momsdeklaration (OSS sales are outside it), EU sales taxed in Sweden below the distance-selling threshold, or invoices (they carry Swedish VAT only).
@@ -5396,8 +5525,10 @@ Adds up the webshop orders booked on the OSS accounts (VAT code oss, the OSS out
 - Only booked orders count, in the quarter of the verifikat that books them: book the quarter's orders first (warnings unbooked_orders).
 - Euro amounts are null until the ECB has published the rate for the last day of the quarter (warnings rate_unavailable); the kronor amounts are final.
 - The VAT is declared with two decimals, never rounded. A nil_return quarter still needs a declaration.
-- nil_return is true only when nothing is left outside the underlag: no unaccounted verifikat, no warning about a missing order, no VAT on the OSS accounts. Empty rows with nil_return false is NOT a nil return: a sale booked as a manual voucher has no order to take its country from (warnings vouchers_without_order), so it is declared by hand from the sales records.
+- nil_return is true only when nothing is left outside the underlag: no unaccounted verifikat, no warning about a missing order, no VAT on the OSS accounts. Empty rows with nil_return false is NOT a nil return: a sale booked as a manual voucher on an account that names no country has nothing to take its country from (warnings vouchers_without_order), so the account is given its country or the sale is declared by hand from the sales records.
 - A correction uses the ECB rate of the quarter it corrects, so a full refund takes back exactly what was declared.
+- refund_vouchers are refunds booked as verifikat of their own, placed by their accounts: they are taken off the quarter they are booked in (warnings refund_vouchers_netted). One that belongs to an earlier quarter is declared as a correction of that quarter instead.
+- rate_mismatch on a row (warnings vat_rate_mismatch): the VAT its verifikat book is not the row's rate of their sales. A wrong rate on the account, a wrong VAT amount, or VAT booked on an account that names no OSS country.
 
 | Parameter | In | Type | Required | Notes |
 |---|---|---|---|---|
@@ -5410,12 +5541,14 @@ Response `200`:
 {
   data: {
     period: { year: number, quarter: number, label: string, start: string, end: string, deadline: string },
-    rows: { country: string, vat_rate: number, net_eur: number | null, vat_eur: number | null, net_sek: number, vat_sek: number, order_count: number }[],
-    corrections: { country: string, period: { year: number, quarter: number, label: string }, vat_eur: number | null, vat_sek: number, refund_count: number }[],
+    rows: { country: string, vat_rate: number, net_eur: number | null, vat_eur: number | null, net_sek: number, vat_sek: number, order_count: number, voucher_count: number, rate_mismatch: boolean }[],
+    corrections: { country: string, period: { year: number, quarter: number, label: string }, vat_eur: number | null, vat_sek: number, refund_count: number, voucher_count: number }[],
     totals: { net_eur: number | null, vat_eur: number | null, corrections_vat_eur: number | null, net_sek: number, vat_sek: number, corrections_vat_sek: number },
     rates: { currency: string, for_date: string, rate: number | null, rate_date: string | null, unavailable: boolean }[],
     ledger_vat_sek: number,
     unaccounted: { journal_entry_id: string, voucher_series: string | null, voucher_number: number, entry_date: string, description: string, net_sek: number, vat_sek: number }[],
+    refund_vouchers: { journal_entry_id: string, voucher_series: string | null, voucher_number: number, entry_date: string, description: string, net_sek: number, vat_sek: number }[],
+    accounts: { account_number: string, account_name: string, kind: "sales" | "vat", country: string | null, vat_rate: number | null, suggested_country: string | null, suggested_vat_rate: number | null, blocks_vouchers: boolean }[],
     warnings: { code: string, message_sv: string, message_en: string, order_numbers: string[] }[],
     nil_return: boolean
   },
@@ -5451,7 +5584,9 @@ Example response `200`:
         "vat_eur": 16.77,
         "net_sek": 1000,
         "vat_sek": 190,
-        "order_count": 1
+        "order_count": 1,
+        "voucher_count": 0,
+        "rate_mismatch": false
       }
     ],
     "corrections": [],
@@ -5474,6 +5609,8 @@ Example response `200`:
     ],
     "ledger_vat_sek": 190,
     "unaccounted": [],
+    "refund_vouchers": [],
+    "accounts": [],
     "warnings": [],
     "nil_return": false
   },

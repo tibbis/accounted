@@ -16,7 +16,7 @@ import type { TicCallContext } from '@/lib/tic-budget/budget'
  * The company profile behind the extension's `fetchCompanyProfile` service:
  * the Lens search document plus six detail calls (documents, fiscal years,
  * payrolls, representatives, status, beneficial owners), folded into the
- * shape the agent onboarding snapshot reads.
+ * shape the company snapshot (lib/agent/composer/tic-fetch) reads.
  *
  * Null when TIC has no company under the org number. Throws what the TIC
  * client throws (not configured, quota, timeout, upstream errors); the
@@ -262,6 +262,19 @@ export async function buildCompanyProfile(
           })
       : []
 
+  // The profile keys each failed detail call left empty (see
+  // TICCompanyProfile.incompleteSections).
+  const incompleteSections = (
+    [
+      [documentsResult, ['financialReports', 'financialReportsComplete']],
+      [fiscalYearResult, ['fiscalYear', 'fiscalYearHistory']],
+      [payrollsResult, ['payrolls']],
+      [representativesResult, ['board', 'representatives']],
+      [statusResult, ['statuses']],
+      [beneficialOwnersResult, ['beneficialOwners']],
+    ] as const
+  ).flatMap(([result, keys]) => (result.status === 'rejected' ? [...keys] : []))
+
   // Log Phase 2 failures
   if (documentsResult.status === 'rejected') {
     log.warn('[tic] profile: documents fetch failed', { orgNumber: cleanedOrgNumber, companyId, reason: String(documentsResult.reason) })
@@ -382,6 +395,7 @@ export async function buildCompanyProfile(
     representatives,
     payrolls,
     statuses,
+    incompleteSections,
     fetchedAt: new Date().toISOString(),
   }
 

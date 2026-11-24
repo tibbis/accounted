@@ -183,6 +183,10 @@ export default function SupplierInvoicesPage() {
   // The last read failed. With no rows on screen the list says so in place
   // of them; rows already on screen stay, with one line above them.
   const [loadFailed, setLoadFailed] = useState(false)
+  // The open invoices are on screen and the settled history is still on its
+  // way (fetchInvoices): Betalda waits for it, Alla says it is coming.
+  const [historyPending, setHistoryPending] = useState(false)
+  const loadSeq = useRef(0)
   // ?tab= opens a status tab directly: the Att göra row and the byrå client
   // list link to Att betala (to_pay) and the attest queue (registered).
   const [activeTab, setActiveTab] = useState<ListTab>(() => {
@@ -263,23 +267,55 @@ export default function SupplierInvoicesPage() {
   const openNewInvoice = () => router.push('/supplier-invoices?new=1', { scroll: false })
 
   async function fetchInvoices() {
+    const seq = ++loadSeq.current
+    const isCurrent = () => seq === loadSeq.current
     // Skeleton takeover only while nothing is on screen: refetches after an
     // action (register, betalfil, approve fallback) reconcile BEHIND the
     // rendered table instead of collapsing it to 4 skeleton stubs and
     // replaying the entrance animation.
-    if (invoices.length === 0) setIsLoading(true)
-    try {
-      const res = await fetch('/api/supplier-invoices?status=all')
+    const firstLoad = invoices.length === 0
+    if (firstLoad) setIsLoading(true)
+    const readList = async (status: 'unsettled' | 'all') => {
+      const res = await fetch(`/api/supplier-invoices?status=${status}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const { data } = await res.json()
-      setInvoices(data || [])
+      return (data || []) as ListInvoice[]
+    }
+    // A register of thousands of paid invoices took seconds to read before
+    // anything showed. The open invoices (every tab but Betalda, and every
+    // count) are read beside it and paint first; the whole register replaces
+    // them when it lands. Only on a first load, and only with rows to show:
+    // an empty first answer must never read as "Inga fakturor".
+    let wholeLanded = false
+    const whole = readList('all')
+    if (firstLoad) {
+      readList('unsettled')
+        .then((open) => {
+          if (!isCurrent() || wholeLanded || open.length === 0) return
+          setInvoices(open)
+          setHistoryPending(true)
+          setLoadFailed(false)
+          setIsLoading(false)
+        })
+        .catch(() => {
+          // The whole register below decides what the page shows.
+        })
+    }
+    try {
+      const data = await whole
+      wholeLanded = true
+      if (!isCurrent()) return
+      setInvoices(data)
       setLoadFailed(false)
     } catch {
       // Without this, a failed fetch either stuck the skeleton forever or
       // silently rendered the empty state as if the invoices were gone.
-      setLoadFailed(true)
+      if (isCurrent()) setLoadFailed(true)
     } finally {
-      setIsLoading(false)
+      if (isCurrent()) {
+        setHistoryPending(false)
+        setIsLoading(false)
+      }
     }
   }
 
@@ -702,7 +738,7 @@ export default function SupplierInvoicesPage() {
         </AttnLine>
       )}
 
-      {isLoading ? (
+      {isLoading || (historyPending && activeTab === 'paid') ? (
         <LateReveal>
           {[1, 2, 3, 4, 5, 6].map((i) => (
             <div key={i} className="flex h-11 items-center gap-8 border-b-hairline">
@@ -749,7 +785,10 @@ export default function SupplierInvoicesPage() {
            short Kvar header; fakturadatum lives in the detail view. The
            trailing column is one slot for the row's next step: Godkänn while
            attest is pending, the I banken bock (#2220) once attested; it is
-           sized for the bock plus its label, the wider of the two. */
+           sized for the bock plus its label, the wider of the two. On a phone
+           (below sm) the row is Leverantör, Förfaller, Belopp and that slot,
+           sized to what it holds: Fakturanr and Status are in the detail view
+           the row opens. */
         <div className="-mx-2 overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
@@ -763,12 +802,13 @@ export default function SupplierInvoicesPage() {
                 />
                 <SortableTh
                   label={t('th_invoice_number')}
+                  className="hidden sm:table-cell"
                   direction={sort?.column === 'number' ? sort.direction : null}
                   onSort={() => updateSort('number')}
                 />
                 <SortableTh
                   label={t('th_due_date')}
-                  className="hidden text-right sm:table-cell"
+                  className="text-right"
                   align="right"
                   direction={sort?.column === 'due' ? sort.direction : null}
                   onSort={() => updateSort('due')}
@@ -789,10 +829,11 @@ export default function SupplierInvoicesPage() {
                 />
                 <SortableTh
                   label={t('th_status')}
+                  className="hidden sm:table-cell"
                   direction={sort?.column === 'status' ? sort.direction : null}
                   onSort={() => updateSort('status')}
                 />
-                <th className={cn(TH_CLASS, 'w-[108px]')} aria-hidden="true"></th>
+                <th className={cn(TH_CLASS, 'sm:w-[108px]')} aria-hidden="true"></th>
               </tr>
             </thead>
             <tbody className="stagger-enter">
@@ -891,7 +932,7 @@ export default function SupplierInvoicesPage() {
                         )}
                       </span>
                     </td>
-                    <td className={cn(TD_CLASS, 'whitespace-nowrap tabular-nums')}>
+                    <td className={cn(TD_CLASS, 'hidden whitespace-nowrap tabular-nums sm:table-cell')}>
                       <IntentLink
                         href={`/supplier-invoices/${inv.id}`}
                         className="hover:underline"
@@ -911,7 +952,7 @@ export default function SupplierInvoicesPage() {
                         </Badge>
                       )}
                     </td>
-                    <td className={cn(TD_CLASS, 'hidden whitespace-nowrap text-right date-figures text-muted-foreground sm:table-cell')}>
+                    <td className={cn(TD_CLASS, 'whitespace-nowrap text-right date-figures text-muted-foreground')}>
                       {formatDate(inv.due_date)}
                     </td>
                     {/* Belopp rounds like the detail page when the invoice's
@@ -927,7 +968,7 @@ export default function SupplierInvoicesPage() {
                     <td className={cn(TD_CLASS, 'hidden whitespace-nowrap text-right tabular-nums rr-mask lg:table-cell')}>
                       {formatRowAmount(inv.remaining_amount, inv.currency)}
                     </td>
-                    <td className={cn(TD_CLASS, 'whitespace-nowrap date-figures')}>
+                    <td className={cn(TD_CLASS, 'hidden whitespace-nowrap date-figures sm:table-cell')}>
                       <span className="inline-flex items-center gap-1">
                         {chipVariant ? (
                           <Badge variant={chipVariant} className="font-normal">
@@ -999,6 +1040,10 @@ export default function SupplierInvoicesPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {!isLoading && historyPending && activeTab === 'all' && (
+        <p className="py-3 text-[13px] text-muted-foreground">{t('history_loading')}</p>
       )}
 
       {!isLoading && (

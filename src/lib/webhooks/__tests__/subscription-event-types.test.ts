@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import {
   WebhookEventTypeListSchema,
-  payrollEventTypesIn,
   refineWebhookEventTypeFields,
   resolveWebhookEventTypes,
 } from '../subscription-event-types'
@@ -46,13 +45,16 @@ describe('WebhookEventTypeListSchema', () => {
     expect(WebhookEventTypeListSchema.safeParse(['journal_entry.drafted']).success).toBe(false)
     expect(WebhookEventTypeListSchema.safeParse([]).success).toBe(false)
   })
-})
 
-describe('payrollEventTypesIn', () => {
-  it('picks the salary_run.* and agi.* types', () => {
-    expect(payrollEventTypesIn(['invoice.paid', 'salary_run.booked', 'agi.generated'])).toEqual([
-      'salary_run.booked',
-      'agi.generated',
-    ])
+  it('accepts the five question list types', () => {
+    expect(
+      WebhookEventTypeListSchema.safeParse([
+        'company_question.filed',
+        'company_question.answered',
+        'company_question.closed',
+        'company_question.reopened',
+        'company_question.prepared',
+      ]).success,
+    ).toBe(true)
   })
 })
