@@ -215,8 +215,8 @@ jobs:
   # (Hobby OOMs on Vercel's build machine) and deploys --prebuilt. Secrets:
   # VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID, VERCEL_ENV_PRODUCTION.
   # Crons and maxDuration>300 are Hobby-illegal, so this job strips them
-  # before upload. Extensions are slimmed to the live set so the 7GB runner
-  # can finish the Next 16 build.
+  # before upload. Extensions are slimmed to the live set. The standard
+  # runner has 16 GB; typecheck of this app exceeds a 6 GB Node heap.
   deploy-vercel:
     name: Deploy Vercel
     if: github.repository == 'tibbis/accounted' && github.ref == 'refs/heads/main'
@@ -273,7 +273,7 @@ jobs:
           )
           vercel = json.loads(Path('vercel.json').read_text())
           vercel['crons'] = []
-          vercel['buildCommand'] = 'NODE_OPTIONS=--max-old-space-size=6144 npm run build'
+          vercel['buildCommand'] = 'NODE_OPTIONS=--max-old-space-size=12288 npm run build'
           Path('vercel.json').write_text(json.dumps(vercel, indent=2) + '\n')
           # Hobby caps Serverless Functions at 12. Prefer a static robots.txt
           # over app/robots.ts (saves a .func) and drop unused community cron
@@ -305,7 +305,7 @@ jobs:
           fi
 
       - name: Build (prebuilt)
-        run: NODE_OPTIONS=--max-old-space-size=6144 vercel build --prod --token="$VERCEL_TOKEN"
+        run: NODE_OPTIONS=--max-old-space-size=12288 vercel build --prod --token="$VERCEL_TOKEN"
 
       - name: Cap function maxDuration + enforce Hobby function budget
         run: |
