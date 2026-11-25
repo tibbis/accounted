@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 30
     environment: production
     env:
-      SUPABASE_PROJECT_REF: pwxtzglxptnnvjrpixpg
+      SUPABASE_PROJECT_REF: kvwhmzvrpbwkzcrtgepy
       SUPABASE_CLI: supabase@2.119.0
     steps:
       - name: Require the environment secrets
